@@ -1,0 +1,102 @@
+{
+  "name": "@nanoflags/openfeature-provider",
+  "version": "0.1.0",
+  "description": "OpenFeature provider for NanoFlags (JavaScript server and web SDKs): local, synchronous evaluation through @nanoflags/sdk.",
+  "keywords": [
+    "openfeature",
+    "openfeature-provider",
+    "feature-flags",
+    "feature-toggles",
+    "nanoflags"
+  ],
+  "license": "Apache-2.0",
+  "homepage": "https://nanoflags.io/docs",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/motazalmaroai/nanoflags-sdk.git",
+    "directory": "packages/openfeature"
+  },
+  "bugs": {
+    "url": "https://github.com/motazalmaroai/nanoflags-sdk/issues"
+  },
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.cts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./server": {
+      "import": {
+        "types": "./dist/server.d.ts",
+        "default": "./dist/server.js"
+      },
+      "require": {
+        "types": "./dist/server.d.cts",
+        "default": "./dist/server.cjs"
+      }
+    },
+    "./web": {
+      "import": {
+        "types": "./dist/web.d.ts",
+        "default": "./dist/web.js"
+      },
+      "require": {
+        "types": "./dist/web.d.cts",
+        "default": "./dist/web.cjs"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsdown",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "pnpm run build && pnpm run typecheck && pnpm run test"
+  },
+  "peerDependencies": {
+    "@nanoflags/sdk": "workspace:^",
+    "@openfeature/core": "^1.12.0",
+    "@openfeature/server-sdk": "^1.17.0",
+    "@openfeature/web-sdk": "^1.4.0"
+  },
+  "peerDependenciesMeta": {
+    "@openfeature/server-sdk": {
+      "optional": true
+    },
+    "@openfeature/web-sdk": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@nanoflags/sdk": "workspace:*",
+    "@openfeature/core": "^1.12.0",
+    "@openfeature/server-sdk": "^1.23.0",
+    "@openfeature/web-sdk": "^1.10.0",
+    "tsdown": "^0.23.7",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.12"
+  },
+  "author": "Alibtekarat Althkiya Company for Trading & Marketing (Intinovate) <support@nanoflags.io>"
+}

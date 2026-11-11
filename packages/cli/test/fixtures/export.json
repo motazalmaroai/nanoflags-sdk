@@ -1,0 +1,39 @@
+{
+  "project": { "key": "commerce", "name": "Commerce" },
+  "key_environment": "staging",
+  "environments": [
+    { "key": "staging", "name": "Staging", "published_revision": 4, "require_approval": false, "require_scenarios": false },
+    { "key": "production", "name": "Production", "published_revision": 7, "require_approval": true, "require_scenarios": true }
+  ],
+  "flags": [
+    { "key": "checkout-v2", "name": "Checkout v2", "type": "boolean", "purpose": "release", "permanent": false, "client_exposed": false, "description": "", "review_date": null, "archived": false },
+    { "key": "kill-switch", "name": "Payments kill switch", "type": "boolean", "purpose": "ops", "permanent": true, "client_exposed": false, "description": "", "review_date": null, "archived": false },
+    { "key": "layout", "name": "Layout", "type": "json", "purpose": "config", "permanent": false, "client_exposed": true, "description": "", "review_date": null, "archived": false },
+    { "key": "max-items", "name": "Max items", "type": "number", "purpose": "config", "permanent": false, "client_exposed": false, "description": "", "review_date": null, "archived": false },
+    { "key": "old-banner", "name": "Old banner", "type": "boolean", "purpose": "release", "permanent": false, "client_exposed": false, "description": "", "review_date": null, "archived": true },
+    { "key": "search-ranking", "name": "Search ranking", "type": "string", "purpose": "experiment", "permanent": false, "client_exposed": true, "description": "", "review_date": null, "archived": false }
+  ],
+  "segments": [{ "key": "staff", "name": "Staff", "match": "all", "conditions": [{ "attribute": "email", "op": "ends_with", "value": "@nanoflags.dev" }] }],
+  "drafts": {
+    "staging": {
+      "flags": {
+        "checkout-v2": {
+          "type": "boolean", "enabled": true, "default": false, "off": false, "clientExposed": false,
+          "rules": [
+            { "id": "staff", "match": "all", "conditions": [{ "attribute": "", "op": "segment", "value": "staff" }], "serve": { "type": "fixed", "value": true } },
+            { "id": "r1", "match": "all", "conditions": [{ "attribute": "signedIn", "op": "eq", "value": true }], "serve": { "type": "rollout", "percentage": 100, "value": true, "otherwise": false } }
+          ]
+        },
+        "kill-switch": { "type": "boolean", "enabled": false, "default": true, "off": false, "rules": [], "clientExposed": false },
+        "layout": { "type": "json", "enabled": true, "default": { "columns": 3 }, "off": null, "rules": [], "clientExposed": true },
+        "max-items": { "type": "number", "enabled": true, "default": 20, "off": 0, "rules": [], "clientExposed": false },
+        "search-ranking": { "type": "string", "enabled": true, "default": "relevance-v2", "off": "off", "rules": [], "clientExposed": true }
+      },
+      "segments": { "staff": { "match": "all", "conditions": [{ "attribute": "email", "op": "ends_with", "value": "@nanoflags.dev" }] } }
+    },
+    "production": {
+      "flags": { "checkout-v2": { "type": "boolean", "enabled": false, "default": false, "off": false, "rules": [], "clientExposed": false } },
+      "segments": {}
+    }
+  }
+}

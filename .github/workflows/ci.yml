@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      # The build tools (tsdown, tsup) need Node >= 22.18, so install and build always run on Node 22.
+      # Type-checking, the tests and a load check of the built packages then run on the matrix version.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm -r --if-present build
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - run: node --version
+
+      - name: Typecheck
+        run: pnpm -r --if-present typecheck
+
+      - name: Test
+        run: pnpm -r --if-present test
+
+      - name: Load the built packages
+        run: |
+          node -e "const s = require('./packages/sdk/dist/index.cjs'); if (typeof s.createClient !== 'function') process.exit(1)"
+          node --input-type=module -e "const s = await import('./packages/sdk/dist/index.js'); const p = await import('./packages/openfeature/dist/index.js'); if (typeof s.createClient !== 'function' || !p) process.exit(1)"
+          node packages/cli/dist/bin.js --help > /dev/null

@@ -1,0 +1,56 @@
+name: NanoFlags scenarios
+description: Run the NanoFlags scenario checks for a commit, optionally upload flag code references, and fail the job when a scenario fails.
+author: NanoFlags
+branding:
+  icon: flag
+  color: gray-dark
+
+inputs:
+  key:
+    description: >-
+      NanoFlags CI key (nf_ci_…). Pass it from a secret. A CI key can run scenarios and upload code
+      references; it cannot publish. Do not use an admin key here.
+    required: true
+  base-url:
+    description: Base URL of the NanoFlags edge. Empty uses the CLI default.
+    required: false
+    default: ""
+  source:
+    description: Which configuration the scenarios run against - "draft" (default) or "revision" (the published revision).
+    required: false
+    default: draft
+  scan-refs:
+    description: When "true", also scan the repository for flag references and upload them (replaces this repository's earlier references).
+    required: false
+    default: "false"
+  refs-dir:
+    description: Directory to scan when scan-refs is "true".
+    required: false
+    default: "."
+  cli:
+    description: >-
+      Command that runs the NanoFlags CLI. Default: npx @nanoflags/cli (published to npm from
+      motazalmaroai/nanoflags-sdk). Pin a version with e.g. "npx --yes @nanoflags/cli@0.1.0".
+    required: false
+    default: npx --yes @nanoflags/cli@0
+
+outputs:
+  result:
+    description: '"passed" or "failed" (scenarios), or "error" when the checks could not run.'
+    value: ${{ steps.run.outputs.result }}
+
+runs:
+  using: composite
+  steps:
+    - id: run
+      shell: bash
+      # Inputs reach the script only through the environment: nothing is interpolated into the shell source.
+      env:
+        NANOFLAGS_KEY: ${{ inputs.key }}
+        NANOFLAGS_BASE_URL: ${{ inputs.base-url }}
+        NANOFLAGS_SOURCE: ${{ inputs.source }}
+        NANOFLAGS_SCAN_REFS: ${{ inputs.scan-refs }}
+        NANOFLAGS_REFS_DIR: ${{ inputs.refs-dir }}
+        NANOFLAGS_CLI: ${{ inputs.cli }}
+        NANOFLAGS_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      run: bash "$GITHUB_ACTION_PATH/run.sh"

@@ -1,0 +1,156 @@
+name: Release
+
+# Publishes one npm package per run, with npm provenance:
+#   tag sdk-v<version>          -> @nanoflags/sdk                  (packages/sdk)
+#   tag openfeature-v<version>  -> @nanoflags/openfeature-provider (packages/openfeature)
+#   tag cli-v<version>          -> @nanoflags/cli                  (packages/cli)
+#   workflow_dispatch (input `package`: sdk | openfeature | cli) -> the version currently in that package.json
+# A tag's version must equal the package.json version. A version that is already on npm is skipped with a notice.
+# Publish the SDK before a provider release that needs a new SDK version (the provider's peer range on
+# @nanoflags/sdk is written from the workspace version by `pnpm pack`).
+# @nanoflags/engine is private: it is bundled into the SDK and the CLI and never published.
+# Requires the repository secret NPM_TOKEN.
+
+on:
+  push:
+    tags:
+      - "sdk-v*"
+      - "openfeature-v*"
+      - "cli-v*"
+  workflow_dispatch:
+    inputs:
+      package:
+        description: Package to publish (the version in its package.json)
+        required: true
+        type: choice
+        options:
+          - sdk
+          - openfeature
+          - cli
+
+permissions:
+  contents: read
+  id-token: write # npm provenance
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.package || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve package
+        id: pkg
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_PACKAGE: ${{ inputs.package }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            short="$INPUT_PACKAGE"
+            tag_version=""
+          else
+            case "$REF_NAME" in
+              sdk-v*)         short=sdk;         tag_version="${REF_NAME#sdk-v}" ;;
+              openfeature-v*) short=openfeature; tag_version="${REF_NAME#openfeature-v}" ;;
+              cli-v*)         short=cli;         tag_version="${REF_NAME#cli-v}" ;;
+              *) echo "::error::Unknown tag $REF_NAME"; exit 1 ;;
+            esac
+          fi
+          case "$short" in
+            sdk)         dir=packages/sdk;         name=@nanoflags/sdk ;;
+            openfeature) dir=packages/openfeature; name=@nanoflags/openfeature-provider ;;
+            cli)         dir=packages/cli;         name=@nanoflags/cli ;;
+            *) echo "::error::Unknown package '$short' (expected sdk, openfeature or cli)"; exit 1 ;;
+          esac
+          version=$(node -p "require('./$dir/package.json').version")
+          actual_name=$(node -p "require('./$dir/package.json').name")
+          if [ "$actual_name" != "$name" ]; then
+            echo "::error::$dir/package.json is named $actual_name, expected $name"; exit 1
+          fi
+          if [ -n "$tag_version" ] && [ "$tag_version" != "$version" ]; then
+            echo "::error::Tag $REF_NAME says $tag_version but $dir/package.json has $version"; exit 1
+          fi
+          # Pre-release versions (1.2.0-rc.1) go to the "next" dist-tag.
+          case "$version" in *-*) dist_tag=next ;; *) dist_tag=latest ;; esac
+          {
+            echo "dir=$dir"
+            echo "name=$name"
+            echo "version=$version"
+            echo "dist_tag=$dist_tag"
+          } >> "$GITHUB_OUTPUT"
+          echo "Releasing $name@$version from $dir (dist-tag $dist_tag)"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Check whether the version is already on npm
+        id: npm
+        env:
+          NAME: ${{ steps.pkg.outputs.name }}
+          VERSION: ${{ steps.pkg.outputs.version }}
+        run: |
+          set +e
+          out=$(npm view "$NAME@$VERSION" version 2>"$RUNNER_TEMP/npm-view.err")
+          rc=$?
+          err=$(cat "$RUNNER_TEMP/npm-view.err")
+          set -e
+          if [ $rc -eq 0 ] && [ "$out" = "$VERSION" ]; then
+            echo "::notice title=Release skipped::$NAME@$VERSION is already published on npm. Bump the version in package.json to release."
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          elif [ $rc -eq 0 ] || echo "$err" | grep -q "E404"; then
+            echo "$NAME@$VERSION is not on npm yet."
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "$err"
+            echo "::error::Could not query the npm registry for $NAME@$VERSION"
+            exit 1
+          fi
+
+      - uses: pnpm/action-setup@v4
+        if: steps.npm.outputs.published == 'false'
+
+      - name: Install
+        if: steps.npm.outputs.published == 'false'
+        run: pnpm install --frozen-lockfile
+
+      # Build, type-check and test the package and everything it is built from (engine, SDK).
+      - name: Build
+        if: steps.npm.outputs.published == 'false'
+        run: pnpm --filter "${{ steps.pkg.outputs.name }}..." --if-present run build
+      - name: Typecheck
+        if: steps.npm.outputs.published == 'false'
+        run: pnpm --filter "${{ steps.pkg.outputs.name }}..." --if-present run typecheck
+      - name: Test
+        if: steps.npm.outputs.published == 'false'
+        run: pnpm --filter "${{ steps.pkg.outputs.name }}..." --if-present run test
+
+      # `pnpm pack` rewrites `workspace:` ranges to real versions; npm publishes the tarball.
+      - name: Pack
+        id: pack
+        if: steps.npm.outputs.published == 'false'
+        env:
+          DIR: ${{ steps.pkg.outputs.dir }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/pack"
+          (cd "$DIR" && pnpm pack --pack-destination "$RUNNER_TEMP/pack")
+          tarball=$(ls "$RUNNER_TEMP"/pack/*.tgz)
+          if tar -xzOf "$tarball" package/package.json | grep -q '"workspace:'; then
+            echo "::error::workspace: protocol left in the packed manifest"; exit 1
+          fi
+          tar -tzf "$tarball"
+          echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
+
+      - name: Publish
+        if: steps.npm.outputs.published == 'false'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          TARBALL: ${{ steps.pack.outputs.tarball }}
+          DIST_TAG: ${{ steps.pkg.outputs.dist_tag }}
+        run: npm publish "$TARBALL" --provenance --access public --tag "$DIST_TAG"

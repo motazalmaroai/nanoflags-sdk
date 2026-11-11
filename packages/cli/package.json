@@ -1,0 +1,59 @@
+{
+  "name": "@nanoflags/cli",
+  "version": "0.1.0",
+  "description": "NanoFlags command line: export, local evaluation, CI scenario checks, publishing, code references and flag cleanup.",
+  "keywords": [
+    "nanoflags",
+    "feature-flags",
+    "cli",
+    "ci",
+    "scenarios",
+    "codemod",
+    "flag-cleanup"
+  ],
+  "license": "Apache-2.0",
+  "homepage": "https://nanoflags.io/docs",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/motazalmaroai/nanoflags-sdk.git",
+    "directory": "packages/cli"
+  },
+  "bugs": {
+    "url": "https://github.com/motazalmaroai/nanoflags-sdk/issues"
+  },
+  "type": "module",
+  "bin": {
+    "nanoflags": "./dist/bin.js"
+  },
+  "exports": {
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "pnpm run build && pnpm run typecheck && pnpm run test && node dist/bin.js --help > /dev/null"
+  },
+  "dependencies": {
+    "typescript": "~5.9.3"
+  },
+  "devDependencies": {
+    "@nanoflags/engine": "workspace:*",
+    "@types/node": "^22.20.5",
+    "tsup": "^9.0.0",
+    "vitest": "^4.1.12"
+  },
+  "author": "Alibtekarat Althkiya Company for Trading & Marketing (Intinovate) <support@nanoflags.io>"
+}

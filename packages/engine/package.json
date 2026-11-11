@@ -1,0 +1,22 @@
+{
+  "name": "@nanoflags/engine",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "latest",
+    "vitest": "latest",
+    "fast-check": "latest"
+  },
+  "license": "Apache-2.0",
+  "author": "Alibtekarat Althkiya Company for Trading & Marketing (Intinovate) <support@nanoflags.io>"
+}

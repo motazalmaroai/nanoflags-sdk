@@ -1,0 +1,14 @@
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+*.tgz
+.DS_Store
+.env
+.env.*
+.dev.vars
+.secrets/
+.vscode/
+.idea/
+npm-debug.log*
+pnpm-debug.log*

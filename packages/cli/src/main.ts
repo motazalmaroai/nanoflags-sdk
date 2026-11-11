@@ -7,7 +7,7 @@ import type { Json, SiteReport } from "./cleanup.js";
 import type { CodeRef } from "./refs.js";
 import { CliError, DEFAULT_MAX_FILE_BYTES, EXIT, clip, show, table, unifiedDiff, walk } from "./util.js";
 
-export const VERSION = "0.1.0";
+export const VERSION = "0.2.0";
 
 export interface Io {
   env: Record<string, string | undefined>;
@@ -24,6 +24,8 @@ Usage: nanoflags <command> [options]
 Commands
   export [--out <file>]                         Download flags, segments and drafts as JSON
   flags list [--json]                           List the project's flags
+  flags create <key> --type boolean|string|number|json [--default <json>] [--description <text>] [--name <text>] [--json]
+                                                Create a flag in the key's project (admin key); nothing is published
   eval <flag> [--context <json>] [--source draft|published] [--fallback <json>] [--json]
                                                 Evaluate one flag locally and print value, reason and trace
   scenarios run [--source draft|revision] [--commit <sha>] [--run-url <url>] [--json]
@@ -59,6 +61,10 @@ const OPTIONS = {
   "run-url": { type: "string" },
   json: { type: "boolean" },
   "expected-revision": { type: "string" },
+  type: { type: "string" },
+  default: { type: "string" },
+  description: { type: "string" },
+  name: { type: "string" },
   note: { type: "string" },
   repo: { type: "string" },
   "dry-run": { type: "boolean" },
@@ -166,6 +172,69 @@ async function cmdFlagsList(r: Run): Promise<number> {
   r.io.out(`${data.project.key} · ${data.flags.length} flags · state shown for ${data.key_environment} (draft)\n\n`);
   r.io.out(`${table(["KEY", "TYPE", "PURPOSE", "LIFETIME", "CLIENT", "STATE"], rows)}\n`);
   return EXIT.ok;
+}
+
+/* ---------------- flags create ---------------- */
+
+const FLAG_KEY = /^[a-z0-9][a-z0-9_-]{0,62}$/;
+const FLAG_TYPES = ["boolean", "string", "number", "json"] as const;
+type FlagType = (typeof FLAG_TYPES)[number];
+
+/** `--default` as a JSON value. For string flags a bare word is accepted as the string itself (`--default blue`). */
+export function parseDefault(type: FlagType, raw: string | undefined): JsonValue {
+  if (raw === undefined) {
+    if (type === "boolean") return false;
+    throw usage(`flags create needs --default for a ${type} flag: the value every environment's draft starts with (JSON, e.g. ${type === "string" ? "'\"blue\"'" : type === "number" ? "0" : "'{}'"}).`);
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    if (type !== "string") throw usage(`--default must be valid JSON for a ${type} flag, got: ${clip(raw, 80)}`);
+    value = raw;
+  }
+  const ok = type === "boolean" ? typeof value === "boolean" : type === "string" ? typeof value === "string" : type === "number" ? typeof value === "number" && Number.isFinite(value) : true;
+  if (!ok) throw usage(`--default must be a ${type} value for a ${type} flag, got: ${clip(raw, 80)}`);
+  return value as JsonValue;
+}
+
+const CREATE_HELP: Record<string, string> = {
+  CONFLICT: "Choose another key, or use the existing flag (`nanoflags flags list`).",
+  INVALID_VALUE: "The default does not match the flag type.",
+  INVALID: "Check the key, name and description.",
+};
+
+async function cmdFlagsCreate(r: Run): Promise<number> {
+  const flagKey = r.args[0];
+  if (!flagKey || r.args.length > 1) throw usage("Usage: nanoflags flags create <key> --type boolean|string|number|json [--default <json>] [--description <text>] [--name <text>]");
+  if (!FLAG_KEY.test(flagKey)) throw usage(`The flag key must start with a lowercase letter or digit and use only lowercase letters, digits, hyphens and underscores (max 63), got "${clip(flagKey, 80)}".`);
+  const type = r.values.type ?? "boolean";
+  if (!(FLAG_TYPES as readonly string[]).includes(type)) throw usage(`--type must be one of ${FLAG_TYPES.join(", ")}, got "${type}".`);
+  const value = parseDefault(type as FlagType, r.values.default);
+  const description = r.values.description ?? "";
+  if (description.length > 2000) throw usage("--description is limited to 2000 characters.");
+  const name = r.values.name;
+  if (name !== undefined && (name.trim() === "" || name.length > 120)) throw usage("--name must be 1–120 characters.");
+  const k = key(r);
+  const kind = keyKind(k);
+  if (kind !== "admin" && kind !== "unknown") throw usage(`flags create needs an admin key; this is a ${kind} key.`);
+  try {
+    const res = await api(r).createFlag({ key: flagKey, type: type as FlagType, default: value, description, ...(name !== undefined ? { name: name.trim() } : {}) });
+    if (r.values.json) r.io.out(`${JSON.stringify(res, null, 2)}\n`);
+    else {
+      r.io.out(`Created ${res.key} (${res.type}, default ${JSON.stringify(res.default ?? value)}).\n`);
+      r.io.out(`Every environment's draft now has it${Array.isArray(res.environments) && res.environments.length ? ` (${res.environments.join(", ")})` : ""}. Nothing was published.\n`);
+    }
+    return EXIT.ok;
+  } catch (e) {
+    const err = e as { code?: string; message?: string };
+    const help = e instanceof ApiError && typeof err.code === "string" ? CREATE_HELP[err.code] : undefined;
+    if (help) {
+      r.io.err(`Flag not created: ${err.message ?? err.code} [${err.code}]\n${help}\n`);
+      return EXIT.failed;
+    }
+    throw explain(e, k, "create flags");
+  }
 }
 
 /* ---------------- eval ---------------- */
@@ -482,6 +551,7 @@ export async function main(argv: string[], io: Io): Promise<number> {
   try {
     if (command === "export") return await cmdExport(run(1));
     if (command === "flags" && sub === "list") return await cmdFlagsList(run(2));
+    if (command === "flags" && sub === "create") return await cmdFlagsCreate(run(2));
     if (command === "eval") return await cmdEval(run(1));
     if (command === "scenarios" && sub === "run") return await cmdScenariosRun(run(2));
     if (command === "publish") return await cmdPublish(run(1));

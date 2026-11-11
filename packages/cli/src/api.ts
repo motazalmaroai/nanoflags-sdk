@@ -53,6 +53,15 @@ export interface ScenarioRun {
   results: ScenarioResult[];
 }
 
+export interface CreatedFlag {
+  id: string;
+  key: string;
+  name?: string;
+  type: string;
+  default?: unknown;
+  environments?: string[];
+}
+
 export function isExport(v: unknown): v is ExportData {
   if (typeof v !== "object" || v === null) return false;
   const e = v as Record<string, unknown>;
@@ -118,6 +127,10 @@ export class Api {
   }
   publish(body: { expectedRevision: number; note?: string }): Promise<{ revision: number; checksum: string }> {
     return this.call("POST", "/v1/admin/publish", body);
+  }
+  /** Creates a flag in the key's project (admin key). Every environment's draft starts with `default`. */
+  createFlag(body: { key: string; type: "boolean" | "string" | "number" | "json"; default: unknown; description?: string; name?: string }): Promise<CreatedFlag> {
+    return this.call<CreatedFlag>("POST", "/v1/admin/flags", body);
   }
   putCodeRefs(body: { repo: string; commit: string | null; refs: Array<{ flag: string; path: string; line: number; snippet: string }> }): Promise<{ stored: number }> {
     return this.call("PUT", "/v1/ci/code-refs", body);

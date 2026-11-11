@@ -1,6 +1,6 @@
 # @nanoflags/cli
 
-Command line for NanoFlags: export a project, evaluate flags locally, run scenario checks in CI,
+Command line for NanoFlags: export a project, create flags, evaluate flags locally, run scenario checks in CI,
 publish, upload flag code references, and remove resolved flags from code.
 
 ```sh
@@ -19,7 +19,7 @@ workflow (`.github/workflows/release.yml`, tag `cli-v<version>`).
 
 | | |
 | --- | --- |
-| `NANOFLAGS_KEY` / `--key` | A **CI key** (`nf_ci_…`: export, scenarios, code references) or an **admin key** (`nf_adm_…`: all of that, plus publish). SDK keys are refused by these endpoints. Prefer the environment variable — arguments are visible in process lists and shell history. |
+| `NANOFLAGS_KEY` / `--key` | A **CI key** (`nf_ci_…`: export, scenarios, code references) or an **admin key** (`nf_adm_…`: all of that, plus `flags create` and publish). SDK keys are refused by these endpoints. Prefer the environment variable — arguments are visible in process lists and shell history. |
 | `NANOFLAGS_BASE_URL` / `--base-url` | Edge URL. Default `https://edge.nanoflags.io`. Must be `https` (plain `http` only for `localhost`). |
 | `NANOFLAGS_SDK_KEY` / `--sdk-key` | Optional, only for `eval --source published`: a server SDK key; reads `/v1/bundle` instead of `/v1/ci/published`. |
 
@@ -49,6 +49,31 @@ The saved file can be passed to other commands with `--export <file>` to work of
 
 Table of the project's flags: key, type, purpose, lifetime (permanent/temporary), client exposure, and
 on/off in the draft of the key's environment.
+
+### `nanoflags flags create <key> --type boolean|string|number|json [--default <json>] [--description <text>] [--name <text>] [--json]`
+
+`POST /v1/admin/flags` — creates a flag in the key's project. **Admin key only** (a CI key is refused
+before any request). Nothing is published: every environment's **draft** starts with the default value,
+and the flag reaches SDKs only with the next publish.
+
+```sh
+nanoflags flags create new-checkout --description "New checkout flow"            # boolean, default false
+nanoflags flags create theme --type string --default blue --name "Theme"         # bare word = string
+nanoflags flags create search-limit --type number --default 25
+nanoflags flags create ranker --type json --default '{"model":"v2","weights":[1,2]}'
+```
+
+- `--type` defaults to `boolean`; `--default` defaults to `false` for boolean flags and is required otherwise.
+- `--default` is JSON and must match the type. For string flags a value that is not JSON is taken as the
+  string itself (`--default blue` = `--default '"blue"'`).
+- The key follows the dashboard rules: lowercase letters, digits, `-` and `_`, starting with a letter or digit, at most 63.
+- `--name` defaults to the key. Purpose, owner, review date and client exposure are set in the dashboard.
+- The creation is recorded in the project's activity log with the key's name.
+
+| Refusal (exit 1) | Meaning |
+| --- | --- |
+| `CONFLICT` | A flag with this key already exists in the project. |
+| `INVALID_VALUE` | The default does not match the flag type. |
 
 ### `nanoflags eval <flag> [--context <json>] [--source draft|published] [--fallback <json>] [--environment <key>] [--json]`
 

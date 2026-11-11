@@ -20,7 +20,7 @@ const RUN_FAIL = { ...RUN_OK, passed: 1, failed: 1, results: [RUN_OK.results[0]!
 describe("general", () => {
   it("--help, --version, no command, unknown command, unknown option", async () => {
     expect((await cli(["--help"])).out).toContain("Usage: nanoflags <command>");
-    expect((await cli(["--version"])).out).toBe("0.1.0\n");
+    expect((await cli(["--version"])).out).toBe("0.2.0\n");
     expect((await cli([])).code).toBe(2);
     expect(await cli(["frobnicate"])).toMatchObject({ code: 2, out: "" });
     expect((await cli(["export", "--nope"])).code).toBe(2);
@@ -225,6 +225,66 @@ describe("scenarios run", () => {
     const r = await cli(["scenarios", "run"], { env: { NANOFLAGS_KEY: SERVER_KEY }, routes: { "POST /v1/ci/scenarios/run": apiError(403, "forbidden", "CI or admin key required.") } });
     expect(r.code).toBe(2);
     expect(await cli(["scenarios", "run", "--source", "published"])).toMatchObject({ code: 2, calls: [] });
+  });
+});
+
+describe("flags create", () => {
+  const created = (over: Record<string, unknown> = {}) => json({ id: "f1", key: "new-checkout", name: "new-checkout", type: "boolean", default: false, environments: ["development", "staging", "production"], ...over }, 201);
+
+  it("creates a boolean flag (default false) with an admin key", async () => {
+    const r = await cli(["flags", "create", "new-checkout", "--description", "New checkout flow"], { routes: { "POST /v1/admin/flags": created() } });
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("Created new-checkout (boolean, default false).");
+    expect(r.out).toContain("(development, staging, production). Nothing was published.");
+    expect(r.calls).toMatchObject([{ method: "POST", path: "/v1/admin/flags", body: { key: "new-checkout", type: "boolean", default: false, description: "New checkout flow" } }]);
+    expect(r.calls[0]!.headers.get("Authorization")).toBe(`Bearer ${ADMIN_KEY}`);
+  });
+
+  it("parses --default as JSON per type; a bare word is a string for string flags", async () => {
+    const route = { "POST /v1/admin/flags": (c: { body: unknown }) => json({ id: "f", ...(c.body as object) }, 201) };
+    const s = await cli(["flags", "create", "theme", "--type", "string", "--default", "blue", "--name", "Theme", "--json"], { routes: route });
+    expect(s.code).toBe(0);
+    expect(s.calls[0]!.body).toEqual({ key: "theme", type: "string", default: "blue", description: "", name: "Theme" });
+    expect(JSON.parse(s.out)).toMatchObject({ key: "theme", default: "blue" });
+    const n = await cli(["flags", "create", "limit", "--type", "number", "--default", "25"], { routes: route });
+    expect(n.calls[0]!.body).toMatchObject({ type: "number", default: 25 });
+    const j = await cli(["flags", "create", "cfg", "--type", "json", "--default", '{"a":[1,2]}'], { routes: route });
+    expect(j.calls[0]!.body).toMatchObject({ type: "json", default: { a: [1, 2] } });
+  });
+
+  it("refuses bad input before any request", async () => {
+    for (const argv of [
+      ["flags", "create"],
+      ["flags", "create", "Bad Key"],
+      ["flags", "create", "ok", "--type", "date"],
+      ["flags", "create", "ok", "--type", "number"],
+      ["flags", "create", "ok", "--type", "number", "--default", "ten"],
+      ["flags", "create", "ok", "--type", "boolean", "--default", '"yes"'],
+      ["flags", "create", "ok", "--type", "string", "--default", "3"],
+      ["flags", "create", "ok", "--name", ""],
+    ]) {
+      expect(await cli(argv), argv.join(" ")).toMatchObject({ code: 2, calls: [] });
+    }
+  });
+
+  it("needs an admin key: a CI key never reaches the network", async () => {
+    const r = await cli(["flags", "create", "x"], { env: { NANOFLAGS_KEY: CI_KEY } });
+    expect(r).toMatchObject({ code: 2, calls: [] });
+    expect(r.err).toContain("needs an admin key");
+  });
+
+  it("CONFLICT → exit 1 with the server's message; 401 → exit 2; 5xx → exit 3", async () => {
+    const dup = await cli(["flags", "create", "new-checkout"], { routes: { "POST /v1/admin/flags": apiError(409, "CONFLICT", 'A flag with the key "new-checkout" already exists in this project.') } });
+    expect(dup.code).toBe(1);
+    expect(dup.err).toContain('Flag not created: A flag with the key "new-checkout" already exists in this project. [CONFLICT]');
+    expect((await cli(["flags", "create", "x"], { routes: { "POST /v1/admin/flags": apiError(401, "unauthorized", "Unknown key.") } })).code).toBe(2);
+    expect((await cli(["flags", "create", "x"], { routes: { "POST /v1/admin/flags": apiError(503, "unavailable", "Try again.") } })).code).toBe(3);
+  });
+
+  it("an older edge without the endpoint is explained", async () => {
+    const r = await cli(["flags", "create", "x"], { routes: {} });
+    expect(r.code).toBe(3);
+    expect(r.err).toContain("does not offer this endpoint");
   });
 });
 

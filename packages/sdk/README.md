@@ -10,7 +10,11 @@ learn about new revisions, and to send sampled telemetry. An accessor never perf
 - Entry points: `@nanoflags/sdk` (Node, browsers, edge runtimes), `@nanoflags/sdk/react`, and
   `@nanoflags/sdk/node` (test-session propagation with `AsyncLocalStorage`).
 - v2 adds [signature verification](#signature-verification) and [test sessions](#test-sessions).
-  Both are opt-in; existing code keeps working unchanged.
+- **0.4** verifies signatures **by default** when `baseUrl` is the hosted edge (`https://edge.nanoflags.io`), with
+  the production public keys embedded in the SDK, and refuses unsigned bundles there (see
+  [Signature verification](#signature-verification)). It also refuses bundles produced for a newer evaluation engine
+  (`bundle.engine`, see [Engine version](#engine-version)) and stops reconnecting when the edge reports that the
+  environment was deleted. Self-hosted edges (any other `baseUrl`) behave as in 0.3 unless `verify` is set.
 
 ## Install
 
@@ -107,7 +111,7 @@ createClient({
   bootstrap?: Bundle,
   store?: { get(): Promise<string | null>; set(v: string): Promise<void> } | false,
   events?: { enabled?: boolean /* true */, sampleRate?: number /* 0.1 */, flushIntervalMs?: number /* 10000 */, reportIntervalMs?: number /* 60000 */, redact?: (ctx) => object } | false,
-  verify?: { publicKeys: JsonWebKey[] | "fetch", require?: boolean },
+  verify?: { publicKeys?: JsonWebKey[] | "fetch", require?: boolean } | false, // default: see Signature verification
   fetch?: typeof fetch,
 })
 ```
@@ -122,7 +126,7 @@ createClient({
 | `evaluate(key, fallback, ctx?)` | The engine `Evaluation`: `value`, `reason`, `ruleIndex`, `ruleId`, `inRollout`, `bucket`, `revision`, `trace`. No type check. |
 | `session(token, { service? })` | `Promise<SessionEvaluator>` for a test session. Never rejects. See [Test sessions](#test-sessions). |
 | `useSession(token \| null)` / `sessionHeaders()` | Browser only: join or leave a test session for this page session; headers for downstream calls. |
-| `on("update" \| "error", cb)` | Returns an unsubscribe function. `update` receives `{ revision, previousRevision, checksum, source, transport, latencyMs }` (see [Updates](#updates)). `error` receives a `NanoFlagsError` with `code`: `network`, `unauthorized`, `http`, `invalid_bundle`, `store`, `config`, `signature`, `session`. |
+| `on("update" \| "error", cb)` | Returns an unsubscribe function. `update` receives `{ revision, previousRevision, checksum, source, transport, latencyMs }` (see [Updates](#updates)). `error` receives a `NanoFlagsError` with `code`: `network`, `unauthorized`, `http`, `invalid_bundle`, `store`, `config`, `signature`, `session`, `engine` (bundle for a newer engine, refused), `environment_deleted`. |
 | `refresh()` / `flush()` / `close()` | Revalidate now / send queued telemetry now / stop all background work. |
 
 ## Fallbacks and staleness
@@ -149,7 +153,9 @@ A **disabled** flag is not a fallback case: it returns the flag's configured `of
   that bundle; the SDK keeps retrying (after a failure: 1 s, 2 s, 4 s … up to the poll interval).
 
 The SDK never discards a working bundle because of an error, and never replaces a bundle with an older
-one served as last-known-good. If a key is revoked, the client reports `error` (`code: "unauthorized"`)
+one served as last-known-good. If the environment is deleted, the edge closes the live socket with code `4004`: the client reports
+`error` (`code: "environment_deleted"`), turns `stale`, keeps evaluating the last bundle and stops reconnecting
+(only the regular poll continues, which then reports the key as rejected). If a key is revoked, the client reports `error` (`code: "unauthorized"`)
 and keeps evaluating the last bundle as `stale` — revocation stops updates, it does not erase
 configuration that already reached a process.
 
@@ -194,8 +200,17 @@ carries the signature, key id and environment id). A push that does not verify c
 
 ## Signature verification
 
-Published bundles are signed by the NanoFlags publisher with Ed25519. With `verify`, the SDK checks
-the signature **before** a new bundle replaces the one in use:
+Published bundles are signed by the NanoFlags publisher with Ed25519. The SDK checks the signature **before** a new
+bundle replaces the one in use.
+
+**Default (0.4):**
+
+| `baseUrl` | `verify` not set | |
+| --- | --- | --- |
+| `https://edge.nanoflags.io` | verified against the embedded production keys (`OFFICIAL_SIGNING_KEYS`), `require: true` | pushed (WebSocket) and fetched bundles must be signed and verify |
+| any other edge | not verified (as in 0.3) | configure `verify` for a self-hosted edge |
+
+`verify: false` turns verification off explicitly. To configure it yourself:
 
 ```ts
 const flags = createClient({
@@ -207,33 +222,47 @@ const flags = createClient({
 });
 ```
 
-- A response with `X-NanoFlags-Signed: true` is verified against the canonical string
+- A response with `X-NanoFlags-Signed: true` (and every pushed bundle) is verified against the canonical string
   `nanoflags-bundle-v1\n<environment id>\n<revision>\n<checksum>\n<sha256 hex of the bundle JSON text>`
-  (the bundle text exactly as the edge sent it), using WebCrypto.
+  (the bundle text exactly as the edge sent it), using WebCrypto, with the key whose `kid` the edge names
+  (`X-NanoFlags-Key-Id`, or `kid` in the push).
 - **Bad signature → the update is rejected.** The previous bundle stays in use, `status` does not
   change, and `error` fires with `code: "signature"`. The SDK retries on its normal schedule.
 - **Unsigned bundles** (the edge sends `X-NanoFlags-Signed: false` while the publisher is catching up,
-  typically for under a minute after a publish) are accepted unless `require: true`. With `require`
-  they are rejected the same way, so a new revision arrives only once it is signed. Without `require`,
-  someone who can alter responses can also strip the signature — set `require: true` when you verify
-  for security rather than for integrity checking.
-- `publicKeys: "fetch"` loads the keys once from `GET /v1/keys` on the same edge (reloaded at most once
-  a minute when a bundle names an unknown key id). This detects corruption and tampering in storage
-  and caches, but the keys are only as trustworthy as the edge that served them. **Pin the keys in
-  your build** if the edge itself is in your threat model.
+  typically for well under a minute after a publish) are rejected when `require` is true — the default on the hosted
+  edge: the bundle in use stays, `error` (`signature`) fires, and the SDK fetches again with a short backoff (1 s,
+  2 s, 4 s … up to the poll interval) until the signed revision is there. With `require: false` (the default for
+  other edges) they are accepted; then someone who can alter responses can also strip the signature.
+- **Keys and rotation.** Keys are selected by `kid` and cached. With the embedded keys, a bundle signed with a key id
+  the SDK does not know (the hosted edge rotated its key after this SDK version was built) makes the SDK load
+  `GET /v1/keys` once and verify against those keys as well; an id that is still unknown is rejected, and the reload
+  is not repeated within a minute. `publicKeys: "fetch"` loads all keys from `GET /v1/keys` (again when an unknown
+  key id appears, at most once a minute) — this detects corruption and tampering in storage and caches, but fetched
+  keys are only as trustworthy as the edge that served them. Explicitly pinned `publicKeys` are never extended from
+  the network: **pin the keys in your build** if the edge itself is in your threat model, and add the new key before
+  a rotation (the edge lists the old key as `status: "retiring"` during the overlap).
 - After the first verified bundle the client remembers the environment id and rejects bundles signed
   for a different environment.
 - A persisted bundle (see below) is stored with its signature and verified again when restored; with
   `require`, an unsigned stored copy is ignored. A `bootstrap` bundle is trusted as given.
   With `publicKeys: "fetch"` a stored copy can only be verified once the keys were loaded, so an
-  offline start does not restore it; pinned keys do not have this limitation.
+  offline start does not restore it; pinned and embedded keys do not have this limitation.
 - Only public keys are accepted. A JWK with a private part (`d`) is ignored and reported as a `config`
   error. Private signing keys and admin keys never belong in an application.
 - Requires Ed25519 in WebCrypto: Node 20+, current Chrome, Firefox and Safari, Cloudflare Workers,
-  Deno, Bun. Where it is missing, signed bundles are rejected (they cannot be checked).
+  Deno, Bun. Where it is missing, signed bundles are rejected (they cannot be checked) — on the hosted edge pass
+  `verify: false` for such runtimes (Node 18) if you accept that.
 
 Not covered: test-session bundles (`GET /v1/session`) are not signed, and verification says nothing
 about *freshness* — it does not stop an attacker from withholding updates.
+
+## Engine version
+
+Bundles produced by the publisher carry `engine`, the version of the evaluation engine they were produced for
+(`1` today; `SUPPORTED_ENGINE_VERSION` is what this SDK evaluates). A bundle with a **newer** `engine` — a rule format
+this SDK does not understand — is refused wherever it comes from (fetch, push, store, `bootstrap`): the bundle in use
+stays, `status` does not change, and `error` fires with `code: "engine"`. Upgrade the SDK to receive it. Bundles
+without the field (older revisions, the edge's unsigned fallback) are evaluated as engine 1.
 
 ## Test sessions
 

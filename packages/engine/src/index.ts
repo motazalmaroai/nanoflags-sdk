@@ -70,6 +70,11 @@ export interface Segment {
 
 export interface Bundle {
   schema: 1;
+  /**
+   * Engine version the bundle was produced for (`ENGINE_VERSION` of the publisher). Absent in bundles from before it
+   * existed (treated as 1). SDKs refuse a bundle whose `engine` is newer than the engine they ship.
+   */
+  engine?: number;
   project: string;
   environment: string;
   /** Published revision number. 0 means "draft / never published". */
@@ -393,8 +398,31 @@ export function diffBundles(before: Pick<Bundle, "flags" | "segments"> | null, a
   return rows;
 }
 
-/** Remove flags that must not reach browser keys. */
+/**
+ * Remove what must not reach browser keys: flags that are not client-exposed, and every segment that no client-exposed
+ * flag references (directly or through other segments).
+ */
 export function clientBundle(bundle: Bundle): Bundle {
-  const flags = Object.fromEntries(Object.entries(bundle.flags).filter(([, f]) => f.clientExposed));
-  return { ...bundle, flags };
+  const flags = Object.fromEntries(Object.entries(bundle.flags).filter(([, f]) => f.clientExposed === true));
+  const pending: string[] = [];
+  const refs = (conditions: Condition[] | undefined) => {
+    for (const c of conditions ?? []) if ((c.op === "segment" || c.op === "not_segment") && typeof c.value === "string") pending.push(c.value);
+  };
+  for (const f of Object.values(flags)) for (const r of f.rules ?? []) refs(r.conditions);
+  const needed = new Set<string>();
+  while (pending.length > 0) {
+    const k = pending.pop()!;
+    const seg = own(bundle.segments, k);
+    if (needed.has(k) || !seg) continue;
+    needed.add(k);
+    refs(seg.conditions);
+  }
+  const segments = Object.fromEntries(Object.entries(bundle.segments ?? {}).filter(([k]) => needed.has(k)));
+  return { ...bundle, flags, segments };
+}
+
+/** True when this engine can evaluate `bundle` (its `engine` is absent or not newer than `ENGINE_VERSION`). */
+export function supportsEngine(bundle: { engine?: unknown }): boolean {
+  const e = bundle.engine;
+  return e === undefined || (typeof e === "number" && Number.isInteger(e) && e >= 1 && e <= ENGINE_VERSION);
 }

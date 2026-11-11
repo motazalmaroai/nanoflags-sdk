@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   clientBundle,
   describeCondition,
+  ENGINE_VERSION,
+  supportsEngine,
   diffBundles,
   validateBundle,
   validateFlagConfig,
@@ -232,7 +234,23 @@ describe("clientBundle", () => {
     const out = clientBundle(bundle);
     expect(Object.keys(out.flags)).toEqual(["client"]);
     expect(out.flags.client).toBe(bundle.flags.client);
-    expect(out).toMatchObject({ schema: 1, project: "commerce", environment: "production", revision: 12, segments });
+    expect(out).toMatchObject({ schema: 1, project: "commerce", environment: "production", revision: 12 });
+    // No client-exposed flag uses "staff": it is not part of the browser view.
+    expect(out.segments).toEqual({});
+  });
+
+  it("keeps exactly the segments client-exposed flags reference, transitively", () => {
+    const seg = (refs: string[]): Segment => ({ match: "any", conditions: refs.map((r) => ({ attribute: "", op: "segment" as const, value: r })) });
+    const b: Bundle = {
+      ...bundle,
+      segments: { a: seg(["b"]), b: seg(["c"]), c: { match: "all", conditions: [{ attribute: "plan", op: "eq", value: "pro" }] }, secret: seg([]), cycle1: seg(["cycle2"]), cycle2: seg(["cycle1"]) },
+      flags: {
+        client: boolFlag({ clientExposed: true, rules: [{ id: "r", match: "all", conditions: [{ attribute: "", op: "not_segment", value: "a" }], serve: { type: "fixed", value: true } }] }),
+        loop: boolFlag({ clientExposed: true, rules: [{ id: "r", match: "all", conditions: [{ attribute: "", op: "segment", value: "cycle1" }, { attribute: "", op: "segment", value: "missing" }], serve: { type: "fixed", value: true } }] }),
+        server: boolFlag({ rules: [{ id: "r", match: "all", conditions: [{ attribute: "", op: "segment", value: "secret" }], serve: { type: "fixed", value: true } }] }),
+      },
+    };
+    expect(Object.keys(clientBundle(b).segments).sort()).toEqual(["a", "b", "c", "cycle1", "cycle2"]);
   });
 
   it("does not mutate the input", () => {
@@ -244,5 +262,15 @@ describe("clientBundle", () => {
 
   it("returns an empty flag map when nothing is exposed", () => {
     expect(clientBundle({ ...bundle, flags: { server: boolFlag() } }).flags).toEqual({});
+  });
+});
+
+describe("supportsEngine", () => {
+  it("accepts bundles without an engine version and up to ENGINE_VERSION, refuses newer or malformed ones", () => {
+    expect(supportsEngine({})).toBe(true);
+    expect(supportsEngine({ engine: ENGINE_VERSION })).toBe(true);
+    expect(supportsEngine({ engine: ENGINE_VERSION + 1 })).toBe(false);
+    expect(supportsEngine({ engine: "1" })).toBe(false);
+    expect(supportsEngine({ engine: 0 })).toBe(false);
   });
 });

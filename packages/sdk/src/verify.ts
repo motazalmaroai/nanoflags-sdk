@@ -9,11 +9,16 @@
 export interface VerifyOptions {
   /**
    * Public Ed25519 keys as JWK (`{ kty: "OKP", crv: "Ed25519", x, kid? }`), or `"fetch"` to load them
-   * once from `GET /v1/keys` on the configured edge. Pinning keys in your build is stronger than
-   * `"fetch"`: fetched keys are only as trustworthy as the connection they arrived over.
+   * once from `GET /v1/keys` on the configured edge (again, at most once a minute, when a bundle names an unknown
+   * key id). Pinning keys in your build is stronger than `"fetch"`: fetched keys are only as trustworthy as the
+   * connection they arrived over. Omitted: the embedded production keys for `https://edge.nanoflags.io`, `"fetch"`
+   * for any other edge.
    */
-  publicKeys: JsonWebKey[] | "fetch";
-  /** Also reject bundles that carry no signature. Default false. */
+  publicKeys?: readonly JsonWebKey[] | "fetch";
+  /**
+   * Also reject bundles that carry no signature (the edge's unsigned fallback, `X-NanoFlags-Signed: false`): the SDK
+   * keeps its bundle and fetches again shortly instead. Default true for `https://edge.nanoflags.io`, false otherwise.
+   */
   require?: boolean;
 }
 

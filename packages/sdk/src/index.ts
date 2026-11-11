@@ -9,7 +9,8 @@
  * the edge pushes the signed bundle itself — no request follows), the SSE stream (`/v1/stream`,
  * a notification followed by a conditional fetch), and polling (`/v1/bundle`).
  */
-import { evaluate as engineEvaluate, murmur3, type Bundle, type Condition, type Context, type Evaluation, type JsonValue } from "@nanoflags/engine";
+import { ENGINE_VERSION, evaluate as engineEvaluate, murmur3, supportsEngine, type Bundle, type Condition, type Context, type Evaluation, type JsonValue } from "@nanoflags/engine";
+import { OFFICIAL_EDGE_URL, OFFICIAL_SIGNING_KEYS } from "./keys.js";
 import { defaultStore, type Store } from "./store.js";
 import { readSse } from "./sse.js";
 import { importPublicKeys, isPublicEd25519Jwk, rawMember, verifyBundleText, type ImportedKey, type SignatureInfo, type VerifyOptions } from "./verify.js";
@@ -17,8 +18,15 @@ import { importPublicKeys, isPublicEd25519Jwk, rawMember, verifyBundleText, type
 export type { Bundle, Context, Evaluation, JsonValue, Reason } from "@nanoflags/engine";
 export type { Store } from "./store.js";
 export type { VerifyOptions } from "./verify.js";
+export { OFFICIAL_EDGE_URL, OFFICIAL_SIGNING_KEYS } from "./keys.js";
 
-export const SDK_VERSION = "0.3.0";
+export const SDK_VERSION = "0.4.0";
+
+/** Newest bundle format (`bundle.engine`) this SDK can evaluate. Newer bundles are refused; the previous one stays in use. */
+export const SUPPORTED_ENGINE_VERSION = ENGINE_VERSION;
+
+/** WebSocket close code of the edge for an environment that was deleted: the SDK stops reconnecting. */
+export const CLOSE_ENVIRONMENT_DELETED = 4004;
 
 /** Header that carries a test-session token between services. */
 export const SESSION_HEADER = "x-nanoflags-session";
@@ -95,8 +103,12 @@ export interface ClientOptions {
    * Verify bundle signatures before a new bundle replaces the current one. A bundle whose signature
    * does not verify is rejected: the previous bundle stays in use and an `error` (`code: "signature"`)
    * is emitted. Without `require`, bundles the edge marks as unsigned are still accepted.
+   *
+   * Default: with `baseUrl` = `https://edge.nanoflags.io` the SDK verifies against the embedded production keys
+   * (`OFFICIAL_SIGNING_KEYS`, plus `GET /v1/keys` once when a bundle names an unknown key id) with `require: true`;
+   * with any other `baseUrl` nothing is verified unless configured. `false` turns verification off explicitly.
    */
-  verify?: VerifyOptions;
+  verify?: VerifyOptions | false;
   fetch?: typeof fetch;
 }
 
@@ -192,7 +204,7 @@ export interface NanoFlagsClient {
 export class NanoFlagsError extends Error {
   constructor(
     message: string,
-    readonly code: "network" | "unauthorized" | "http" | "invalid_bundle" | "store" | "config" | "signature" | "session",
+    readonly code: "network" | "unauthorized" | "http" | "invalid_bundle" | "store" | "config" | "signature" | "session" | "engine" | "environment_deleted",
     readonly httpStatus?: number,
   ) {
     super(message);
@@ -266,6 +278,13 @@ function isBundle(v: unknown): v is Bundle {
   return b.schema === 1 && typeof b.revision === "number" && typeof b.flags === "object" && b.flags !== null && !Array.isArray(b.flags) && typeof b.segments === "object" && b.segments !== null;
 }
 
+function engineError(b: { revision?: unknown; engine?: unknown }): NanoFlagsError {
+  return new NanoFlagsError(
+    `Bundle r${String(b.revision)} needs evaluation engine ${JSON.stringify(b.engine)}; this SDK supports up to ${ENGINE_VERSION}. Upgrade @nanoflags/sdk. The configuration in use is unchanged.`,
+    "engine",
+  );
+}
+
 function typeOf(v: JsonValue | undefined): string {
   return v === null ? "null" : Array.isArray(v) ? "array" : typeof v;
 }
@@ -313,15 +332,30 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
   let liveOpen = false;
   let liveAttempt = 0;
   let liveTimer: Timer | null = null;
+  /** The edge closed the socket with 4004: the environment was deleted. No more reconnects. */
+  let environmentDeleted = false;
   /** Highest revision adopted from a push: a slower HTTP answer must never replace it with something older. */
   let liveRevision = 0;
   let pushChain: Promise<void> = Promise.resolve();
   let lastReportAt = 0;
   const usedAttrs = new WeakMap<Bundle, Map<string, string[]>>();
-  const verifyOpt = options.verify;
+  /**
+   * Effective verification: `keys` to verify with (`"fetch"` = only `/v1/keys`), `require` = refuse unsigned bundles,
+   * `refetch` = an unknown key id loads `/v1/keys` once (official edge with the embedded keys, or `"fetch"`).
+   */
+  const official = baseUrl === OFFICIAL_EDGE_URL;
+  const verifyOpt: { keys: readonly unknown[] | "fetch"; require: boolean; refetch: boolean } | null = (() => {
+    const v = options.verify;
+    if (v === false) return null;
+    if (v === undefined || v === null) return official ? { keys: OFFICIAL_SIGNING_KEYS, require: true, refetch: true } : null;
+    const keys = v.publicKeys === "fetch" ? "fetch" : Array.isArray(v.publicKeys) ? v.publicKeys : official ? OFFICIAL_SIGNING_KEYS : "fetch";
+    return { keys, require: v.require ?? official, refetch: keys === "fetch" || (official && v.publicKeys === undefined) };
+  })();
   const isBrowser = typeof window !== "undefined" && typeof document !== "undefined";
-  let keysPromise: Promise<ImportedKey[]> | null = null;
-  let keysLoadedAt = 0;
+  let pinnedKeys: Promise<ImportedKey[]> | null = null;
+  let fetchedKeys: ImportedKey[] = [];
+  let keysFetchedAt = 0;
+  let keysFetching: Promise<void> | null = null;
   let pinnedEnvironment: string | null = null;
   let sig: SignatureInfo | null = null;
   let rawText: string | null = null;
@@ -387,6 +421,7 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
       if (!raw || closed) return;
       const p = JSON.parse(raw) as Partial<Persisted>;
       if (p.v !== 1 || p.id !== id || !isBundle(p.bundle)) return;
+      if (!supportsEngine(p.bundle)) return void emitError(engineError(p.bundle));
       // Never replace something newer (network result or a newer bootstrap) with the stored copy.
       if (bundle && bundle.revision >= p.bundle.revision) return;
       let restored: Bundle = p.bundle;
@@ -454,22 +489,43 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
     }
   }
 
-  function loadKeys(kid: string | null): Promise<ImportedKey[]> {
-    if (!verifyOpt) return Promise.resolve([]);
-    const start = () => {
-      keysLoadedAt = Date.now();
-      const p = verifyOpt.publicKeys === "fetch" ? fetchKeys() : importPublicKeys(Array.isArray(verifyOpt.publicKeys) ? verifyOpt.publicKeys : []);
-      keysPromise = p;
-      // A failed load is not remembered: the next bundle tries again.
+  /**
+   * Keys to verify a signature by `kid` with: the pinned / embedded keys, plus those fetched from `/v1/keys`. With
+   * `refetch`, a key id none of them has (rotation) loads `/v1/keys` once — again at most once a minute.
+   */
+  async function loadKeys(kid: string | null): Promise<ImportedKey[]> {
+    if (!verifyOpt) return [];
+    let base: ImportedKey[] = [];
+    if (verifyOpt.keys !== "fetch") {
+      const p = (pinnedKeys ??= importPublicKeys(verifyOpt.keys));
+      // A failed import (no Ed25519 in this runtime) is not remembered.
       p.catch(() => {
-        if (keysPromise === p) keysPromise = null;
+        if (pinnedKeys === p) pinnedKeys = null;
       });
-      return p;
-    };
-    if (!keysPromise) return start();
-    if (verifyOpt.publicKeys !== "fetch" || kid === null) return keysPromise;
-    // Key rotation: an unknown key id triggers one reload, rate limited.
-    return keysPromise.then((keys) => (keys.some((k) => k.kid === kid) || Date.now() - keysLoadedAt < KEYS_REFETCH_MS ? keys : start()));
+      base = await p;
+    }
+    const all = () => [...base, ...fetchedKeys];
+    if (!verifyOpt.refetch) return base;
+    const known = all();
+    if (known.length > 0 && (kid === null || known.some((k) => k.kid === kid))) return known;
+    if (keysFetchedAt !== 0 && Date.now() - keysFetchedAt < KEYS_REFETCH_MS) return known;
+    keysFetching ??= fetchKeys()
+      .then((keys) => {
+        fetchedKeys = keys;
+        keysFetchedAt = Date.now();
+      })
+      .finally(() => {
+        keysFetching = null;
+      });
+    try {
+      await keysFetching;
+    } catch (e) {
+      // Without any key at all the bundle cannot be checked (the next bundle tries again). With the embedded keys the
+      // failed reload counts as the one reload of this minute, so a bad key id cannot make every poll ask for keys.
+      if (base.length === 0) throw e;
+      keysFetchedAt = Date.now();
+    }
+    return all();
   }
 
   /** Returns the bundle to adopt, or throws a NanoFlagsError with code "signature". */
@@ -477,7 +533,7 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
     if (!verifyOpt) return { bundle: body.bundle, sig: null, raw: null };
     const reject = (why: string) => new NanoFlagsError(`Bundle r${body.bundle.revision} was rejected: ${why} The configuration in use is unchanged.`, "signature");
     if (res.headers.get("X-NanoFlags-Signed") !== "true") {
-      if (verifyOpt.require) throw reject("it is not signed and `verify.require` is set.");
+      if (verifyOpt.require) throw reject("it is not signed (the edge is still distributing it) and unsigned bundles are refused (`verify.require`); fetching again shortly.");
       return { bundle: body.bundle, sig: null, raw: null };
     }
     const signature = res.headers.get("X-NanoFlags-Signature");
@@ -542,6 +598,7 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
       const verified = await checkSignature(res, text, body as { revision?: unknown; checksum?: unknown; bundle: Bundle });
       if (closed) return;
       const next = verified.bundle;
+      if (!supportsEngine(next)) throw engineError(next);
       failures = 0;
       // The edge is serving its last-known-good copy: never go backwards because of it.
       if (servedStale && bundle && bundle.revision >= next.revision) {
@@ -556,6 +613,8 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
       persist();
     } catch (e) {
       if (closed) return;
+      // A bundle for a newer engine: nothing to retry quickly, the edge will answer the same until this SDK is upgraded.
+      if (e instanceof NanoFlagsError && e.code === "engine") return void emitError(e);
       failures++;
       // A rejected update changes nothing: same bundle, same status. Polling retries with backoff.
       if (e instanceof NanoFlagsError && e.code === "signature") return void emitError(e);
@@ -622,7 +681,7 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
   }
 
   function startStream() {
-    if (closed || options.streaming === false || !doFetch || streamActive) return;
+    if (closed || options.streaming === false || !doFetch || streamActive || environmentDeleted) return;
     streamActive = true;
     const ES: typeof EventSource | undefined = typeof EventSource === "function" ? EventSource : undefined;
     if (ES && isBrowserKey) {
@@ -723,6 +782,7 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
       parsed = null;
     }
     if (!isBundle(parsed) || parsed.revision !== revision) return void emitError(new NanoFlagsError("The edge pushed an invalid bundle; it was ignored.", "invalid_bundle"));
+    if (!supportsEngine(parsed)) return void emitError(engineError(parsed));
     if (bundle && revision < bundle.revision) return;
     failures = 0;
     if (bundle && revision === bundle.revision) {
@@ -757,7 +817,7 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
   }
 
   function connectLive(): void {
-    if (closed || !liveWanted || socket) return;
+    if (closed || !liveWanted || socket || environmentDeleted) return;
     let ws: WebSocketLike;
     try {
       // The key travels in the subprotocol list (browsers cannot set headers on a WebSocket) — never in the URL.
@@ -836,12 +896,24 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
       // One at a time, in arrival order: verification is asynchronous.
       pushChain = pushChain.then(() => applyPush(m as Record<string, unknown>)).catch(() => undefined);
     };
-    ws.onclose = end;
+    ws.onclose = (event: { code?: unknown } | undefined) => {
+      if (event?.code === CLOSE_ENVIRONMENT_DELETED) environmentDeleted = true;
+      end();
+    };
     ws.onerror = end;
   }
 
   function liveEnded(opened: boolean, openMs: number, rotating: boolean): void {
     if (closed) return;
+    if (environmentDeleted) {
+      // Keep evaluating the last bundle; it can no longer be updated. No socket, no stream; the regular poll stays
+      // (it reports the key as rejected, and recovers if the environment turns out to exist after all).
+      stopStream();
+      if (bundle) setStatus("stale");
+      emitError(new NanoFlagsError("The environment of this SDK key was deleted. The last configuration stays in use; it will not be updated.", "environment_deleted"));
+      schedulePoll();
+      return;
+    }
     if (rotating) return connectLive(); // planned replacement: no fallback, no backoff
     liveAttempt = opened && openMs > 30_000 ? 1 : liveAttempt + 1;
     // Never got through (no WebSocket path, socket cap reached, edge without /v1/live), or lost it and the
@@ -1151,10 +1223,13 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
 
   // ---- start
   if (options.bootstrap !== undefined) {
-    if (isBundle(options.bootstrap)) adopt(options.bootstrap, { etag: null, checksum: null, status: "ready", source: "bootstrap" });
+    if (isBundle(options.bootstrap) && !supportsEngine(options.bootstrap)) {
+      const err = engineError(options.bootstrap);
+      queueMicrotask(() => emitError(err));
+    } else if (isBundle(options.bootstrap)) adopt(options.bootstrap, { etag: null, checksum: null, status: "ready", source: "bootstrap" });
     else queueMicrotask(() => emitError(new NanoFlagsError("The bootstrap bundle is invalid and was ignored.", "invalid_bundle")));
   }
-  if (verifyOpt && Array.isArray(verifyOpt.publicKeys) && verifyOpt.publicKeys.some((k) => !isPublicEd25519Jwk(k))) {
+  if (verifyOpt && Array.isArray(verifyOpt.keys) && verifyOpt.keys.some((k) => !isPublicEd25519Jwk(k))) {
     queueMicrotask(() => emitError(new NanoFlagsError("`verify.publicKeys` must contain public Ed25519 JWKs only. Other entries (including private keys) were ignored.", "config")));
   }
   if (typeof sdkKey !== "string" || sdkKey === "" || baseUrl === "") {

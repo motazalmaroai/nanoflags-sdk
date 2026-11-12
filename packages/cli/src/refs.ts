@@ -1,17 +1,9 @@
 import ts from "typescript";
 import { clip } from "./util.js";
 
-const VALUE_NAMES = ["boolean", "string", "number", "json", "evaluate", "useFlag", "getBooleanValue", "getStringValue", "getNumberValue", "getObjectValue"];
-const DETAILS_NAMES = ["getBooleanDetails", "getStringDetails", "getNumberDetails", "getObjectDetails", "booleanDetails", "stringDetails", "numberDetails", "jsonDetails", "evaluateDetails", "useFlagDetails"];
-/** Callee names (the identifier, or the last name of a member access) that count as a flag read. */
-export const CALLEE_NAMES: ReadonlySet<string> = new Set([...VALUE_NAMES, ...DETAILS_NAMES]);
-
-export interface CodeRef {
-  flag: string;
-  path: string;
-  line: number;
-  snippet: string;
-}
+// Detection constants and the result type are shared with the compiler-free scanner (refs-lite.ts).
+import { CALLEE_NAMES, type CodeRef } from "./refs-lite.js";
+export { CALLEE_NAMES, type CodeRef };
 
 export interface CallSite {
   call: ts.CallExpression;

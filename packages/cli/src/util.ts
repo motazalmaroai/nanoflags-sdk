@@ -28,9 +28,9 @@ export function clip(s: string, max: number): string {
   return s.length > max ? `${s.slice(0, max - 1)}…` : s;
 }
 
-export const SOURCE_EXTENSIONS = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"];
-export const SKIP_DIRECTORIES = new Set(["node_modules", "dist", "build", ".next", ".git"]);
-export const DEFAULT_MAX_FILE_BYTES = 1_000_000;
+// Shared with the compiler-free scanner used by the GitHub App (refs-lite.ts).
+import { DEFAULT_MAX_FILE_BYTES, SKIP_DIRECTORIES, SOURCE_EXTENSIONS } from "./refs-lite.js";
+export { DEFAULT_MAX_FILE_BYTES, SKIP_DIRECTORIES, SOURCE_EXTENSIONS };
 
 export interface Walked {
   /** Paths relative to the root, with forward slashes. */

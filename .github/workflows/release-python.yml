@@ -1,0 +1,55 @@
+name: Release Python SDK
+
+# tag python-v<version> -> PyPI project `nanoflags` (packages/sdk-python), via trusted publishing (no token).
+on:
+  push:
+    tags: ["python-v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check the tag matches pyproject.toml
+        run: |
+          version=$(python -c "import tomllib; print(tomllib.load(open('packages/sdk-python/pyproject.toml','rb'))['project']['version'])")
+          if [ "$GITHUB_EVENT_NAME" = "push" ] && [ "${GITHUB_REF_NAME#python-v}" != "$version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match version $version in packages/sdk-python/pyproject.toml"; exit 1
+          fi
+          if curl -sf "https://pypi.org/pypi/nanoflags/$version/json" > /dev/null; then
+            echo "::error::nanoflags $version is already on PyPI. Bump the version."; exit 1
+          fi
+      - name: Test
+        run: |
+          python -m pip install --upgrade pip build
+          python -m pip install -e "packages/sdk-python[openfeature,test]"
+          python -m pytest packages/sdk-python
+      - name: Build
+        run: python -m build packages/sdk-python --outdir dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/nanoflags/
+    permissions:
+      id-token: write # trusted publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

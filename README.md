@@ -12,6 +12,8 @@ Documentation: https://nanoflags.io/docs · Dashboard: https://app.nanoflags.io
 | [`@nanoflags/sdk`](packages/sdk) | `packages/sdk` | `npm install @nanoflags/sdk` | Local, synchronous evaluation for Node, browsers, edge runtimes and React; live updates, last-known-good, signature verification, test sessions |
 | [`@nanoflags/openfeature-provider`](packages/openfeature) | `packages/openfeature` | `npm install @nanoflags/openfeature-provider @nanoflags/sdk @openfeature/server-sdk` (or `@openfeature/web-sdk`) | [OpenFeature](https://openfeature.dev) provider wrapping the SDK |
 | [`@nanoflags/cli`](packages/cli) | `packages/cli` | `npx @nanoflags/cli --help` or `npm install -g @nanoflags/cli` | Export, local evaluation, CI scenario checks, publishing, code references, flag cleanup |
+| [`nanoflags` (Python)](packages/sdk-python) | `packages/sdk-python` | `pip install nanoflags` (OpenFeature: `pip install "nanoflags[openfeature]"`) | Native Python 3.9+ server SDK: same engine results (shared parity fixtures), live updates, signature verification, asyncio wrapper |
+| [Go SDK](go) | `go` | `go get github.com/motazalmaroai/nanoflags-sdk/go` (OpenFeature: `.../go/ofprovider`) | Native Go 1.22+ server SDK: same engine results (shared parity fixtures), live updates, signature verification |
 | [GitHub Action](integrations/github-action) | `integrations/github-action` | `uses: motazalmaroai/nanoflags-sdk/integrations/github-action@<ref>` | Runs scenario checks for a commit and optionally uploads code references |
 | `@nanoflags/engine` | `packages/engine` | not published | Deterministic evaluation engine (MurmurHash3 bucketing), bundled into the SDK and the CLI |
 

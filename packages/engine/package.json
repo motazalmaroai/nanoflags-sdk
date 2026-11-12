@@ -9,7 +9,7 @@
     ".": "./src/index.ts"
   },
   "scripts": {
-    "test": "vitest run",
+    "test": "vitest run && node fixtures/generate-parity.mjs --check",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

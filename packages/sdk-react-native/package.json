@@ -76,7 +76,7 @@
   },
   "scripts": {
     "build": "tsdown",
-    "test": "tsdown --log-level warn && vitest run",
+    "test": "node scripts/pretest.mjs && vitest run",
     "typecheck": "tsc --noEmit",
     "typecheck:example": "tsc --noEmit -p example",
     "live": "pnpm build && node --use-env-proxy --import ./scripts/rn-env.mjs scripts/live-check.mjs",

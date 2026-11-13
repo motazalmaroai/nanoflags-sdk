@@ -1,0 +1,151 @@
+# Dart / Flutter SDK CI for the public mirror (motazalmaroai/nanoflags-sdk).
+# Installed by hand as .github/workflows/mobile-flutter.yml (from the monorepo's packages/sdk-dart/ci/). Paths assume the public repository layout:
+#   packages/sdk-dart/{nanoflags,nanoflags_flutter,nanoflags_openfeature}, packages/engine/fixtures/parity.json,
+#   go/internal/testdata/extra.json.
+#
+# No secrets: the device tests use the PUBLIC demo browser key (client view of the public demo
+# environment, read-only) and the public, rate-limited POST https://edge.nanoflags.io/v1/demo/toggle.
+# The Android and iOS jobs both toggle the shared demo flag, so iOS runs after Android (not in parallel).
+name: Flutter / Dart SDK
+
+on:
+  push:
+    branches: [main]
+    paths: ["packages/sdk-dart/**", "packages/engine/fixtures/**", "go/internal/testdata/**", ".github/workflows/mobile-flutter.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Shared by every workflow that toggles the public demo flag (React Native, Flutter, Android, Swift):
+  # one at a time, never cancelled mid-run (a cancelled run could leave the flag changed).
+  group: nanoflags-demo-device-tests
+  cancel-in-progress: false
+
+env:
+  FLUTTER_VERSION: "3.50.0"
+  # Public demo browser key (nf_pub_, client view only; already in the public site's source). Not a secret.
+  NANOFLAGS_DEMO_SDK_KEY: nf_pub_4ced72c484c4f388a900aeeaf81e130c110c11730d555dd8
+  NANOFLAGS_SDK_KEY: nf_pub_4ced72c484c4f388a900aeeaf81e130c110c11730d555dd8
+
+jobs:
+  dart:
+    name: dart test (core, parity, OpenFeature, Flutter bindings)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+      - name: Core — analyze
+        working-directory: packages/sdk-dart/nanoflags
+        run: |
+          dart pub get
+          dart analyze --fatal-infos
+      - name: Core — full parity suite + unit tests (Dart VM)
+        working-directory: packages/sdk-dart/nanoflags
+        run: dart test --reporter expanded
+      - name: Core — parity compiled to JavaScript (dart2js on Node)
+        working-directory: packages/sdk-dart/nanoflags
+        run: dart test -p node test/web_parity_test.dart
+      - name: Core — live production check (one demo toggle, restored)
+        working-directory: packages/sdk-dart/nanoflags
+        env:
+          NANOFLAGS_LIVE: "1"
+        run: dart test -t live
+      - name: OpenFeature provider
+        working-directory: packages/sdk-dart/nanoflags_openfeature
+        run: |
+          dart pub get
+          dart analyze --fatal-infos
+          dart test
+      - name: Flutter bindings — analyze + widget tests
+        working-directory: packages/sdk-dart/nanoflags_flutter
+        run: |
+          flutter pub get
+          flutter analyze
+          flutter test
+      - name: Example app — analyze
+        working-directory: packages/sdk-dart/nanoflags_flutter/example
+        run: |
+          flutter pub get
+          flutter analyze
+      - name: Publish dry run
+        run: |
+          (cd packages/sdk-dart/nanoflags && dart pub publish --dry-run)
+
+  android:
+    name: integration_test on Android emulator (API 34)
+    needs: dart
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+      - name: Resolve packages
+        working-directory: packages/sdk-dart/nanoflags_flutter/example
+        run: flutter pub get
+      - name: Run integration_test on the emulator
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2 (v2.38.0)
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          force-avd-creation: false
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          disable-animations: true
+          working-directory: packages/sdk-dart/nanoflags_flutter/example
+          script: flutter test integration_test --dart-define=NANOFLAGS_SDK_KEY=${{ env.NANOFLAGS_SDK_KEY }} --reporter expanded
+
+  ios:
+    name: integration_test on iOS simulator (macos-latest)
+    needs: android
+    # Runs after Android even when Android failed (the jobs only share the demo flag, not results).
+    if: ${{ always() && needs.dart.result == 'success' }}
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+      - name: Boot an iPhone simulator
+        id: sim
+        run: |
+          udid=$(xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          devices = json.load(sys.stdin)["devices"]
+          for runtime in sorted(devices, reverse=True):
+              if "iOS" not in runtime:
+                  continue
+              for d in devices[runtime]:
+                  if d["name"].startswith("iPhone"):
+                      print(d["udid"]); sys.exit(0)
+          sys.exit(1)')
+          echo "udid=$udid" >> "$GITHUB_OUTPUT"
+          xcrun simctl boot "$udid" || true
+          xcrun simctl bootstatus "$udid" -b
+      - name: Run integration_test on the simulator
+        working-directory: packages/sdk-dart/nanoflags_flutter/example
+        run: |
+          flutter pub get
+          flutter test integration_test -d "${{ steps.sim.outputs.udid }}" --dart-define=NANOFLAGS_SDK_KEY=${{ env.NANOFLAGS_SDK_KEY }} --reporter expanded

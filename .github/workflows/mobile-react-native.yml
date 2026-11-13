@@ -1,0 +1,226 @@
+# React Native SDK: unit + parity tests, the Expo example's type check and Jest suite, and device tests (Maestro) of
+# the example app on an Android emulator and an iOS simulator, against the PRODUCTION edge with the public live-demo
+# browser key (public by design: it only reads the demo environment's client-exposed flags). No secrets are used.
+#
+# Installed by hand from the monorepo's packages/sdk-react-native/ci/mobile-react-native.yml (the export script does
+# not copy ci/). Paths assume packages/… at the repository root, as in the monorepo.
+#
+# The Maestro flows toggle `demo-accent` through the public, rate-limited demo endpoint and restore it afterwards;
+# the device jobs therefore run one after the other, and runs of this workflow never overlap (concurrency group).
+name: Mobile · React Native
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packages/sdk-react-native/**"
+      - "packages/sdk/src/**"
+      - "packages/engine/src/**"
+      - "packages/engine/fixtures/**"
+      - "packages/openfeature/src/**"
+      - "go/internal/testdata/**"
+      - ".github/workflows/mobile-react-native.yml"
+  workflow_dispatch:
+    inputs:
+      ios:
+        description: "Also run the iOS simulator job"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  # Shared by every workflow that toggles the public demo flag (React Native, Flutter, Android, Swift):
+  # one at a time, never cancelled mid-run (a cancelled run could leave the flag changed).
+  group: nanoflags-demo-device-tests
+  cancel-in-progress: false
+
+env:
+  # Public live-demo browser key (flags demo-new-checkout, demo-accent): a client key, already in the public site's
+  # source. Not a secret. Inlined into the app bundle at build time.
+  NANOFLAGS_DEMO_SDK_KEY: nf_pub_4ced72c484c4f388a900aeeaf81e130c110c11730d555dd8
+  EXPO_PUBLIC_NANOFLAGS_SDK_KEY: nf_pub_4ced72c484c4f388a900aeeaf81e130c110c11730d555dd8
+  EXPO_NO_TELEMETRY: "1"
+  MAESTRO_VERSION: "2.8.0"
+  MAESTRO_CLI_NO_ANALYTICS: "1"
+  EXAMPLE_DIR: packages/sdk-react-native/example
+
+jobs:
+  sdk:
+    name: SDK unit + parity tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Typecheck
+        run: pnpm --filter @nanoflags/react-native typecheck
+      - name: Build + unit tests + parity fixtures through dist/
+        run: pnpm --filter @nanoflags/react-native test
+      - name: Pack (the tarball the example and device jobs install)
+        working-directory: packages/sdk-react-native
+        run: pnpm pack --pack-destination "$RUNNER_TEMP/pack"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nanoflags-react-native-tgz
+          path: ${{ runner.temp }}/pack/*.tgz
+          retention-days: 7
+
+  example:
+    name: Example · tsc + Jest
+    needs: sdk
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: nanoflags-react-native-tgz
+          path: ${{ runner.temp }}/pack
+      - name: Install the example against the packed SDK
+        working-directory: ${{ env.EXAMPLE_DIR }}
+        run: |
+          tgz=$(ls "$RUNNER_TEMP"/pack/*.tgz)
+          node -e 'const f="package.json",p=require("./"+f);p.dependencies["@nanoflags/react-native"]="file:"+process.argv[1];require("fs").writeFileSync(f,JSON.stringify(p,null,2)+"\n")' "$tgz"
+          npm install --no-audit --no-fund
+      - name: Typecheck
+        working-directory: ${{ env.EXAMPLE_DIR }}
+        run: npx tsc --noEmit
+      - name: Jest
+        working-directory: ${{ env.EXAMPLE_DIR }}
+        run: npx jest --ci
+
+  android:
+    name: Android emulator (API 34) · Maestro
+    needs: sdk
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: gradle
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: nanoflags-react-native-tgz
+          path: ${{ runner.temp }}/pack
+      - name: Install the example against the packed SDK
+        working-directory: ${{ env.EXAMPLE_DIR }}
+        run: |
+          tgz=$(ls "$RUNNER_TEMP"/pack/*.tgz)
+          node -e 'const f="package.json",p=require("./"+f);p.dependencies["@nanoflags/react-native"]="file:"+process.argv[1];require("fs").writeFileSync(f,JSON.stringify(p,null,2)+"\n")' "$tgz"
+          npm install --no-audit --no-fund
+      - name: expo prebuild (android)
+        working-directory: ${{ env.EXAMPLE_DIR }}
+        run: CI=1 npx expo prebuild --platform android --no-install
+      - name: Build release APK (x86_64 only; JS bundle with the demo key inlined)
+        working-directory: ${{ env.EXAMPLE_DIR }}/android
+        run: ./gradlew assembleRelease -PreactNativeArchitectures=x86_64 --no-daemon
+      - name: Install Maestro ${{ env.MAESTRO_VERSION }}
+        run: |
+          curl -fsSL "https://get.maestro.mobile.dev" | bash
+          echo "$HOME/.maestro/bin" >> "$GITHUB_PATH"
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Maestro flows on the emulator
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          force-avd-creation: false
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          disable-animations: true
+          working-directory: ${{ env.EXAMPLE_DIR }}
+          script: |
+            adb install -r android/app/build/outputs/apk/release/app-release.apk
+            maestro test --format junit --output "$RUNNER_TEMP/maestro-android.xml" .maestro
+      - name: Upload Maestro report and screenshots
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: maestro-android
+          path: |
+            ${{ runner.temp }}/maestro-android.xml
+            ~/.maestro/tests/
+          if-no-files-found: ignore
+
+  ios:
+    name: iOS simulator · Maestro
+    # After the Android job: both toggle the same public demo flag.
+    needs: [sdk, android]
+    if: ${{ always() && needs.sdk.result == 'success' && (github.event_name != 'workflow_dispatch' || inputs.ios) }}
+    runs-on: macos-latest
+    timeout-minutes: 75
+    # Simulator images and Xcode versions on hosted macOS runners change often: report, do not block.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: nanoflags-react-native-tgz
+          path: ${{ runner.temp }}/pack
+      - name: Install the example against the packed SDK
+        working-directory: ${{ env.EXAMPLE_DIR }}
+        run: |
+          tgz=$(ls "$RUNNER_TEMP"/pack/*.tgz)
+          node -e 'const f="package.json",p=require("./"+f);p.dependencies["@nanoflags/react-native"]="file:"+process.argv[1];require("fs").writeFileSync(f,JSON.stringify(p,null,2)+"\n")' "$tgz"
+          npm install --no-audit --no-fund
+      - name: expo prebuild (ios, runs pod install)
+        working-directory: ${{ env.EXAMPLE_DIR }}
+        run: CI=1 npx expo prebuild --platform ios
+      - name: Build for the simulator (Release, unsigned)
+        working-directory: ${{ env.EXAMPLE_DIR }}/ios
+        run: |
+          set -o pipefail
+          xcodebuild -workspace NanoFlagsExample.xcworkspace -scheme NanoFlagsExample -configuration Release \
+            -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO build | tail -n 50
+      - name: Boot a simulator and install the app
+        working-directory: ${{ env.EXAMPLE_DIR }}
+        run: |
+          udid=$(xcrun simctl list devices available -j | jq -r '[.devices[][] | select(.name | startswith("iPhone"))][0].udid')
+          echo "SIM_UDID=$udid" >> "$GITHUB_ENV"
+          xcrun simctl boot "$udid"
+          xcrun simctl bootstatus "$udid" -b
+          xcrun simctl install "$udid" ios/build/Build/Products/Release-iphonesimulator/NanoFlagsExample.app
+      - name: Install Maestro ${{ env.MAESTRO_VERSION }}
+        run: |
+          curl -fsSL "https://get.maestro.mobile.dev" | bash
+          echo "$HOME/.maestro/bin" >> "$GITHUB_PATH"
+      - name: Maestro flows on the simulator
+        working-directory: ${{ env.EXAMPLE_DIR }}
+        run: maestro --device "$SIM_UDID" test --format junit --output "$RUNNER_TEMP/maestro-ios.xml" .maestro
+      - name: Upload Maestro report and screenshots
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: maestro-ios
+          path: |
+            ${{ runner.temp }}/maestro-ios.xml
+            ~/.maestro/tests/
+          if-no-files-found: ignore

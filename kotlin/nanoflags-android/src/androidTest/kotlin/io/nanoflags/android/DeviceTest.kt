@@ -1,6 +1,5 @@
 package io.nanoflags.android
 
-import androidx.lifecycle.Lifecycle
 import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -86,9 +85,12 @@ class DeviceTest {
             val connects = edge.liveConnects.get()
             edge.accent = "orange"
             edge.revision = 9 // published while the app was in the background
-            scenario.moveToState(Lifecycle.State.RESUMED)
+            // Back to the foreground: an activity of the process starts again (moveToState(RESUMED) cannot bring back an
+            // activity stopped by the home key, so launch a new one, as the launcher would).
+            val again = ActivityScenario.launch(TestActivity::class.java)
             eventually("refreshed in the foreground") { c.revision == 9L && c.stringVariation("accent", "x") == "orange" }
             eventually("reconnected") { c.transport.value == Transport.LIVE && edge.liveConnects.get() > connects }
+            again.close()
             scenario.close()
         }
     }

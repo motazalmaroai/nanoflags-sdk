@@ -1,0 +1,101 @@
+# Android / Kotlin SDK CI for the public mirror motazalmaroai/nanoflags-sdk.
+# Installed by hand as .github/workflows/mobile-android.yml (from the monorepo's packages/sdk-kotlin/ci/). Paths follow the public layout: the SDK lives in kotlin/
+# (exported from packages/sdk-kotlin), the shared parity fixtures in packages/engine/fixtures and the Go port's
+# extra fixtures in go/internal/testdata.
+#
+# No secrets are used. The production checks (live update through the public demo) use the PUBLIC demo browser key,
+# set inline below (a client key, already in the public site's source).
+name: Mobile · Android
+
+on:
+  push:
+    branches: [main]
+    paths: ["kotlin/**", "packages/engine/fixtures/**", "go/internal/testdata/**", ".github/workflows/mobile-android.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Shared by every workflow that toggles the public demo flag (React Native, Flutter, Android, Swift):
+  # one at a time, never cancelled mid-run (a cancelled run could leave the flag changed).
+  group: nanoflags-demo-device-tests
+  cancel-in-progress: false
+
+env:
+  NANOFLAGS_DEMO_SDK_KEY: nf_pub_4ced72c484c4f388a900aeeaf81e130c110c11730d555dd8
+
+defaults:
+  run:
+    working-directory: kotlin
+
+jobs:
+  jvm:
+    name: JVM tests (core parity, verification, transport; Robolectric; OpenFeature)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1 (caches Gradle)
+      - name: Core tests (21,998 parity cases + extra, verification, fake edge, live production check)
+        env:
+          NANOFLAGS_PRODUCTION_TESTS: "1"
+          NANOFLAGS_SDK_KEY: ${{ env.NANOFLAGS_DEMO_SDK_KEY }}
+        run: ./gradlew --no-daemon :nanoflags-core:test
+      - name: Robolectric and OpenFeature tests
+        run: ./gradlew --no-daemon :nanoflags-android:testDebugUnitTest :nanoflags-openfeature:test
+      - name: Release build of the sample (R8)
+        run: ./gradlew --no-daemon :sample:assembleRelease
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: jvm-test-reports
+          path: kotlin/**/build/reports/tests/
+          if-no-files-found: ignore
+
+  device:
+    name: Device tests (emulator API 34, x86_64)
+    # After the JVM job (whose production check also toggles the demo flag), whatever its result.
+    needs: jvm
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1 (caches Gradle)
+      # Hardware acceleration for the emulator, as documented by reactivecircus/android-emulator-runner.
+      - name: Enable KVM
+        working-directory: .
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Build test APKs
+        run: ./gradlew --no-daemon :nanoflags-android:assembleDebugAndroidTest :sample:assembleDebug :sample:assembleDebugAndroidTest
+      - name: connectedAndroidTest
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          force-avd-creation: false
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          disable-animations: true
+          working-directory: kotlin
+          script: ./gradlew --no-daemon connectedAndroidTest "-Pandroid.testInstrumentationRunnerArguments.nanoflagsSdkKey=$NANOFLAGS_DEMO_SDK_KEY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: device-test-reports
+          path: |
+            kotlin/**/build/reports/androidTests/
+            kotlin/**/build/outputs/androidTest-results/
+          if-no-files-found: ignore

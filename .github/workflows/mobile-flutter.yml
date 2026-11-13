@@ -120,7 +120,7 @@ jobs:
     # Runs after Android even when Android failed (the jobs only share the demo flag, not results).
     if: ${{ always() && needs.dart.result == 'success' }}
     runs-on: macos-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
@@ -144,8 +144,27 @@ jobs:
           echo "udid=$udid" >> "$GITHUB_OUTPUT"
           xcrun simctl boot "$udid" || true
           xcrun simctl bootstatus "$udid" -b
-      - name: Run integration_test on the simulator
+      - name: Build the example for the simulator
         working-directory: packages/sdk-dart/nanoflags_flutter/example
         run: |
           flutter pub get
-          flutter test integration_test -d "${{ steps.sim.outputs.udid }}" --dart-define=NANOFLAGS_SDK_KEY=${{ env.NANOFLAGS_SDK_KEY }} --reporter expanded
+          flutter build ios --simulator --debug --dart-define=NANOFLAGS_SDK_KEY=${{ env.NANOFLAGS_SDK_KEY }}
+      # `flutter test integration_test` on a hosted macOS runner can build and install the app but never attach to it
+      # (observed: no output for 35 min after "Xcode build done"). Bound it, then fall back to `flutter drive`, which
+      # talks to the app through the driver extension instead.
+      - name: Run integration_test on the simulator
+        id: itest
+        continue-on-error: true
+        timeout-minutes: 12
+        working-directory: packages/sdk-dart/nanoflags_flutter/example
+        run: flutter test integration_test -d "${{ steps.sim.outputs.udid }}" --dart-define=NANOFLAGS_SDK_KEY=${{ env.NANOFLAGS_SDK_KEY }} --reporter expanded
+      - name: Fallback — flutter drive on the simulator
+        if: steps.itest.outcome != 'success'
+        timeout-minutes: 15
+        working-directory: packages/sdk-dart/nanoflags_flutter/example
+        run: |
+          flutter drive --driver=test_driver/integration_test.dart --target=integration_test/live_demo_test.dart \
+            -d "${{ steps.sim.outputs.udid }}" --dart-define=NANOFLAGS_SDK_KEY=${{ env.NANOFLAGS_SDK_KEY }}
+      - name: Simulator log of the app (on failure)
+        if: failure() || steps.itest.outcome != 'success'
+        run: xcrun simctl spawn "${{ steps.sim.outputs.udid }}" log show --last 30m --style compact --predicate 'process == "Runner"' | tail -n 200 || true

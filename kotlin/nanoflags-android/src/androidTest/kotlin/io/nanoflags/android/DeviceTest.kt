@@ -58,6 +58,11 @@ class DeviceTest {
         if (!cond()) fail("timed out waiting for $what")
     }
 
+    private fun pressHome() {
+        val pfd = InstrumentationRegistry.getInstrumentation().uiAutomation.executeShellCommand("input keyevent KEYCODE_HOME")
+        android.os.ParcelFileDescriptor.AutoCloseInputStream(pfd).use { it.readBytes() }
+    }
+
     private fun client(edge: SigningEdge, key: String, configure: io.nanoflags.NanoFlagsOptions.() -> Unit = {}) =
         NanoFlagsAndroid.create(context, key) {
             baseUrl = edge.baseUrl
@@ -73,8 +78,10 @@ class DeviceTest {
             val c = client(edge, "nf_pub_devicelifecycle")
             eventually("ready and live") { c.status.value == Status.READY && c.transport.value == Transport.LIVE }
             assertEquals("green", c.stringVariation("accent", "x"))
-            // Background: ProcessLifecycleOwner reports ON_STOP ~700 ms after the last activity stopped.
-            scenario.moveToState(Lifecycle.State.CREATED)
+            // Background: ProcessLifecycleOwner reports ON_STOP ~700 ms after the last activity of the process stopped.
+            // (ActivityScenario.moveToState(CREATED) is not enough: it stops TestActivity by starting another activity
+            // of this same process on top, so the process never leaves the foreground.) Go to the home screen instead.
+            pressHome()
             eventually("socket closed in the background") { c.transport.value == Transport.PAUSED && edge.sockets.isEmpty() }
             val connects = edge.liveConnects.get()
             edge.accent = "orange"

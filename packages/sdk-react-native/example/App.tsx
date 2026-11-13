@@ -1,5 +1,5 @@
 import { StatusBar } from "expo-status-bar";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { ActivityIndicator, Button, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { OpenFeature, OpenFeatureProvider, useBooleanFlagValue } from "@openfeature/react-sdk";
 import { NanoFlagsProvider, useBoolFlag, useFlag, useFlagDetail, useNanoFlags } from "@nanoflags/react-native";
@@ -28,6 +28,9 @@ function Home() {
   const accent = useFlag("demo-accent", "blue");
   const detail = useFlagDetail("demo-accent", "blue");
   const viaOpenFeature = useBooleanFlagValue("demo-new-checkout", false);
+  // The last background problem (signature, network, …): never thrown from accessors, so show it.
+  const [lastError, setLastError] = useState<string | null>(null);
+  useEffect(() => flags.on("error", (e) => setLastError(`${(e as { code?: string }).code ?? "error"}: ${e.message}`)), []);
 
   useEffect(() => {
     // E.g. after restoring a session: identify the user. Local and synchronous, no request.
@@ -73,6 +76,7 @@ function Home() {
         <Button testID="sign-out" title="Sign out" onPress={() => identify({ key: "anonymous-device", platform: "expo" })} />
       </View>
       <Button testID="refresh" title="Refresh" onPress={() => void refresh()} />
+      {lastError ? <Text testID="error" style={styles.small}>last error · {lastError}</Text> : null}
     </ScrollView>
   );
 }

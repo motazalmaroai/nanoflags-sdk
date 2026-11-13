@@ -131,6 +131,21 @@ describe("live transport", () => {
     expect(edge.count("/v1/stream")).toBe(0);
   });
 
+  it("notifies subscribers when the transport changes (socket opened or lost), so hooks re-render", async () => {
+    const edge = mockEdge({ bundle: bundleResponse(makeBundle(3)) });
+    const c = client({ fetch: edge.fetch });
+    await c.ready();
+    await tick();
+    const seen: string[] = [];
+    c.subscribe(() => seen.push(c.transport));
+    FakeSocket.last.open();
+    expect(seen).toContain("live");
+    const v = c.version;
+    FakeSocket.last.drop();
+    expect(c.version).toBeGreaterThan(v);
+    expect(seen.at(-1)).not.toBe("live");
+  });
+
   it("applies a pushed bundle without any fetch and reports latency and transport", async () => {
     const edge = mockEdge({ bundle: bundleResponse(makeBundle(3)) });
     const c = client({ fetch: edge.fetch });

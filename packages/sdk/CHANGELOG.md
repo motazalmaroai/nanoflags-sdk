@@ -10,6 +10,7 @@ Additive, no breaking changes. These options let platform SDKs (the React Native
 - `lifecycle` option: receives a `LifecycleControl` (`pause()`, `resume()`, `setRealtime()`, `paused`) so app-lifecycle and connectivity integrations can stop and restart background network activity.
 - `sdkLabel` option: the `sdk` label of telemetry reports (default `js/<version>`).
 - The live socket is torn down synchronously when the client drops the live connection.
+- `subscribe()` listeners (and so the React hooks) are notified when `transport` changes (socket opened or lost, SSE started or stopped); before, a hook showed the transport of its last re-render.
 - `TextEncoder` / `atob` fallbacks for runtimes that lack them.
 
 ## 0.4.0

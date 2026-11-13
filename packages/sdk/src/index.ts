@@ -428,6 +428,14 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
     version++;
     for (const s of [...subscribers]) safely(s);
   };
+  /** `transport` is derived from the socket and stream state: subscribers (React hooks) re-render when it changes. */
+  let reportedTransport: Transport = "poll";
+  const transportMaybeChanged = () => {
+    const t: Transport = liveOpen ? "live" : streamActive ? "stream" : "poll";
+    if (t === reportedTransport) return;
+    reportedTransport = t;
+    changed();
+  };
   const setStatus = (next: ClientStatus) => {
     if (status === next) return;
     status = next;
@@ -730,6 +738,7 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
   function startStream() {
     if (closed || paused || !realtimeAllowed || options.streaming === false || (!doFetch && !options.openStream) || streamActive || environmentDeleted) return;
     streamActive = true;
+    transportMaybeChanged();
     const ES: typeof EventSource | undefined = typeof EventSource === "function" ? EventSource : undefined;
     if (ES && isBrowserKey && !options.openStream) {
       // EventSource cannot send headers; only browser keys may travel in the URL.
@@ -752,6 +761,7 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
     streamAbort = null;
     eventSource?.close();
     eventSource = null;
+    transportMaybeChanged();
   }
 
   const openStream: StreamOpener =
@@ -787,6 +797,7 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
       if (!current()) return;
       if (stop) {
         streamActive = false;
+        transportMaybeChanged();
         return;
       }
       attempt = Date.now() - startedAt > 30_000 ? 0 : attempt + 1;
@@ -905,6 +916,7 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
       }
       if (socket === ws) socket = null;
       liveOpen = false;
+      transportMaybeChanged();
       liveEnded(opened, opened ? Date.now() - openedAt : 0, rotating);
     };
     endSocket = end;
@@ -929,7 +941,8 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
       openedAt = Date.now();
       liveOpen = true;
       clearTimeout(connectTimer);
-      stopStream(); // SSE is not used while the socket is healthy
+      stopStream(); // SSE is not used while the socket is healthy (also reports the transport change)
+      transportMaybeChanged();
       schedulePoll(); // the poll becomes a safety net
       ping();
       rotateTimer = unref(

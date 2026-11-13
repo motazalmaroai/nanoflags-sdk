@@ -4,7 +4,8 @@
 # extra fixtures in go/internal/testdata.
 #
 # No secrets are used. The production checks (live update through the public demo) use the PUBLIC demo browser key,
-# set inline below (a client key, already in the public site's source).
+# set inline below (a client key, already in the public site's source). The device job runs after the JVM job, and
+# runs never overlap with the other demo-toggling workflows of this repository (shared concurrency group).
 name: Mobile · Android
 
 on:

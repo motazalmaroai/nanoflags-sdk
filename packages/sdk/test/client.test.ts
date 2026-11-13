@@ -583,7 +583,7 @@ describe("events", () => {
     const body = call.body as { service: string; sdk: string; revision: number; events: Array<Record<string, unknown>> };
     expect(body).toMatchObject({ service: "checkout-api", sdk: `js/${SDK_VERSION}`, revision: 3 });
     expect(body.events).toHaveLength(7);
-    expect(body.events[0]).toMatchObject({ flagKey: "checkout-v2", value: true, reason: "rule_match", ruleIndex: 1, revision: 3 });
+    expect(body.events[0]).toMatchObject({ flagKey: "checkout-v2", value: true, reason: "rule_match", ruleIndex: 1, revision: 3 , sampleRate: 1 });
     expect(Number.isNaN(Date.parse(body.events[0]!.at as string))).toBe(false);
 
     // No evaluations in the next intervals: nothing is sent until the idle report is due (60 s after the last request).

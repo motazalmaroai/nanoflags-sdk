@@ -1,0 +1,32 @@
+# identify() changes the context locally (no request); a relaunch starts from the bundle persisted in AsyncStorage
+# (verified again) before the network answers.
+appId: io.nanoflags.example
+name: identify and persisted start
+tags: [nanoflags, identify]
+---
+- launchApp:
+    clearState: true
+- extendedWaitUntil:
+    visible:
+      id: "status"
+      text: "status ready.*"
+    timeout: 45000
+- tapOn:
+    id: "sign-in"
+- assertVisible:
+    id: "context"
+    text: ".*user-42.*"
+- tapOn:
+    id: "sign-out"
+- assertVisible:
+    id: "context"
+    text: ".*anonymous-device.*"
+- stopApp
+# No clearState: AsyncStorage keeps the last verified bundle.
+- launchApp:
+    stopApp: true
+- extendedWaitUntil:
+    visible:
+      id: "accent"
+      text: "demo-accent = (blue|orange|green)"
+    timeout: 20000

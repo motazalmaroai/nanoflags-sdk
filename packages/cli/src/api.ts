@@ -83,12 +83,13 @@ export interface ApiOptions {
 export class Api {
   constructor(private readonly o: ApiOptions) {}
 
-  private async call<T>(method: string, path: string, body?: unknown): Promise<T> {
+  /** One JSON request to `baseUrl + path`; API errors become `ApiError`. */
+  async call<T>(method: string, path: string, body?: unknown, extra: Record<string, string> = {}): Promise<T> {
     let res: Response;
     try {
       res = await this.o.fetch(`${this.o.baseUrl}${path}`, {
         method,
-        headers: { Authorization: `Bearer ${this.o.key}`, Accept: "application/json", "User-Agent": this.o.userAgent, ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
+        headers: { Authorization: `Bearer ${this.o.key}`, Accept: "application/json", "User-Agent": this.o.userAgent, ...(body === undefined ? {} : { "Content-Type": "application/json" }), ...extra },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
         signal: AbortSignal.timeout(30_000),
       });
@@ -134,6 +135,42 @@ export class Api {
   }
   putCodeRefs(body: { repo: string; commit: string | null; refs: Array<{ flag: string; path: string; line: number; snippet: string }> }): Promise<{ stored: number }> {
     return this.call("PUT", "/v1/ci/code-refs", body);
+  }
+}
+
+export interface KillResult {
+  killId: string;
+  flag: string;
+  reason: string;
+  killed: number;
+  environments: Array<{ environment: string; environmentId: string; status: string; revision: number; previousRevision?: number; checksum?: string; committedAt?: number; offValue?: unknown }>;
+}
+
+export interface KillRestoreResult {
+  flag: string;
+  environment: string;
+  killId: string;
+  change: { id: string; title: string; status: string };
+  requirements: { changeRequired: boolean; approvalMet: boolean; approvalsNeeded: number; scenariosMet: boolean };
+}
+
+/** Management API (`/api/v1`, `nf_api_…` tokens): only the kill-switch calls the CLI needs. */
+export class ManagementApi {
+  private readonly http: Api;
+  constructor(o: ApiOptions) {
+    this.http = new Api({ ...o, baseUrl: `${o.baseUrl}/api/v1` });
+  }
+  private call<T>(method: string, path: string, body?: unknown, headers: Record<string, string> = {}): Promise<T> {
+    return this.http.call<T>(method, path, body, headers);
+  }
+  projects(): Promise<{ data: Array<{ id: string; key: string; name: string }>; nextCursor: string | null }> {
+    return this.call("GET", "/projects");
+  }
+  kill(project: string, flag: string, body: { environment?: string; allEnvironments?: true; reason: string }, idempotencyKey: string): Promise<KillResult> {
+    return this.call("POST", `/projects/${encodeURIComponent(project)}/flags/${encodeURIComponent(flag)}/kill`, body, { "Idempotency-Key": idempotencyKey });
+  }
+  restore(project: string, flag: string, body: { environment: string; title?: string; reason?: string }): Promise<KillRestoreResult> {
+    return this.call("POST", `/projects/${encodeURIComponent(project)}/flags/${encodeURIComponent(flag)}/restore`, body);
   }
 }
 

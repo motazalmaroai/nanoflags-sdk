@@ -1,0 +1,42 @@
+name: nanoflags
+description: >-
+  NanoFlags client SDK for Dart and Flutter: local, synchronous feature-flag evaluation with signed
+  configuration bundles, live updates over WebSocket and offline-first persistence. Client (nf_pub_) keys only.
+version: 0.1.0
+homepage: https://nanoflags.io
+repository: https://github.com/motazalmaroai/nanoflags-sdk/tree/main/packages/sdk-dart/nanoflags
+issue_tracker: https://github.com/motazalmaroai/nanoflags-sdk/issues
+documentation: https://nanoflags.io/docs
+topics:
+  - feature-flags
+  - feature-toggles
+  - remote-config
+  - experimentation
+
+environment:
+  sdk: ^3.6.0
+
+platforms:
+  android:
+  ios:
+  linux:
+  macos:
+  web:
+  windows:
+
+dependencies:
+  # Ed25519 signature verification (pure Dart, every platform). Pinned to the 2.9 line (patch releases
+  # only): it guards the trust boundary. An exact pin (2.9.0) makes pub.dev flag the package and forces
+  # every app onto exactly one version.
+  cryptography: ">=2.9.0 <2.10.0"
+  # SHA-256 of the signed bundle text.
+  crypto: ^3.0.6
+  http: ^1.5.0
+  # NFC normalisation for MurmurHash3 bucketing (the engine hashes UTF-8 bytes of NFC strings).
+  unorm_dart: ^0.3.3
+  web_socket_channel: ^3.0.1
+
+dev_dependencies:
+  lints: ^6.0.0
+  stream_channel: ^2.1.0
+  test: ^1.25.0

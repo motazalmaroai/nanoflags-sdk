@@ -1,0 +1,12 @@
+.dart_tool/
+build/
+# Libraries do not commit lockfiles (pub ignores them for consumers).
+nanoflags/pubspec.lock
+nanoflags_flutter/pubspec.lock
+nanoflags_openfeature/pubspec.lock
+nanoflags_flutter/example/pubspec.lock
+.flutter-plugins
+.flutter-plugins-dependencies
+*.iml
+.idea/
+.kotlin/

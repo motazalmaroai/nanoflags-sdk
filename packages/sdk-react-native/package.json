@@ -1,0 +1,128 @@
+{
+  "name": "@nanoflags/react-native",
+  "version": "0.1.0",
+  "description": "NanoFlags React Native SDK: local, synchronous flag evaluation with signed, live-updated configuration, offline-first persistence, app-lifecycle awareness, React hooks and an OpenFeature provider.",
+  "keywords": [
+    "feature-flags",
+    "feature-toggles",
+    "nanoflags",
+    "react-native",
+    "expo",
+    "mobile",
+    "react",
+    "openfeature"
+  ],
+  "license": "Apache-2.0",
+  "homepage": "https://nanoflags.io/docs",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/motazalmaroai/nanoflags-sdk.git",
+    "directory": "packages/sdk-react-native"
+  },
+  "bugs": {
+    "url": "https://github.com/motazalmaroai/nanoflags-sdk/issues"
+  },
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.cts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./openfeature": {
+      "import": {
+        "types": "./dist/openfeature.d.ts",
+        "default": "./dist/openfeature.js"
+      },
+      "require": {
+        "types": "./dist/openfeature.d.cts",
+        "default": "./dist/openfeature.cjs"
+      }
+    },
+    "./engine": {
+      "import": {
+        "types": "./dist/engine.d.ts",
+        "default": "./dist/engine.js"
+      },
+      "require": {
+        "types": "./dist/engine.d.cts",
+        "default": "./dist/engine.cjs"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "build": "tsdown",
+    "test": "tsdown --log-level warn && vitest run",
+    "typecheck": "tsc --noEmit",
+    "typecheck:example": "tsc --noEmit -p example",
+    "live": "pnpm build && node --use-env-proxy --import ./scripts/rn-env.mjs scripts/live-check.mjs",
+    "prepublishOnly": "pnpm run build && pnpm run typecheck && pnpm run test"
+  },
+  "peerDependencies": {
+    "@openfeature/core": "^1.12.0",
+    "@openfeature/web-sdk": "^1.9.0",
+    "@react-native-async-storage/async-storage": ">=1.21.0",
+    "@react-native-community/netinfo": ">=11.0.0",
+    "react": ">=18",
+    "react-native": ">=0.76"
+  },
+  "peerDependenciesMeta": {
+    "@openfeature/core": {
+      "optional": true
+    },
+    "@openfeature/web-sdk": {
+      "optional": true
+    },
+    "@react-native-async-storage/async-storage": {
+      "optional": true
+    },
+    "@react-native-community/netinfo": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@nanoflags/engine": "workspace:*",
+    "@nanoflags/openfeature-provider": "workspace:*",
+    "@nanoflags/sdk": "workspace:*",
+    "@noble/ed25519": "3.2.0",
+    "@noble/hashes": "2.4.0",
+    "@openfeature/core": "^1.12.0",
+    "@openfeature/react-sdk": "1.4.1",
+    "@openfeature/web-sdk": "^1.10.0",
+    "@types/node": "^22.20.5",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "happy-dom": "21.0.4",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "react-native": "0.88.1",
+    "tsdown": "^0.23.7",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.12"
+  },
+  "author": "Alibtekarat Althkiya Company for Trading & Marketing (Intinovate) <support@nanoflags.io>"
+}

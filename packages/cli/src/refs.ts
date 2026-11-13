@@ -1,8 +1,7 @@
 import ts from "typescript";
-import { clip } from "./util.js";
-
-// Detection constants and the result type are shared with the compiler-free scanner (refs-lite.ts).
-import { CALLEE_NAMES, type CodeRef } from "./refs-lite.js";
+// Detection constants, the result type and `clip` are shared with the compiler-free scanner (refs-lite.ts). No Node.js
+// imports here: the notify Worker runs `cleanup.ts` (which uses this file) to open cleanup pull requests.
+import { CALLEE_NAMES, clip, type CodeRef } from "./refs-lite.js";
 export { CALLEE_NAMES, type CodeRef };
 
 export interface CallSite {

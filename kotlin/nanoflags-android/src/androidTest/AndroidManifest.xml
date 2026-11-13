@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- The fake edge runs on localhost over plain HTTP inside the test process. -->
+    <application android:usesCleartextTraffic="true">
+        <activity android:name="io.nanoflags.android.TestActivity" android:exported="false" />
+    </application>
+</manifest>

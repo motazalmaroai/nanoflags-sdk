@@ -1,0 +1,10 @@
+{
+  "expo": {
+    "name": "NanoFlags Example",
+    "slug": "nanoflags-react-native-example",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "ios": { "supportsTablet": true, "bundleIdentifier": "io.nanoflags.example" },
+    "android": { "package": "io.nanoflags.example" }
+  }
+}

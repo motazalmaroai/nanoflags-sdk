@@ -1,6 +1,6 @@
 {
   "name": "@nanoflags/cli",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "NanoFlags command line: export, flag creation, local evaluation, CI scenario checks, publishing, code references and flag cleanup.",
   "keywords": [
     "nanoflags",

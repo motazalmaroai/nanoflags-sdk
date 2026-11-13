@@ -1,0 +1,4 @@
+tags:
+  live:
+    # Talks to the production edge and publishes demo revisions: only with NANOFLAGS_LIVE=1.
+    timeout: 2x

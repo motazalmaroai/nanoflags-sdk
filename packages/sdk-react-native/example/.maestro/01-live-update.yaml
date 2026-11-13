@@ -1,0 +1,26 @@
+# The example app loads its (signed, verified) configuration, opens the live socket, and a flag published through the
+# public demo endpoint reaches the UI without any user action.
+appId: io.nanoflags.example
+name: Live update reaches the UI
+tags: [nanoflags, live]
+---
+- launchApp:
+    clearState: true
+- extendedWaitUntil:
+    visible:
+      id: "status"
+      text: "status ready · r\\d+ · live.*"
+    timeout: 45000
+- assertVisible:
+    id: "accent"
+    text: "demo-accent = (blue|orange|green)"
+- runScript: scripts/toggle-accent.js
+- extendedWaitUntil:
+    visible:
+      id: "accent"
+      text: "demo-accent = ${output.next}"
+    timeout: 20000
+- runScript:
+    file: scripts/set-accent.js
+    env:
+      VALUE: ${output.previous}

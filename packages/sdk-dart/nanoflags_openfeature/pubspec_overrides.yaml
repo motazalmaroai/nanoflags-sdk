@@ -1,0 +1,4 @@
+# Development inside the repository: use the core package next to this one (see ../PUBLISHING.md).
+dependency_overrides:
+  nanoflags:
+    path: ../nanoflags

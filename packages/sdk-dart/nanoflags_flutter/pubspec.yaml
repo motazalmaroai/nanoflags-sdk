@@ -1,0 +1,32 @@
+name: nanoflags_flutter
+description: >-
+  Flutter bindings for NanoFlags feature flags: NanoFlagsProvider, FlagBuilder, app lifecycle
+  handling (pause in the background, refresh on resume) and on-device persistence with
+  shared_preferences.
+version: 0.1.0
+homepage: https://nanoflags.io
+repository: https://github.com/motazalmaroai/nanoflags-sdk/tree/main/packages/sdk-dart/nanoflags_flutter
+issue_tracker: https://github.com/motazalmaroai/nanoflags-sdk/issues
+documentation: https://nanoflags.io/docs
+topics:
+  - feature-flags
+  - feature-toggles
+  - remote-config
+  - flutter
+
+environment:
+  sdk: ^3.6.0
+  flutter: ">=3.27.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  nanoflags: ^0.1.0
+  shared_preferences: ^2.3.0
+
+dev_dependencies:
+  flutter_lints: ^6.0.0
+  http: ^1.5.0
+  flutter_test:
+    sdk: flutter
+  shared_preferences_platform_interface: ^2.4.0

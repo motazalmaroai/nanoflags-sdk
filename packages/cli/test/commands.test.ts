@@ -20,7 +20,7 @@ const RUN_FAIL = { ...RUN_OK, passed: 1, failed: 1, results: [RUN_OK.results[0]!
 describe("general", () => {
   it("--help, --version, no command, unknown command, unknown option", async () => {
     expect((await cli(["--help"])).out).toContain("Usage: nanoflags <command>");
-    expect((await cli(["--version"])).out).toBe("0.2.0\n");
+    expect((await cli(["--version"])).out).toBe("0.3.0\n");
     expect((await cli([])).code).toBe(2);
     expect(await cli(["frobnicate"])).toMatchObject({ code: 2, out: "" });
     expect((await cli(["export", "--nope"])).code).toBe(2);
@@ -462,5 +462,101 @@ describe("cleanup", () => {
       const text = readFileSync(join(src, f), "utf8");
       expect(text).not.toMatch(/child_process|execSync|spawn\(|github\.com\/repos|api\.github\.com/);
     }
+  });
+});
+
+describe("flags kill / restore (Management API)", () => {
+  const TOKEN = "nf_api_" + "cd".repeat(24);
+  const env = { NANOFLAGS_API_TOKEN: TOKEN };
+  const killed = {
+    killId: "k1", flag: "checkout-v2", reason: "Checkout errors after release", killed: 1,
+    environments: [{ environment: "production", environmentId: "e1", status: "killed", revision: 43, previousRevision: 42, checksum: "aa", committedAt: 1, offValue: false }],
+  };
+  const projects = json({ data: [{ id: "p1", key: "commerce", name: "Commerce" }], nextCursor: null });
+
+  it("kills in one environment with an API token, the reason and an idempotency key", async () => {
+    const r = await cli(["flags", "kill", "checkout-v2", "--env", "production", "--reason", "Checkout errors after release"], {
+      env, routes: { "GET /api/v1/projects": projects, "POST /api/v1/projects/commerce/flags/checkout-v2/kill": json(killed) },
+    });
+    expect(r.code, r.err).toBe(0);
+    expect(r.out).toContain("KILLED checkout-v2 in 1 environment");
+    expect(r.out).toContain("production: r43 serves the off value false (was r42)");
+    expect(r.out).toContain("nanoflags flags restore checkout-v2");
+    const call = r.calls.find((c) => c.method === "POST")!;
+    expect(call.body).toEqual({ environment: "production", reason: "Checkout errors after release" });
+    expect(call.headers.get("Authorization")).toBe(`Bearer ${TOKEN}`);
+    expect(call.headers.get("Idempotency-Key")).toMatch(/^cli-kill-[0-9a-f-]{36}$/);
+  });
+
+  it("uses --project without listing projects, and --all-environments explicitly", async () => {
+    const r = await cli(["flags", "kill", "checkout-v2", "--all-environments", "--project", "shop", "--reason", "Checkout errors after release", "--json"], {
+      env, routes: { "POST /api/v1/projects/shop/flags/checkout-v2/kill": json(killed) },
+    });
+    expect(r.code, r.err).toBe(0);
+    expect(r.calls).toHaveLength(1);
+    expect(r.calls[0]!.body).toEqual({ allEnvironments: true, reason: "Checkout errors after release" });
+    expect(JSON.parse(r.out)).toMatchObject({ killed: 1 });
+  });
+
+  it("refuses bad input before any request", async () => {
+    for (const argv of [
+      ["flags", "kill"],
+      ["flags", "kill", "checkout-v2", "--reason", "Checkout errors after release"],
+      ["flags", "kill", "checkout-v2", "--env", "production"],
+      ["flags", "kill", "checkout-v2", "--env", "production", "--reason", "short"],
+      ["flags", "kill", "checkout-v2", "--env", "production", "--all-environments", "--reason", "Checkout errors after release"],
+      ["flags", "restore", "checkout-v2"],
+    ]) {
+      const r = await cli(argv, { env });
+      expect(r.code, argv.join(" ")).toBe(2);
+      expect(r.calls).toHaveLength(0);
+    }
+  });
+
+  it("needs an nf_api_ token: CI / admin keys are refused before any request", async () => {
+    const r = await cli(["flags", "kill", "checkout-v2", "--env", "production", "--reason", "Checkout errors after release"]);
+    expect(r.code).toBe(2);
+    expect(r.err).toContain("NANOFLAGS_API_TOKEN");
+    expect(r.calls).toHaveLength(0);
+    const bad = await cli(["flags", "kill", "checkout-v2", "--env", "production", "--reason", "Checkout errors after release", "--token", ADMIN_KEY]);
+    expect(bad.code).toBe(2);
+    expect(bad.calls).toHaveLength(0);
+  });
+
+  it("asks for --project when the token sees several projects", async () => {
+    const r = await cli(["flags", "kill", "checkout-v2", "--env", "production", "--reason", "Checkout errors after release"], {
+      env, routes: { "GET /api/v1/projects": json({ data: [{ id: "a", key: "a", name: "A" }, { id: "b", key: "b", name: "B" }], nextCursor: null }) },
+    });
+    expect(r.code).toBe(2);
+    expect(r.err).toContain("pass --project <key> (a, b)");
+  });
+
+  it("maps refusals to exit codes", async () => {
+    const route = (status: number, code: string) => ({ "GET /api/v1/projects": projects, "POST /api/v1/projects/commerce/flags/checkout-v2/kill": apiError(status, code, "nope") });
+    const argv = ["flags", "kill", "checkout-v2", "--env", "production", "--reason", "Checkout errors after release"];
+    expect((await cli(argv, { env, routes: route(403, "FORBIDDEN") })).code).toBe(2);
+    expect((await cli(argv, { env, routes: route(403, "MFA_REQUIRED") })).code).toBe(2);
+    expect((await cli(argv, { env, routes: route(401, "UNAUTHORIZED") })).code).toBe(2);
+    const limited = await cli(argv, { env, routes: route(429, "RATE_LIMITED") });
+    expect(limited.code).toBe(1);
+    expect(limited.err).toContain("Rate limited");
+    const already = await cli(argv, { env, routes: route(409, "ALREADY_KILLED") });
+    expect(already.code).toBe(1);
+    expect(already.err).toContain("[ALREADY_KILLED]");
+    expect((await cli(argv, { env, routes: route(503, "ORIGIN_UNAVAILABLE") })).code).toBe(3);
+  });
+
+  it("restore opens a reviewed change and says what it still needs", async () => {
+    const r = await cli(["flags", "restore", "checkout-v2", "--env", "production"], {
+      env, routes: {
+        "GET /api/v1/projects": projects,
+        "POST /api/v1/projects/commerce/flags/checkout-v2/restore": json({ flag: "checkout-v2", environment: "production", killId: "k1", change: { id: "c1", title: "Restore checkout-v2 after kill switch", status: "draft" }, requirements: { changeRequired: true, approvalMet: false, approvalsNeeded: 1, scenariosMet: true } }),
+      },
+    });
+    expect(r.code, r.err).toBe(0);
+    expect(r.out).toContain("Nothing was published yet.");
+    expect(r.out).toContain("Change c1");
+    expect(r.out).toContain("needs 1 independent approval");
+    expect(r.calls.at(-1)!.body).toEqual({ environment: "production" });
   });
 });

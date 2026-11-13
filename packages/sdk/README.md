@@ -113,6 +113,11 @@ createClient({
   events?: { enabled?: boolean /* true */, sampleRate?: number /* 0.1 */, flushIntervalMs?: number /* 10000 */, reportIntervalMs?: number /* 60000 */, redact?: (ctx) => object } | false,
   verify?: { publicKeys?: JsonWebKey[] | "fetch", require?: boolean } | false, // default: see Signature verification
   fetch?: typeof fetch,
+  // Platform integration (used by @nanoflags/react-native; most apps never set these):
+  crypto?: SignatureCrypto,         // SHA-256 + Ed25519 where WebCrypto lacks them; default WebCrypto
+  openStream?: StreamOpener,        // how the SSE fallback is opened; default fetch with a streamed body
+  lifecycle?: (control: LifecycleControl) => (() => void) | void, // pause() / resume() / setRealtime(enabled)
+  sdkLabel?: string,                // telemetry `sdk` label; default "js/<version>"
 })
 ```
 
@@ -124,6 +129,7 @@ createClient({
 | `transport` | How updates reach this client right now: `"live"` (WebSocket open) · `"stream"` (SSE) · `"poll"`. |
 | `boolean / string / number / json (key, fallback, ctx?)` | The value, or `fallback`. |
 | `evaluate(key, fallback, ctx?)` | The engine `Evaluation`: `value`, `reason`, `ruleIndex`, `ruleId`, `inRollout`, `bucket`, `revision`, `trace`. No type check. |
+| `allFlags(ctx?)` | `{ [flagKey]: value }` for every flag in the bundle in use (flags whose evaluation fails are left out; `{}` without a bundle). Not sampled into telemetry. |
 | `session(token, { service? })` | `Promise<SessionEvaluator>` for a test session. Never rejects. See [Test sessions](#test-sessions). |
 | `useSession(token \| null)` / `sessionHeaders()` | Browser only: join or leave a test session for this page session; headers for downstream calls. |
 | `on("update" \| "error", cb)` | Returns an unsubscribe function. `update` receives `{ revision, previousRevision, checksum, source, transport, latencyMs }` (see [Updates](#updates)). `error` receives a `NanoFlagsError` with `code`: `network`, `unauthorized`, `http`, `invalid_bundle`, `store`, `config`, `signature`, `session`, `engine` (bundle for a newer engine, refused), `environment_deleted`. |
@@ -337,7 +343,8 @@ While evaluations are being sampled, every `flushIntervalMs` (10 s) the SDK send
 
 - a **service report** — `{ service, sdk: "js/<version>", revision }`, and
 - up to 50 **sampled evaluation events** (`sampleRate`, default 10 %): flag key, value, reason, rule
-  index, revision, time, and a redacted context.
+  index, revision, time, the sample rate itself (so the dashboard's usage insights can estimate evaluations from
+  samples), and a redacted context.
 
 **Default redaction sends no attribute values.** For each sampled event the SDK sends only the *names* of
 the context attributes that the evaluated flag's rules reference (conditions, segments, the rollout's

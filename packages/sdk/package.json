@@ -1,6 +1,6 @@
 {
   "name": "@nanoflags/sdk",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "NanoFlags JavaScript/TypeScript SDK: local, synchronous flag evaluation with background updates (Node, browsers, edge runtimes, React).",
   "keywords": [
     "feature-flags",
@@ -63,6 +63,7 @@
   "files": [
     "dist",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE",
     "NOTICE"
   ],

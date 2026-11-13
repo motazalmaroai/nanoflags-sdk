@@ -1,7 +1,7 @@
 # NanoFlags client packages
 
 NanoFlags is a feature-flag service: you configure, test, review and publish flags in the dashboard, and your services evaluate them locally.
-This repository holds the open-source (Apache-2.0) client side: the evaluation engine, the JavaScript/TypeScript SDK, the OpenFeature provider, the CLI and the GitHub Action.
+This repository holds the open-source (Apache-2.0) client side: the evaluation engine, the JavaScript/TypeScript SDK, the server SDKs for Python and Go, the mobile SDKs for React Native, Flutter / Dart and Android (Kotlin), the OpenFeature provider, the CLI and the GitHub Action. The Swift SDK (iOS, macOS, tvOS, watchOS) lives in [motazalmaroai/nanoflags-swift](https://github.com/motazalmaroai/nanoflags-swift) (OpenFeature provider: [motazalmaroai/nanoflags-openfeature-swift](https://github.com/motazalmaroai/nanoflags-openfeature-swift)), so Swift Package Manager can resolve it.
 
 Documentation: https://nanoflags.io/docs · Dashboard: https://app.nanoflags.io
 
@@ -14,6 +14,9 @@ Documentation: https://nanoflags.io/docs · Dashboard: https://app.nanoflags.io
 | [`@nanoflags/cli`](packages/cli) | `packages/cli` | `npx @nanoflags/cli --help` or `npm install -g @nanoflags/cli` | Export, local evaluation, CI scenario checks, publishing, code references, flag cleanup |
 | [`nanoflags` (Python)](packages/sdk-python) | `packages/sdk-python` | `pip install nanoflags` (OpenFeature: `pip install "nanoflags[openfeature]"`) | Native Python 3.9+ server SDK: same engine results (shared parity fixtures), live updates, signature verification, asyncio wrapper |
 | [Go SDK](go) | `go` | `go get github.com/motazalmaroai/nanoflags-sdk/go` (OpenFeature: `.../go/ofprovider`) | Native Go 1.22+ server SDK: same engine results (shared parity fixtures), live updates, signature verification |
+| [`@nanoflags/react-native`](packages/sdk-react-native) | `packages/sdk-react-native` | Coming to npm soon — install from source today | React Native / Expo client SDK: client keys, signed live updates, offline-first persistence, app-lifecycle aware, hooks, OpenFeature |
+| [`nanoflags`, `nanoflags_flutter`, `nanoflags_openfeature` (Dart)](packages/sdk-dart) | `packages/sdk-dart` | Coming to pub.dev soon — install from source today | Dart and Flutter client SDK, Flutter bindings and OpenFeature provider |
+| [Android / Kotlin SDK](kotlin) | `kotlin` | Coming to Maven Central (`io.nanoflags:nanoflags-android`) soon — build from source today | Kotlin core + Android module (lifecycle, connectivity, Compose) and OpenFeature provider |
 | [GitHub Action](integrations/github-action) | `integrations/github-action` | `uses: motazalmaroai/nanoflags-sdk/integrations/github-action@<ref>` | Runs scenario checks for a commit and optionally uploads code references |
 | `@nanoflags/engine` | `packages/engine` | not published | Deterministic evaluation engine (MurmurHash3 bucketing), bundled into the SDK and the CLI |
 

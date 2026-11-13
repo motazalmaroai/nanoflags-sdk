@@ -2,12 +2,12 @@ import { appendFileSync, existsSync, readFileSync, statSync, writeFileSync } fro
 import { isAbsolute, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { evaluate, type Bundle, type Context, type JsonValue } from "@nanoflags/engine";
-import { Api, ApiError, DEFAULT_BASE_URL, explain, isExport, keyKind, type ExportData, type ScenarioRun } from "./api.js";
+import { Api, ApiError, DEFAULT_BASE_URL, ManagementApi, explain, isExport, keyKind, type ExportData, type ScenarioRun } from "./api.js";
 import type { Json, SiteReport } from "./cleanup.js";
 import type { CodeRef } from "./refs.js";
 import { CliError, DEFAULT_MAX_FILE_BYTES, EXIT, clip, show, table, unifiedDiff, walk } from "./util.js";
 
-export const VERSION = "0.2.0";
+export const VERSION = "0.3.0";
 
 export interface Io {
   env: Record<string, string | undefined>;
@@ -26,6 +26,11 @@ Commands
   flags list [--json]                           List the project's flags
   flags create <key> --type boolean|string|number|json [--default <json>] [--description <text>] [--name <text>] [--json]
                                                 Create a flag in the key's project (admin key); nothing is published
+  flags kill <key> (--env <key> | --all-environments) --reason <text> [--project <key>] [--json]
+                                                Emergency kill switch: serve the flag's off value now, without
+                                                approvals (API token with flags:kill)
+  flags restore <key> --env <key> [--project <key>] [--json]
+                                                Turn a killed flag back on in the draft and open a reviewed change
   eval <flag> [--context <json>] [--source draft|published] [--fallback <json>] [--json]
                                                 Evaluate one flag locally and print value, reason and trace
   scenarios run [--source draft|revision] [--commit <sha>] [--run-url <url>] [--json]
@@ -35,13 +40,18 @@ Commands
   refs scan [dir] --repo <owner/name> [--commit <sha>] [--dry-run] [--json]
                                                 Find flag references in source files and upload them
   cleanup <flag> --value <json> [dir] [--write] Propose (or apply) the removal of a resolved flag from code
+  import <file> --project <key> [--env-map src=target,…] [--format auto|flagd|nanoflags|csv|launchdarkly|unleash|flagsmith|growthbook]
+         [--conflict skip|rename|overwrite] [--rename-suffix <s>] [--label <text>] [--dry-run] [--json]
+                                                Import flags into drafts (never publishes); needs NANOFLAGS_API_TOKEN
 
 Global options
   --key <key>          CI or admin key. Default: $NANOFLAGS_KEY. Prefer the environment variable:
                        command-line arguments are visible to other processes.
+  --token <token>      Management API token (nf_api_…) for flags kill / restore. Default: $NANOFLAGS_API_TOKEN
   --sdk-key <key>      Optional server SDK key for \`eval --source published\` (reads /v1/bundle instead of
                        /v1/ci/published with --key). Default: $NANOFLAGS_SDK_KEY
   --base-url <url>     Default: $NANOFLAGS_BASE_URL or ${DEFAULT_BASE_URL}
+  --token <token>      Management API token for \`import\` (nf_api_…). Default: $NANOFLAGS_API_TOKEN
   --export <file>      Read a saved \`nanoflags export\` instead of calling the API (eval, flags list, refs scan, cleanup)
   -h, --help           -v, --version
 
@@ -57,6 +67,12 @@ const OPTIONS = {
   source: { type: "string" },
   fallback: { type: "string" },
   environment: { type: "string" },
+  env: { type: "string" },
+  "all-environments": { type: "boolean" },
+  reason: { type: "string" },
+  project: { type: "string" },
+  token: { type: "string" },
+  title: { type: "string" },
   commit: { type: "string" },
   "run-url": { type: "string" },
   json: { type: "boolean" },
@@ -72,6 +88,11 @@ const OPTIONS = {
   write: { type: "boolean" },
   export: { type: "string" },
   "max-file-size": { type: "string" },
+  "env-map": { type: "string" },
+  format: { type: "string" },
+  conflict: { type: "string" },
+  "rename-suffix": { type: "string" },
+  label: { type: "string" },
   help: { type: "boolean", short: "h" },
   version: { type: "boolean", short: "v" },
 } as const;
@@ -234,6 +255,94 @@ async function cmdFlagsCreate(r: Run): Promise<number> {
       return EXIT.failed;
     }
     throw explain(e, k, "create flags");
+  }
+}
+
+/* ---------------- flags kill / restore (Management API) ---------------- */
+
+const API_TOKEN = /^nf_api_[0-9a-f]{48}$/;
+
+function managementApi(r: Run): ManagementApi {
+  const fromKey = (r.values.key ?? r.io.env.NANOFLAGS_KEY ?? "").trim();
+  const token = (r.values.token ?? r.io.env.NANOFLAGS_API_TOKEN ?? (API_TOKEN.test(fromKey) ? fromKey : "")).trim();
+  if (token === "") throw usage("flags kill / restore need a Management API token with the flags:kill scope: set NANOFLAGS_API_TOKEN (or pass --token). Create one in Settings → API tokens.");
+  if (!API_TOKEN.test(token)) throw usage("The API token must look like nf_api_<48 hex characters>. CI, admin and SDK keys cannot use the kill switch.");
+  return new ManagementApi({ baseUrl: baseUrl(r), key: token, fetch: r.io.fetch, userAgent: `nanoflags-cli/${VERSION}` });
+}
+
+/** --project, else the only project the token can see. */
+async function resolveProject(r: Run, client: ManagementApi): Promise<string> {
+  if (r.values.project) return r.values.project;
+  const list = await client.projects();
+  if (list.data.length === 1) return list.data[0]!.key;
+  throw usage(list.data.length === 0 ? "This token sees no project." : `This token sees ${list.data.length} projects; pass --project <key> (${list.data.slice(0, 10).map((p) => p.key).join(", ")}).`);
+}
+
+function explainManagement(e: unknown, what: string): CliError {
+  if (e instanceof CliError) return e;
+  if (e instanceof ApiError) {
+    if (e.status === 401) return new CliError(`The API token was rejected (unknown, revoked or expired). ${e.message}`, EXIT.usage);
+    if (e.status === 403) return new CliError(`Not allowed to ${what}: ${e.message} [${e.code}]`, EXIT.usage);
+    if (e.status === 429) return new CliError(`Rate limited: ${e.message} [${e.code}]`, EXIT.failed);
+    if (e.status >= 500) return new CliError(`NanoFlags could not ${what} right now (HTTP ${e.status}: ${e.message}). Running the same command again is safe.`, EXIT.unavailable);
+    return new CliError(`Could not ${what}: ${e.message} [${e.code}]`, EXIT.failed);
+  }
+  return new CliError(e instanceof Error ? e.message : String(e), EXIT.failed);
+}
+
+const envOption = (r: Run) => r.values.env ?? r.values.environment;
+
+async function cmdFlagsKill(r: Run): Promise<number> {
+  const flagKey = r.args[0];
+  const env = envOption(r);
+  const all = r.values["all-environments"] === true;
+  if (!flagKey || r.args.length > 1) throw usage('Usage: nanoflags flags kill <key> --env <environment> --reason "<why>"');
+  if (all === (env !== undefined)) throw usage("Choose where: --env <environment key>, or --all-environments.");
+  const reason = (r.values.reason ?? "").trim();
+  if (reason.length < 8 || reason.length > 1000) throw usage("--reason is required (8–1000 characters): why you are killing the flag. Every owner and admin sees it.");
+  const client = managementApi(r);
+  // One idempotency key per invocation, so the request cannot be applied twice.
+  const idem = `cli-kill-${crypto.randomUUID()}`;
+  const started = Date.now();
+  try {
+    const project = await resolveProject(r, client);
+    const res = await client.kill(project, flagKey, { ...(all ? { allEnvironments: true as const } : { environment: env! }), reason }, idem);
+    if (r.values.json) {
+      r.io.out(`${JSON.stringify(res, null, 2)}\n`);
+      return EXIT.ok;
+    }
+    r.io.out(`KILLED ${res.flag} in ${res.killed} environment${res.killed === 1 ? "" : "s"} (${Date.now() - started} ms).\n`);
+    for (const e of res.environments) {
+      if (e.status === "killed") r.io.out(`  ${e.environment}: r${e.revision} serves the off value ${JSON.stringify(e.offValue ?? null)} (was r${e.previousRevision ?? e.revision - 1})\n`);
+      else r.io.out(`  ${e.environment}: skipped (${e.status.replace(/_/g, " ")})\n`);
+    }
+    r.io.out("Owners and admins were notified. The draft was kept (the flag is off in it too).\n");
+    r.io.out(`To turn it back on through review: nanoflags flags restore ${res.flag} --env <environment>${r.values.project ? ` --project ${project}` : ""}\n`);
+    return EXIT.ok;
+  } catch (e) {
+    throw explainManagement(e, `kill ${flagKey}`);
+  }
+}
+
+async function cmdFlagsRestore(r: Run): Promise<number> {
+  const flagKey = r.args[0];
+  const env = envOption(r);
+  if (!flagKey || r.args.length > 1 || env === undefined) throw usage("Usage: nanoflags flags restore <key> --env <environment> [--title <text>] [--reason <text>]");
+  const client = managementApi(r);
+  try {
+    const project = await resolveProject(r, client);
+    const res = await client.restore(project, flagKey, { environment: env, ...(r.values.title ? { title: r.values.title } : {}), ...(r.values.reason ? { reason: r.values.reason } : {}) });
+    if (r.values.json) {
+      r.io.out(`${JSON.stringify(res, null, 2)}\n`);
+      return EXIT.ok;
+    }
+    r.io.out(`${res.flag} is on again in the ${res.environment} draft. Nothing was published yet.\n`);
+    r.io.out(`Change ${res.change.id}: "${res.change.title}" (${res.change.status}).\n`);
+    const req = res.requirements;
+    r.io.out(req.approvalMet ? "No further approval is needed; publish the change.\n" : `It needs ${req.approvalsNeeded} independent approval${req.approvalsNeeded === 1 ? "" : "s"} before it can be published.\n`);
+    return EXIT.ok;
+  } catch (e) {
+    throw explainManagement(e, `restore ${flagKey}`);
   }
 }
 
@@ -525,6 +634,31 @@ async function cmdCleanup(r: Run): Promise<number> {
   return EXIT.ok;
 }
 
+/* ---------------- import ---------------- */
+
+async function cmdImport(r: Run): Promise<number> {
+  const file = r.args[0];
+  if (!file) throw usage("`import` needs a file: nanoflags import <file> --project <key>.");
+  const { runImportCommand } = await import("./import.js");
+  return runImportCommand({
+    file: path(r, file),
+    project: r.values.project ?? "",
+    token: (r.values.token ?? r.io.env.NANOFLAGS_API_TOKEN ?? "").trim(),
+    baseUrl: baseUrl(r),
+    envMap: r.values["env-map"],
+    format: r.values.format,
+    conflict: r.values.conflict,
+    renameSuffix: r.values["rename-suffix"],
+    label: r.values.label,
+    dryRun: r.values["dry-run"] === true,
+    json: r.values.json === true,
+    fetch: r.io.fetch,
+    userAgent: `nanoflags-cli/${VERSION}`,
+    out: r.io.out,
+    err: r.io.err,
+  });
+}
+
 /* ---------------- dispatch ---------------- */
 
 export async function main(argv: string[], io: Io): Promise<number> {
@@ -552,11 +686,14 @@ export async function main(argv: string[], io: Io): Promise<number> {
     if (command === "export") return await cmdExport(run(1));
     if (command === "flags" && sub === "list") return await cmdFlagsList(run(2));
     if (command === "flags" && sub === "create") return await cmdFlagsCreate(run(2));
+    if (command === "flags" && sub === "kill") return await cmdFlagsKill(run(2));
+    if (command === "flags" && sub === "restore") return await cmdFlagsRestore(run(2));
     if (command === "eval") return await cmdEval(run(1));
     if (command === "scenarios" && sub === "run") return await cmdScenariosRun(run(2));
     if (command === "publish") return await cmdPublish(run(1));
     if (command === "refs" && sub === "scan") return await cmdRefsScan(run(2));
     if (command === "cleanup") return await cmdCleanup(run(1));
+    if (command === "import") return await cmdImport(run(1));
     throw usage(`Unknown command: ${positionals.slice(0, 2).join(" ")}`);
   } catch (e) {
     if (e instanceof CliError) {

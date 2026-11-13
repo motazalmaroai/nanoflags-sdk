@@ -1,0 +1,5 @@
+# Development inside the repository: use the core package next to this one. Not part of the
+# published package (pub ignores this file when resolving for consumers); see ../PUBLISHING.md.
+dependency_overrides:
+  nanoflags:
+    path: ../nanoflags

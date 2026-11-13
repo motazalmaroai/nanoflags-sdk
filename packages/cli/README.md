@@ -21,6 +21,7 @@ workflow (`.github/workflows/release.yml`, tag `cli-v<version>`).
 | --- | --- |
 | `NANOFLAGS_KEY` / `--key` | A **CI key** (`nf_ci_…`: export, scenarios, code references) or an **admin key** (`nf_adm_…`: all of that, plus `flags create` and publish). SDK keys are refused by these endpoints. Prefer the environment variable — arguments are visible in process lists and shell history. |
 | `NANOFLAGS_BASE_URL` / `--base-url` | Edge URL. Default `https://edge.nanoflags.io`. Must be `https` (plain `http` only for `localhost`). |
+| `NANOFLAGS_API_TOKEN` / `--token` | Only for `flags kill` / `flags restore`: a **Management API token** (`nf_api_…`) with the `flags:kill` scope. |
 | `NANOFLAGS_SDK_KEY` / `--sdk-key` | Optional, only for `eval --source published`: a server SDK key; reads `/v1/bundle` instead of `/v1/ci/published`. |
 
 A key belongs to one environment of one project; commands act on that environment. The key is sent
@@ -74,6 +75,30 @@ nanoflags flags create ranker --type json --default '{"model":"v2","weights":[1,
 | --- | --- |
 | `CONFLICT` | A flag with this key already exists in the project. |
 | `INVALID_VALUE` | The default does not match the flag type. |
+
+### `nanoflags flags kill <key> (--env <key> | --all-environments) --reason <text> [--project <key>] [--json]`
+
+Emergency kill switch (`POST /api/v1/projects/{p}/flags/{f}/kill`, scope `flags:kill`). Publishes a new revision
+in which only this flag is off, so SDKs serve its published off value within about a second — without a change,
+approvals or scenario checks. Needs the organization's kill-switch role (owners and admins by default) for the token's
+creator. `--reason` (8–1000 characters) is required; every owner and admin is e-mailed. Each run sends a fresh
+`Idempotency-Key`. `--project` is needed only when the token sees more than one project.
+
+```sh
+export NANOFLAGS_API_TOKEN=nf_api_…
+nanoflags flags kill new-checkout --env production --reason "Checkout errors spiking since the 14:00 release"
+```
+
+| Refusal | Exit | Meaning |
+| --- | --- | --- |
+| `FORBIDDEN`, `MFA_REQUIRED`, `INSUFFICIENT_SCOPE` | 2 | Role, two-step verification or token scope. |
+| `ALREADY_KILLED`, `NO_CHANGES` | 1 | Already killed, or not published / already off there. |
+| `RATE_LIMITED` | 1 | 5 kills per person per 10 minutes, 20 per organization per hour. |
+
+### `nanoflags flags restore <key> --env <key> [--title <text>] [--reason <text>] [--project <key>] [--json]`
+
+`POST /api/v1/projects/{p}/flags/{f}/restore`. Turns the killed flag back on in the environment's draft and opens
+(or returns) a change for it. Nothing is published: publish the change through the normal reviewed path.
 
 ### `nanoflags eval <flag> [--context <json>] [--source draft|published] [--fallback <json>] [--environment <key>] [--json]`
 
@@ -179,6 +204,24 @@ Limits, by design:
 - If a rewrite would leave a file with new syntax errors, that file is left untouched and reported.
 - It works on syntax, one file at a time, without type information. It is a proposal for a person to
   review, not a proof.
+
+### `nanoflags import <file> --project <key> [--env-map src=target,…] [--format …] [--conflict skip|rename|overwrite] [--rename-suffix <s>] [--label <text>] [--dry-run] [--json]`
+
+`POST /api/v1/projects/{project}/imports` (Management API). Converts a flag file into the project's **drafts**: an
+OpenFeature flagd definition, the NanoFlags import format (JSON or CSV), a NanoFlags export, or another tool's export
+(`--format`, default `auto`; `.csv` files are read as CSV). Needs a Management API token in `NANOFLAGS_API_TOKEN`
+(or `--token`) with `flags:write`, and `segments:write` when the file has segments. CI and admin keys are not used here.
+
+- `--dry-run` prints what would be created, conflicts with existing keys, warnings (unsupported features) and the
+  fidelity report, and writes nothing.
+- `--env-map default=development,prod=production` maps source environments to the project's (flagd files have one
+  source environment, `default`). Without it the server suggests a mapping (same key, common aliases).
+- `--conflict` for keys that exist: `skip` (default), `rename` (`<key>-imported`), `overwrite` (replaces the drafts of
+  the mapped environments; never a flag's type).
+
+Nothing is published. Applying sends an `Idempotency-Key` derived from the file and options, so re-running the same
+command answers with the first import instead of importing twice. Exit code 1 when some items failed. Format reference:
+https://nanoflags.io/docs/import
 
 ## Development
 

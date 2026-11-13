@@ -13,14 +13,14 @@ import { ENGINE_VERSION, evaluate as engineEvaluate, murmur3, supportsEngine, ty
 import { OFFICIAL_EDGE_URL, OFFICIAL_SIGNING_KEYS } from "./keys.js";
 import { defaultStore, type Store } from "./store.js";
 import { readSse } from "./sse.js";
-import { importPublicKeys, isPublicEd25519Jwk, rawMember, verifyBundleText, type ImportedKey, type SignatureInfo, type VerifyOptions } from "./verify.js";
+import { importPublicKeys, isPublicEd25519Jwk, rawMember, verifyBundleText, type ImportedKey, type SignatureCrypto, type SignatureInfo, type VerifyOptions } from "./verify.js";
 
 export type { Bundle, Context, Evaluation, JsonValue, Reason } from "@nanoflags/engine";
 export type { Store } from "./store.js";
-export type { VerifyOptions } from "./verify.js";
+export type { SignatureCrypto, VerifyOptions } from "./verify.js";
 export { OFFICIAL_EDGE_URL, OFFICIAL_SIGNING_KEYS } from "./keys.js";
 
-export const SDK_VERSION = "0.4.0";
+export const SDK_VERSION = "0.5.0";
 
 /** Newest bundle format (`bundle.engine`) this SDK can evaluate. Newer bundles are refused; the previous one stays in use. */
 export const SUPPORTED_ENGINE_VERSION = ENGINE_VERSION;
@@ -51,6 +51,31 @@ export interface WebSocketLike {
   /* eslint-enable @typescript-eslint/no-explicit-any */
 }
 export type WebSocketConstructor = new (url: string, protocols?: string | string[]) => WebSocketLike;
+
+/**
+ * Opens one server-sent-events request and reports its events until the response ends. Resolves with the HTTP status
+ * (after the body has ended); rejects on network errors. Aborting `signal` must end it promptly.
+ * Default: `fetch` with a streamed body. Runtimes whose `fetch` cannot stream (React Native) pass their own.
+ */
+export type StreamOpener = (url: string, init: { headers: Record<string, string>; signal: AbortSignal }, onEvent: (event: string, data: string) => void) => Promise<number>;
+
+/**
+ * Handed to `ClientOptions.lifecycle` once, when the client starts. Platform integrations (mobile app lifecycle,
+ * connectivity) use it to stop background network activity and to resume it.
+ */
+export interface LifecycleControl {
+  /**
+   * Stop all background network activity: the live socket (no reconnect), SSE, polling and the telemetry timer.
+   * Queued telemetry is flushed once. Evaluations keep working on the bundle in use. Idempotent.
+   */
+  pause(): void;
+  /** Undo `pause()`: revalidate the bundle now (conditional request), then restart polling, telemetry and the live connection. Idempotent. */
+  resume(): void;
+  /** `false`: no live socket and no SSE, polling only (data saver). `true` (the default): best transport. */
+  setRealtime(enabled: boolean): void;
+  /** True between `pause()` and `resume()`. */
+  readonly paused: boolean;
+}
 
 export interface EventsOptions {
   /** Default true. */
@@ -110,6 +135,14 @@ export interface ClientOptions {
    */
   verify?: VerifyOptions | false;
   fetch?: typeof fetch;
+  /** Platform integration: SHA-256 + Ed25519 for signature verification where WebCrypto lacks them (React Native). Default: WebCrypto. */
+  crypto?: SignatureCrypto;
+  /** Platform integration: how the SSE fallback is opened. Default: `fetch` with a streamed body. */
+  openStream?: StreamOpener;
+  /** Platform integration: called once at start with a `LifecycleControl`; may return a cleanup function that `close()` calls. */
+  lifecycle?: (control: LifecycleControl) => (() => void) | void;
+  /** Platform integration: the `sdk` label of telemetry reports. Default `js/<version>`. At most 40 characters. */
+  sdkLabel?: string;
 }
 
 /** The flag accessors shared by the client and by session-scoped evaluators. */
@@ -174,6 +207,11 @@ export interface NanoFlagsClient {
   /** Full engine result (value, reason, matched rule, trace). No type check is applied. */
   evaluate<T extends JsonValue = JsonValue>(key: string, fallback: T, ctx?: Context): Evaluation<T>;
   /**
+   * Values of every flag in the bundle in use for `ctx` (a flag whose evaluation fails is left out). `{}` while no
+   * bundle is loaded. Not sampled into telemetry.
+   */
+  allFlags(ctx?: Context): Record<string, JsonValue>;
+  /**
    * Resolve a test session (`GET /v1/session`, once per token until it expires) and return an
    * evaluator scoped to it. Never rejects: an unknown or expired session yields an evaluator
    * whose `active` is false and that behaves like the client.
@@ -221,6 +259,8 @@ interface QueuedEvent {
   context: Record<string, JsonValue | undefined>;
   at: string;
   sessionId?: string;
+  /** The sampling probability this event was recorded with, so the dashboard can estimate evaluations from samples. */
+  sampleRate: number;
 }
 
 interface SessionState {
@@ -301,6 +341,8 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
   const reportIntervalMs = ev.reportIntervalMs ?? 60_000;
   const livePollIntervalMs = options.livePollIntervalMs ?? 300_000;
   const random = ev.random ?? Math.random;
+  const cryptoImpl = options.crypto;
+  const sdkLabel = typeof options.sdkLabel === "string" && options.sdkLabel !== "" ? options.sdkLabel.slice(0, 40) : `js/${SDK_VERSION}`;
   const service = options.service ?? "unknown";
   /** Non-secret fingerprint binding persisted bundles to this key + edge. */
   const id = murmur3(`${baseUrl}|${sdkKey}`).toString(16).padStart(8, "0");
@@ -338,6 +380,10 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
   let liveRevision = 0;
   let pushChain: Promise<void> = Promise.resolve();
   let lastReportAt = 0;
+  /** `lifecycle` control state: paused = no background network activity; realtime = live socket / SSE allowed. */
+  let paused = false;
+  let realtimeAllowed = true;
+  let lifecycleCleanup: (() => void) | null = null;
   const usedAttrs = new WeakMap<Bundle, Map<string, string[]>>();
   /**
    * Effective verification: `keys` to verify with (`"fetch"` = only `/v1/keys`), `require` = refuse unsigned bundles,
@@ -435,7 +481,7 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
           const text = typeof p.raw === "string" ? p.raw : JSON.stringify(p.bundle);
           let ok = false;
           try {
-            ok = await verifyBundleText(await loadKeys(s.kid ?? null), { signature: s.signature, kid: s.kid ?? null, environmentId: s.environmentId, revision: s.revision, checksum: s.checksum }, text);
+            ok = await verifyBundleText(await loadKeys(s.kid ?? null), { signature: s.signature, kid: s.kid ?? null, environmentId: s.environmentId, revision: s.revision, checksum: s.checksum }, text, cryptoImpl);
             if (ok && typeof p.raw === "string") {
               const parsed: unknown = JSON.parse(p.raw);
               if (isBundle(parsed)) restored = parsed;
@@ -481,7 +527,7 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
       const res = await doFetch(`${baseUrl}/v1/keys`, { method: "GET", signal: ac.signal });
       if (!res.ok) throw new NanoFlagsError(`Signing keys request failed with HTTP ${res.status}.`, "signature", res.status);
       const body = (await res.json()) as { keys?: unknown } | null;
-      const keys = await importPublicKeys(Array.isArray(body?.keys) ? body.keys : []);
+      const keys = await importPublicKeys(Array.isArray(body?.keys) ? body.keys : [], cryptoImpl);
       if (keys.length === 0) throw new NanoFlagsError("The edge returned no usable signing keys.", "signature");
       return keys;
     } finally {
@@ -497,7 +543,7 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
     if (!verifyOpt) return [];
     let base: ImportedKey[] = [];
     if (verifyOpt.keys !== "fetch") {
-      const p = (pinnedKeys ??= importPublicKeys(verifyOpt.keys));
+      const p = (pinnedKeys ??= importPublicKeys(verifyOpt.keys, cryptoImpl));
       // A failed import (no Ed25519 in this runtime) is not remembered.
       p.catch(() => {
         if (pinnedKeys === p) pinnedKeys = null;
@@ -554,13 +600,13 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
       // The edge embeds the stored bundle text byte-for-byte; fall back to re-serialisation.
       const raw = rawMember(text, "bundle");
       const again = JSON.stringify(body.bundle);
-      if (raw !== null && raw !== again && (await verifyBundleText(keys, info, raw))) {
+      if (raw !== null && raw !== again && (await verifyBundleText(keys, info, raw, cryptoImpl))) {
         const parsed: unknown = JSON.parse(raw);
         if (isBundle(parsed) && parsed.revision === revision) {
           pinnedEnvironment = environmentId;
           return { bundle: parsed, sig: info, raw };
         }
-      } else if (await verifyBundleText(keys, info, again)) {
+      } else if (await verifyBundleText(keys, info, again, cryptoImpl)) {
         pinnedEnvironment = environmentId;
         return { bundle: body.bundle, sig: info, raw: null };
       }
@@ -647,11 +693,12 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
   }
 
   function schedulePoll() {
-    if (closed || pollIntervalMs <= 0) return;
+    if (closed || paused || pollIntervalMs <= 0) return;
     if (pollTimer) clearTimeout(pollTimer);
     pollTimer = unref(
       setTimeout(() => {
         pollTimer = null;
+        if (paused) return;
         // Hidden tabs do not poll; they catch up when they become visible again.
         if (doc && doc.visibilityState === "hidden") return schedulePoll();
         void sync().then(schedulePoll);
@@ -681,10 +728,10 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
   }
 
   function startStream() {
-    if (closed || options.streaming === false || !doFetch || streamActive || environmentDeleted) return;
+    if (closed || paused || !realtimeAllowed || options.streaming === false || (!doFetch && !options.openStream) || streamActive || environmentDeleted) return;
     streamActive = true;
     const ES: typeof EventSource | undefined = typeof EventSource === "function" ? EventSource : undefined;
-    if (ES && isBrowserKey) {
+    if (ES && isBrowserKey && !options.openStream) {
       // EventSource cannot send headers; only browser keys may travel in the URL.
       const es = new ES(`${baseUrl}/v1/stream?key=${encodeURIComponent(sdkKey)}`);
       eventSource = es;
@@ -707,6 +754,14 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
     eventSource = null;
   }
 
+  const openStream: StreamOpener =
+    options.openStream ??
+    (async (url, init, onEvent) => {
+      const res = await doFetch!(url, init);
+      if (res.ok && res.body) await readSse(res.body, onEvent);
+      return res.status;
+    });
+
   async function streamLoop(gen: number) {
     let attempt = 0;
     const current = () => !closed && gen === streamGen;
@@ -716,18 +771,16 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
       const startedAt = Date.now();
       let stop = false;
       try {
-        const res = await doFetch!(`${baseUrl}/v1/stream`, { headers: { Authorization: `Bearer ${sdkKey}`, Accept: "text/event-stream" }, signal: ac.signal });
-        if (res.status === 401 || res.status === 403) stop = true; // polling keeps reporting the error
-        else if (res.ok && res.body) {
-          await readSse(res.body, (event, data) => {
-            if (event === "revision") onRevision(data);
-            else if (event === "revoked") {
-              stop = true;
-              ac.abort();
-              void sync();
-            }
-          });
-        }
+        const status = await openStream(`${baseUrl}/v1/stream`, { headers: { Authorization: `Bearer ${sdkKey}`, Accept: "text/event-stream" }, signal: ac.signal }, (event, data) => {
+          if (!current()) return;
+          if (event === "revision") onRevision(data);
+          else if (event === "revoked") {
+            stop = true;
+            ac.abort();
+            void sync();
+          }
+        });
+        if (status === 401 || status === 403) stop = true; // polling keeps reporting the error
       } catch {
         /* reconnect below */
       }
@@ -767,7 +820,7 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
       info = { signature: m.signature, kid: typeof m.kid === "string" ? m.kid : null, environmentId: m.environmentId, revision, checksum: pushedChecksum };
       let ok = false;
       try {
-        ok = await verifyBundleText(await loadKeys(info.kid), info, text);
+        ok = await verifyBundleText(await loadKeys(info.kid), info, text, cryptoImpl);
       } catch {
         ok = false;
       }
@@ -808,7 +861,10 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
   }
 
   /** Closes the current socket; its close handler schedules the reconnect. */
+  /** Ends the current socket now (handlers detached, `transport` updated at once); its end handler decides about reconnecting. */
+  let endSocket: (() => void) | null = null;
   function dropLive() {
+    if (endSocket) return endSocket();
     try {
       socket?.close(1000, "bye");
     } catch {
@@ -817,7 +873,7 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
   }
 
   function connectLive(): void {
-    if (closed || !liveWanted || socket || environmentDeleted) return;
+    if (closed || paused || !realtimeAllowed || !liveWanted || socket || environmentDeleted) return;
     let ws: WebSocketLike;
     try {
       // The key travels in the subprotocol list (browsers cannot set headers on a WebSocket) — never in the URL.
@@ -841,8 +897,9 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
       if (pongTimer) clearTimeout(pongTimer);
       if (rotateTimer) clearTimeout(rotateTimer);
       ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null;
+      if (endSocket === end) endSocket = null;
       try {
-        ws.close();
+        ws.close(1000, "bye");
       } catch {
         /* already closed */
       }
@@ -850,6 +907,7 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
       liveOpen = false;
       liveEnded(opened, opened ? Date.now() - openedAt : 0, rotating);
     };
+    endSocket = end;
     const connectTimer = unref(setTimeout(end, LIVE_CONNECT_TIMEOUT_MS));
     const ping = () => {
       pingTimer = unref(
@@ -914,6 +972,9 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
       schedulePoll();
       return;
     }
+    // Paused (app in the background, offline) or realtime switched off: no reconnect, no SSE fallback.
+    if (paused) return;
+    if (!realtimeAllowed) return schedulePoll();
     if (rotating) return connectLive(); // planned replacement: no fallback, no backoff
     liveAttempt = opened && openMs > 30_000 ? 1 : liveAttempt + 1;
     // Never got through (no WebSocket path, socket cap reached, edge without /v1/live), or lost it and the
@@ -932,10 +993,53 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
   }
 
   function startRealtime() {
-    if (closed || options.streaming === false) return;
+    if (closed || paused || !realtimeAllowed || options.streaming === false) return;
     if (liveWanted) connectLive();
     else startStream();
   }
+
+  // ---- lifecycle control (platform integrations: app background/foreground, connectivity, data saver)
+  function stopRealtime() {
+    if (liveTimer) clearTimeout(liveTimer);
+    liveTimer = null;
+    dropLive();
+    stopStream();
+  }
+
+  const control: LifecycleControl = {
+    get paused() {
+      return paused;
+    },
+    pause() {
+      if (closed || paused) return;
+      paused = true;
+      if (pollTimer) clearTimeout(pollTimer);
+      pollTimer = null;
+      if (flushTimer) clearTimeout(flushTimer);
+      flushTimer = null;
+      stopRealtime();
+      void flush(); // the app may be suspended next: send what is queued now
+    },
+    resume() {
+      if (closed || !paused) return;
+      paused = false;
+      liveAttempt = 0;
+      void sync().then(schedulePoll);
+      scheduleFlush();
+      startRealtime();
+    },
+    setRealtime(enabled) {
+      if (closed || realtimeAllowed === enabled) return;
+      realtimeAllowed = enabled;
+      if (!enabled) {
+        stopRealtime();
+        schedulePoll();
+      } else {
+        liveAttempt = 0;
+        startRealtime();
+      }
+    },
+  };
 
   // ---- telemetry (off the hot path: evaluation only pushes into a bounded array)
   function attrsUsedBy(b: Bundle | null, flagKey: string): string[] {
@@ -987,6 +1091,7 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
         context: ev.redact ? ev.redact({ ...ctx }) : defaultRedact(b, e.flagKey, ctx),
         at: new Date().toISOString(),
         ...(sessionId === undefined ? {} : { sessionId }),
+        sampleRate,
       });
     } catch {
       /* telemetry must never affect evaluation */
@@ -1012,7 +1117,7 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
         method: "POST",
         keepalive: true,
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ service, sdk: `js/${SDK_VERSION}`, revision: bundle?.revision ?? 0, events: batch }),
+        body: JSON.stringify({ service, sdk: sdkLabel, revision: bundle?.revision ?? 0, events: batch }),
       });
     } catch {
       /* dropped on failure, by design: telemetry is never retried */
@@ -1020,7 +1125,8 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
   }
 
   function scheduleFlush() {
-    if (closed || !eventsEnabled || flushIntervalMs <= 0) return;
+    if (closed || paused || !eventsEnabled || flushIntervalMs <= 0) return;
+    if (flushTimer) clearTimeout(flushTimer);
     flushTimer = unref(
       setTimeout(() => {
         flushTimer = null;
@@ -1182,6 +1288,18 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
     number: (key, fallback, ctx) => run(key, fallback, ctx, (v) => typeof v === "number" && Number.isFinite(v)).value,
     json: (key, fallback, ctx) => run(key, fallback, ctx, (v) => v !== undefined).value,
     evaluate: (key, fallback, ctx) => run(key, fallback, ctx, null),
+    allFlags(ctx) {
+      const s = live(pageSession);
+      const b = s ? s.bundle : bundle;
+      const out: Record<string, JsonValue> = {};
+      if (!b) return out;
+      const context: Context = s ? { ...s.context, ...ctx } : (ctx ?? {});
+      for (const key of Object.keys(b.flags)) {
+        const e = engineEvaluate<JsonValue>(b, key, context, null);
+        if (e.reason !== "error" && e.reason !== "flag_not_found" && e.value !== undefined) out[key] = e.value;
+      }
+      return out;
+    },
     session: (token, opts) => resolveSession(token, opts).then(evaluatorFor, () => evaluatorFor(null)),
     useSession: (token) => usePageSession(token).catch(() => evaluatorFor(null)),
     sessionHeaders() {
@@ -1216,6 +1334,8 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
       dropLive();
       stopStream();
       doc?.removeEventListener("visibilitychange", onVisible);
+      if (lifecycleCleanup) safely(lifecycleCleanup);
+      lifecycleCleanup = null;
       if (typeof removeEventListener === "function") removeEventListener("online", onOnline);
       resolveReady();
     },
@@ -1237,9 +1357,21 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
     resolveReady();
     return client;
   }
-  void Promise.all([restore(), sync()]).then(() => {
+  if (options.lifecycle) {
+    try {
+      const cleanup = options.lifecycle(control);
+      if (typeof cleanup === "function") lifecycleCleanup = cleanup;
+    } catch {
+      /* a broken integration must not break the client */
+    }
+  }
+  // Started in the background (paused before the first load): the store still loads; the network waits for resume().
+  const started = !paused;
+  void Promise.all([restore(), started ? sync() : Promise.resolve()]).then(() => {
     resolveReady(); // even without a bundle: callers must not hang; they check `status`
-    if (closed) return;
+    if (closed || paused) return;
+    // Paused and resumed while the first load ran: resume() already started everything.
+    if (!started) return;
     schedulePoll();
     scheduleFlush();
     startRealtime();

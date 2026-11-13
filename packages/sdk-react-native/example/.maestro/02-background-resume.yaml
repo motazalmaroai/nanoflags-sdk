@@ -1,0 +1,31 @@
+# Lifecycle: in the background the SDK closes its socket; a change published meanwhile is picked up when the app
+# returns to the foreground (conditional revalidation + reconnect).
+appId: io.nanoflags.example
+name: Foreground catches up after background
+tags: [nanoflags, lifecycle]
+---
+- launchApp:
+    clearState: true
+- extendedWaitUntil:
+    visible:
+      id: "status"
+      text: "status ready · r\\d+ · live.*"
+    timeout: 45000
+- pressKey: Home
+- runScript: scripts/toggle-accent.js
+- launchApp:
+    stopApp: false
+- extendedWaitUntil:
+    visible:
+      id: "accent"
+      text: "demo-accent = ${output.next}"
+    timeout: 20000
+- extendedWaitUntil:
+    visible:
+      id: "status"
+      text: "status ready · r\\d+ · live.*"
+    timeout: 20000
+- runScript:
+    file: scripts/set-accent.js
+    env:
+      VALUE: ${output.previous}

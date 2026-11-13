@@ -1,5 +1,5 @@
 /**
- * Bundle signature verification (Ed25519 over a canonical string, WebCrypto only).
+ * Bundle signature verification (Ed25519 over a canonical string; WebCrypto by default, or an injected `SignatureCrypto`).
  *
  * canonical = "nanoflags-bundle-v1\n<environment_id>\n<revision>\n<checksum>\n<sha256 hex of the bundle JSON text>"
  *
@@ -32,7 +32,41 @@ export interface SignatureInfo {
 
 export type PublicJwk = JsonWebKey & { kid?: string };
 
-const encoder = new TextEncoder();
+/**
+ * The two primitives signature verification needs. Default: WebCrypto (`crypto.subtle`: browsers, Node, Deno, Bun,
+ * edge runtimes). Runtimes without WebCrypto Ed25519 (React Native / Hermes) pass an implementation, e.g. one built
+ * on an audited pure-JS library. Either function may return synchronously.
+ */
+export interface SignatureCrypto {
+  /** SHA-256 digest (32 bytes). */
+  sha256(data: Uint8Array): Uint8Array | Promise<Uint8Array>;
+  /** RFC 8032 Ed25519 verification. `publicKey` is the 32-byte raw key, `signature` 64 bytes. Must not throw for bad input; return false. */
+  ed25519Verify(publicKey: Uint8Array, signature: Uint8Array, message: Uint8Array): boolean | Promise<boolean>;
+}
+
+/** UTF-8 encoding without depending on `TextEncoder` (missing in some embedded runtimes). */
+export function utf8(text: string): Uint8Array<ArrayBuffer> {
+  if (typeof TextEncoder === "function") return new TextEncoder().encode(text) as Uint8Array<ArrayBuffer>;
+  const out: number[] = [];
+  for (let i = 0; i < text.length; i++) {
+    let c = text.charCodeAt(i);
+    if (c >= 0xd800 && c <= 0xdbff && i + 1 < text.length) {
+      const d = text.charCodeAt(i + 1);
+      if (d >= 0xdc00 && d <= 0xdfff) {
+        c = 0x10000 + ((c - 0xd800) << 10) + (d - 0xdc00);
+        i++;
+      }
+    }
+    if (c >= 0xd800 && c <= 0xdfff) c = 0xfffd; // lone surrogate, as TextEncoder does
+    if (c < 0x80) out.push(c);
+    else if (c < 0x800) out.push(0xc0 | (c >> 6), 0x80 | (c & 63));
+    else if (c < 0x10000) out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));
+    else out.push(0xf0 | (c >> 18), 0x80 | ((c >> 12) & 63), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));
+  }
+  const bytes = new Uint8Array(new ArrayBuffer(out.length));
+  bytes.set(out);
+  return bytes;
+}
 
 export function canonicalString(environmentId: string, revision: number, checksum: string, bundleSha256Hex: string): string {
   return `nanoflags-bundle-v1\n${environmentId}\n${revision}\n${checksum}\n${bundleSha256Hex}`;
@@ -44,19 +78,41 @@ function subtle(): SubtleCrypto {
   return s;
 }
 
-export async function sha256Hex(text: string): Promise<string> {
-  const digest = new Uint8Array(await subtle().digest("SHA-256", encoder.encode(text)));
+function hex(bytes: Uint8Array): string {
   let out = "";
-  for (const b of digest) out += b.toString(16).padStart(2, "0");
+  for (const b of bytes) out += b.toString(16).padStart(2, "0");
   return out;
 }
+
+export async function sha256Hex(text: string, crypto?: SignatureCrypto): Promise<string> {
+  const data = utf8(text);
+  return hex(crypto ? await crypto.sha256(data) : new Uint8Array(await subtle().digest("SHA-256", data)));
+}
+
+const B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 export function base64UrlDecode(input: string): Uint8Array<ArrayBuffer> {
   const s = input.replace(/-/g, "+").replace(/_/g, "/").replace(/=+$/, "");
   if (!/^[A-Za-z0-9+/]*$/.test(s) || s.length % 4 === 1) throw new Error("Malformed base64url value.");
-  const bin = atob(s + "=".repeat((4 - (s.length % 4)) % 4));
-  const out = new Uint8Array(new ArrayBuffer(bin.length));
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  if (typeof atob === "function") {
+    const bin = atob(s + "=".repeat((4 - (s.length % 4)) % 4));
+    const out = new Uint8Array(new ArrayBuffer(bin.length));
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+  // No `atob` (older embedded runtimes): decode by hand.
+  const out = new Uint8Array(new ArrayBuffer(Math.floor((s.length * 3) / 4)));
+  let bits = 0;
+  let acc = 0;
+  let j = 0;
+  for (const ch of s) {
+    acc = (acc << 6) | B64.indexOf(ch);
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      out[j++] = (acc >> bits) & 0xff;
+    }
+  }
   return out;
 }
 
@@ -69,22 +125,35 @@ export function isPublicEd25519Jwk(v: unknown): v is PublicJwk {
 
 export interface ImportedKey {
   kid: string | null;
-  key: CryptoKey;
+  /** True when `signature` is valid for `data` under this key. May throw; callers treat that as "no". */
+  verify(signature: Uint8Array<ArrayBuffer>, data: Uint8Array<ArrayBuffer>): Promise<boolean>;
 }
 
-export async function importPublicKeys(jwks: readonly unknown[]): Promise<ImportedKey[]> {
+export async function importPublicKeys(jwks: readonly unknown[], crypto?: SignatureCrypto): Promise<ImportedKey[]> {
   const out: ImportedKey[] = [];
   for (const jwk of jwks) {
     if (!isPublicEd25519Jwk(jwk)) continue;
+    const kid = typeof jwk.kid === "string" ? jwk.kid : null;
+    if (crypto) {
+      let raw: Uint8Array;
+      try {
+        raw = base64UrlDecode(jwk.x!);
+      } catch {
+        continue;
+      }
+      if (raw.length !== 32) continue;
+      out.push({ kid, verify: async (signature, data) => (await crypto.ed25519Verify(raw, signature, data)) === true });
+      continue;
+    }
     // Import only the public members: extra members (kid, use, alg, key_ops) never influence the import.
     const key = await subtle().importKey("jwk", { kty: "OKP", crv: "Ed25519", x: jwk.x }, { name: "Ed25519" }, false, ["verify"]);
-    out.push({ kid: typeof jwk.kid === "string" ? jwk.kid : null, key });
+    out.push({ kid, verify: (signature, data) => subtle().verify({ name: "Ed25519" }, key, signature, data) });
   }
   return out;
 }
 
 /** True when `info.signature` is a valid signature by one of `keys` over the canonical string for `bundleText`. */
-export async function verifyBundleText(keys: readonly ImportedKey[], info: SignatureInfo, bundleText: string): Promise<boolean> {
+export async function verifyBundleText(keys: readonly ImportedKey[], info: SignatureInfo, bundleText: string, crypto?: SignatureCrypto): Promise<boolean> {
   let signature: Uint8Array<ArrayBuffer>;
   try {
     signature = base64UrlDecode(info.signature);
@@ -92,12 +161,12 @@ export async function verifyBundleText(keys: readonly ImportedKey[], info: Signa
     return false;
   }
   if (signature.length !== 64) return false;
-  const data = encoder.encode(canonicalString(info.environmentId, info.revision, info.checksum, await sha256Hex(bundleText)));
+  const data = utf8(canonicalString(info.environmentId, info.revision, info.checksum, await sha256Hex(bundleText, crypto)));
   // A key id narrows the candidates; without a match nothing is tried (an unknown key id is not "any key").
   const candidates = info.kid === null ? keys : keys.filter((k) => k.kid === info.kid || k.kid === null);
   for (const k of candidates) {
     try {
-      if (await subtle().verify({ name: "Ed25519" }, k.key, signature, data)) return true;
+      if (await k.verify(signature, data)) return true;
     } catch {
       /* try the next key */
     }

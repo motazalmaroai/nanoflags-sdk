@@ -29,6 +29,9 @@ android {
     }
 
     testOptions {
+        // The instrumentation test APK otherwise targets minSdk (21): Android 14 then shows the legacy permission
+        // review screen before any activity of the test APK starts, and ActivityScenario.launch waits forever.
+        targetSdk = 34
         unitTests {
             isIncludeAndroidResources = true
             all {

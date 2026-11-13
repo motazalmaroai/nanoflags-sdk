@@ -24,7 +24,9 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Assume.assumeTrue
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.Timeout
 import org.junit.runner.RunWith
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.TimeUnit
@@ -35,6 +37,10 @@ import java.util.concurrent.TimeUnit
  */
 @RunWith(AndroidJUnit4::class)
 class DeviceTest {
+    /** A hung test fails with the stack of the stuck thread instead of blocking the run until the CI job times out. */
+    @get:Rule
+    val timeout: Timeout = Timeout.builder().withTimeout(3, TimeUnit.MINUTES).withLookingForStuckThread(true).build()
+
     private val context = ApplicationProvider.getApplicationContext<android.content.Context>()
     private val clients = ArrayList<NanoFlags>()
 

@@ -82,6 +82,7 @@ jobs:
       - name: Build test APKs
         run: ./gradlew --no-daemon :nanoflags-android:assembleDebugAndroidTest :sample:assembleDebug :sample:assembleDebugAndroidTest
       - name: connectedAndroidTest
+        timeout-minutes: 30
         uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
         with:
           api-level: 34

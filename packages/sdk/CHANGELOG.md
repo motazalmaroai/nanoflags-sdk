@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.1 (2026-11-14)
 
 - An `error` emitted while no `error` listener is attached is logged with `console.warn` (prefixed `[nanoflags]`), once per error code per client, instead of being dropped silently. Attaching a listener with `on("error", …)` turns this off.
 - In a browser (`window` and `document` defined), a server key (`nf_srv_…`) logs a `console.warn` once per page: server keys are secrets and must not be shipped to browsers; use a client key (`nf_pub_…`).

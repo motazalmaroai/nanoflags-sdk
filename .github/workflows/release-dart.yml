@@ -49,6 +49,8 @@ jobs:
         run: |
           # The published packages depend on the released `nanoflags`, not the sibling directory.
           rm -f pubspec_overrides.yaml example/pubspec_overrides.yaml
+          # Pub warns about tracked ignored overrides even after deletion; exclude them from the checkout index too.
+          git rm --cached --ignore-unmatch -- pubspec_overrides.yaml example/pubspec_overrides.yaml
           ${{ steps.pkg.outputs.tool }} pub get
           ${{ steps.pkg.outputs.tool }} test
       - name: Publish

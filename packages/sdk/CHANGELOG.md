@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- An `error` emitted while no `error` listener is attached is logged with `console.warn` (prefixed `[nanoflags]`), once per error code per client, instead of being dropped silently. Attaching a listener with `on("error", …)` turns this off.
+- In a browser (`window` and `document` defined), a server key (`nf_srv_…`) logs a `console.warn` once per page: server keys are secrets and must not be shipped to browsers; use a client key (`nf_pub_…`).
+- README: the quickstart attaches the `error` listener before `await ready()`.
+
 ## 0.5.0 (2026-11-13)
 
 Additive, no breaking changes. These options let platform SDKs (the React Native SDK, `@nanoflags/react-native`) build on the core client.

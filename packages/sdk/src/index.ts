@@ -329,6 +329,17 @@ function typeOf(v: JsonValue | undefined): string {
   return v === null ? "null" : Array.isArray(v) ? "array" : typeof v;
 }
 
+/** Process-wide: the "server key in a browser" warning is logged at most once, however many clients are created. */
+let warnedServerKeyInBrowser = false;
+
+function warn(message: string): void {
+  try {
+    if (typeof console !== "undefined" && typeof console.warn === "function") console.warn(`[nanoflags] ${message}`);
+  } catch {
+    /* logging must never break the client */
+  }
+}
+
 export function createClient(options: ClientOptions): NanoFlagsClient {
   const sdkKey = options.sdkKey;
   const baseUrl = String(options.baseUrl ?? "").replace(/\/+$/, "");
@@ -398,6 +409,10 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
     return { keys, require: v.require ?? official, refetch: keys === "fetch" || (official && v.publicKeys === undefined) };
   })();
   const isBrowser = typeof window !== "undefined" && typeof document !== "undefined";
+  if (isBrowser && typeof sdkKey === "string" && sdkKey.startsWith("nf_srv_") && !warnedServerKeyInBrowser) {
+    warnedServerKeyInBrowser = true;
+    warn("A server key (nf_srv_…) is being used in a browser. Server keys are secrets and must never be shipped to browsers: anyone can read them from the page. Create a client key (nf_pub_…) for browser code; it receives only client-exposed flags.");
+  }
   let pinnedKeys: Promise<ImportedKey[]> | null = null;
   let fetchedKeys: ImportedKey[] = [];
   let keysFetchedAt = 0;
@@ -441,7 +456,17 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
     status = next;
     changed();
   };
+  /** Error codes already logged because no `error` listener was attached (each is logged once per client). */
+  const warnedCodes = new Set<string>();
   const emitError = (e: Error) => {
+    if (listeners.error.size === 0) {
+      const code = e instanceof NanoFlagsError ? e.code : e.name || "error";
+      if (!warnedCodes.has(code)) {
+        warnedCodes.add(code);
+        warn(`${code}: ${e.message} (No "error" listener is attached: add client.on("error", …) before await ready() to handle this. Logged once per error code.)`);
+      }
+      return;
+    }
     for (const cb of [...listeners.error]) safely(() => cb(e));
   };
 

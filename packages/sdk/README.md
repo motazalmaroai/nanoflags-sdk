@@ -38,6 +38,8 @@ const flags = createClient({
   service: "checkout-api",
 });
 
+// Attach the error listener before ready(): load errors are emitted while it waits.
+flags.on("error", (e) => console.warn(e.code, e.message)); // the last good bundle keeps serving
 await flags.ready(); // never rejects — see "Fallbacks and staleness"
 
 const enabled = flags.boolean("checkout-v2", false, { key: user.id, signedIn: true, region: "US" });
@@ -61,12 +63,13 @@ const flags = createClient({
   service: "web",
 });
 
+flags.on("error", (e) => console.warn(e.code, e.message));
 await flags.ready();
 const ranking = flags.string("search-ranking", "relevance-v2", { key: user.id });
 flags.on("update", ({ revision }) => console.log("now on revision", revision));
 ```
 
-Never ship an `nf_srv_` key to a browser. Rules of client-exposed flags are visible to anyone who has
+Never ship an `nf_srv_` key to a browser (the SDK logs a `console.warn` once if it sees one there). Rules of client-exposed flags are visible to anyone who has
 the browser key, and evaluation runs on the user's device — do not use browser flags for authorization.
 
 ### React
@@ -132,7 +135,7 @@ createClient({
 | `allFlags(ctx?)` | `{ [flagKey]: value }` for every flag in the bundle in use (flags whose evaluation fails are left out; `{}` without a bundle). Not sampled into telemetry. |
 | `session(token, { service? })` | `Promise<SessionEvaluator>` for a test session. Never rejects. See [Test sessions](#test-sessions). |
 | `useSession(token \| null)` / `sessionHeaders()` | Browser only: join or leave a test session for this page session; headers for downstream calls. |
-| `on("update" \| "error", cb)` | Returns an unsubscribe function. `update` receives `{ revision, previousRevision, checksum, source, transport, latencyMs }` (see [Updates](#updates)). `error` receives a `NanoFlagsError` with `code`: `network`, `unauthorized`, `http`, `invalid_bundle`, `store`, `config`, `signature`, `session`, `engine` (bundle for a newer engine, refused), `environment_deleted`. |
+| `on("update" \| "error", cb)` | Returns an unsubscribe function. `update` receives `{ revision, previousRevision, checksum, source, transport, latencyMs }` (see [Updates](#updates)). `error` receives a `NanoFlagsError` with `code`: `network`, `unauthorized`, `http`, `invalid_bundle`, `store`, `config`, `signature`, `session`, `engine` (bundle for a newer engine, refused), `environment_deleted`. With no `error` listener attached, the SDK logs each error code once with `console.warn`. |
 | `refresh()` / `flush()` / `close()` | Revalidate now / send queued telemetry now / stop all background work. |
 
 ## Fallbacks and staleness

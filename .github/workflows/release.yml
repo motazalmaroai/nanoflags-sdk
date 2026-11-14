@@ -4,6 +4,8 @@ name: Release
 #   tag sdk-v<version>          -> @nanoflags/sdk                  (packages/sdk)
 #   tag openfeature-v<version>  -> @nanoflags/openfeature-provider (packages/openfeature)
 #   tag cli-v<version>          -> @nanoflags/cli                  (packages/cli)
+#   tag react-native-v<version> -> @nanoflags/react-native         (packages/sdk-react-native)
+#   workflow_call (input `package`) from auto-release.yml, which runs on every push to main
 #   workflow_dispatch (input `package`: sdk | openfeature | cli) -> the version currently in that package.json
 # A tag's version must equal the package.json version. A version that is already on npm is skipped with a notice.
 # Publish the SDK before a provider release that needs a new SDK version (the provider's peer range on
@@ -17,6 +19,7 @@ on:
       - "sdk-v*"
       - "openfeature-v*"
       - "cli-v*"
+      - "react-native-v*"
   workflow_dispatch:
     inputs:
       package:
@@ -27,13 +30,22 @@ on:
           - sdk
           - openfeature
           - cli
+          - react-native
+  workflow_call:
+    inputs:
+      package:
+        required: true
+        type: string
+    secrets:
+      NPM_TOKEN:
+        required: false
 
 permissions:
   contents: read
   id-token: write # npm provenance
 
 concurrency:
-  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.package || github.ref }}
+  group: release-${{ inputs.package || github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -50,7 +62,7 @@ jobs:
           INPUT_PACKAGE: ${{ inputs.package }}
           REF_NAME: ${{ github.ref_name }}
         run: |
-          if [ "$EVENT" = "workflow_dispatch" ]; then
+          if [ -n "$INPUT_PACKAGE" ]; then
             short="$INPUT_PACKAGE"
             tag_version=""
           else
@@ -58,6 +70,7 @@ jobs:
               sdk-v*)         short=sdk;         tag_version="${REF_NAME#sdk-v}" ;;
               openfeature-v*) short=openfeature; tag_version="${REF_NAME#openfeature-v}" ;;
               cli-v*)         short=cli;         tag_version="${REF_NAME#cli-v}" ;;
+              react-native-v*) short=react-native; tag_version="${REF_NAME#react-native-v}" ;;
               *) echo "::error::Unknown tag $REF_NAME"; exit 1 ;;
             esac
           fi
@@ -65,7 +78,8 @@ jobs:
             sdk)         dir=packages/sdk;         name=@nanoflags/sdk ;;
             openfeature) dir=packages/openfeature; name=@nanoflags/openfeature-provider ;;
             cli)         dir=packages/cli;         name=@nanoflags/cli ;;
-            *) echo "::error::Unknown package '$short' (expected sdk, openfeature or cli)"; exit 1 ;;
+            react-native) dir=packages/sdk-react-native; name=@nanoflags/react-native ;;
+            *) echo "::error::Unknown package '$short' (expected sdk, openfeature, cli or react-native)"; exit 1 ;;
           esac
           version=$(node -p "require('./$dir/package.json').version")
           actual_name=$(node -p "require('./$dir/package.json').name")

@@ -1,0 +1,184 @@
+name: Auto release
+
+# Runs on every push to main. A package is released when the version in its manifest is not on its registry yet:
+# bumping the version (and its CHANGELOG) is the release decision. Each publish job builds and tests the package
+# first; nothing is published if a test fails. Versions already published are skipped, so re-runs are harmless.
+#
+#   npm      @nanoflags/sdk, @nanoflags/openfeature-provider, @nanoflags/cli, @nanoflags/react-native
+#            -> release.yml (workflow_call), secret NPM_TOKEN, npm provenance. Tagged <short>-v<version> afterwards.
+#   Maven    io.nanoflags:nanoflags-{core,android,openfeature} (kotlin/gradle.properties nanoflags.version)
+#            -> signed bundle to the Central Portal (AUTOMATIC). Secrets CENTRAL_TOKEN_USERNAME,
+#            CENTRAL_TOKEN_PASSWORD, GPG_SIGNING_KEY, GPG_SIGNING_PASSWORD. Skipped with a notice until they exist.
+#            Tagged kotlin-v<version> afterwards.
+#   pub.dev  nanoflags, nanoflags_openfeature, nanoflags_flutter
+#            -> pushes the tag dart-<package>-v<version> with the secret RELEASE_TAG_TOKEN (a fine-grained token
+#            limited to this repository, Contents: read and write), which starts release-dart.yml: pub.dev only
+#            accepts OIDC publishing from a tag push, and tags pushed with the workflow token start no workflow.
+#            Skipped with a notice while the package is not on pub.dev yet (the first upload of each package is
+#            manual, a pub.dev rule) or the secret is missing.
+# PyPI (release-python.yml) and Go (go/v* tags) are released by tag as before.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: auto-release
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      npm: ${{ steps.plan.outputs.npm }}
+      maven: ${{ steps.plan.outputs.maven }}
+      maven_version: ${{ steps.plan.outputs.maven_version }}
+      dart: ${{ steps.plan.outputs.dart }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: plan
+        env:
+          HAS_MAVEN_SECRETS: ${{ secrets.CENTRAL_TOKEN_USERNAME != '' && secrets.GPG_SIGNING_KEY != '' }}
+          HAS_TAG_TOKEN: ${{ secrets.RELEASE_TAG_TOKEN != '' }}
+        run: |
+          set -euo pipefail
+          npm_list=()
+          for entry in sdk:packages/sdk openfeature:packages/openfeature cli:packages/cli react-native:packages/sdk-react-native; do
+            short="${entry%%:*}"; dir="${entry#*:}"
+            name=$(node -p "require('./$dir/package.json').name"); version=$(node -p "require('./$dir/package.json').version")
+            code=$(curl -s -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/$name/$version")
+            if [ "$code" = 200 ]; then echo "npm $name@$version: published"
+            elif [ "$code" = 404 ]; then echo "npm $name@$version: to release"; npm_list+=("\"$short\"")
+            else echo "::error::npm registry answered $code for $name@$version"; exit 1; fi
+          done
+          echo "npm=[$(IFS=,; echo "${npm_list[*]}")]" >> "$GITHUB_OUTPUT"
+
+          mv=$(sed -n 's/^nanoflags.version=//p' kotlin/gradle.properties)
+          echo "maven_version=$mv" >> "$GITHUB_OUTPUT"
+          code=$(curl -s -o /dev/null -w '%{http_code}' "https://repo1.maven.org/maven2/io/nanoflags/nanoflags-core/$mv/nanoflags-core-$mv.pom")
+          if [ "$code" = 200 ]; then echo "maven $mv: published"; echo "maven=false" >> "$GITHUB_OUTPUT"
+          elif [ "$HAS_MAVEN_SECRETS" != true ]; then
+            echo "::notice title=Maven Central not set up::io.nanoflags $mv is not on Maven Central; add the Central and GPG secrets to release it (kotlin/PUBLISHING.md)."
+            echo "maven=false" >> "$GITHUB_OUTPUT"
+          else echo "maven $mv: to release"; echo "maven=true" >> "$GITHUB_OUTPUT"; fi
+
+          dart_list=()
+          for pkg in nanoflags nanoflags_openfeature nanoflags_flutter; do
+            v=$(awk '/^version:/{print $2; exit}' "packages/sdk-dart/$pkg/pubspec.yaml")
+            pkg_code=$(curl -s -o /dev/null -w '%{http_code}' "https://pub.dev/api/packages/$pkg")
+            ver_code=$(curl -s -o /dev/null -w '%{http_code}' "https://pub.dev/api/packages/$pkg/versions/$v")
+            if [ "$ver_code" = 200 ]; then echo "pub.dev $pkg $v: published"
+            elif [ "$pkg_code" != 200 ]; then echo "::notice title=pub.dev first upload needed::$pkg is not on pub.dev yet; its first version is uploaded by hand once (packages/sdk-dart/PUBLISHING.md)."
+            elif [ "$HAS_TAG_TOKEN" != true ]; then echo "::notice title=RELEASE_TAG_TOKEN missing::$pkg $v needs the RELEASE_TAG_TOKEN secret to start release-dart.yml."
+            else echo "pub.dev $pkg $v: to release"; dart_list+=("\"dart-$pkg-v$v\""); fi
+          done
+          echo "dart=[$(IFS=,; echo "${dart_list[*]}")]" >> "$GITHUB_OUTPUT"
+
+  npm:
+    needs: plan
+    if: needs.plan.outputs.npm != '[]'
+    strategy:
+      max-parallel: 1 # in order: the SDK before the packages that depend on it
+      fail-fast: true
+      matrix:
+        package: ${{ fromJSON(needs.plan.outputs.npm) }}
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/release.yml
+    with:
+      package: ${{ matrix.package }}
+    secrets:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  npm-tags:
+    needs: [plan, npm]
+    if: needs.plan.outputs.npm != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          LIST: ${{ needs.plan.outputs.npm }}
+        run: |
+          for short in $(jq -r '.[]' <<<"$LIST"); do
+            case "$short" in sdk) dir=packages/sdk;; openfeature) dir=packages/openfeature;; cli) dir=packages/cli;; react-native) dir=packages/sdk-react-native;; esac
+            tag="$short-v$(node -p "require('./$dir/package.json').version")"
+            gh api "repos/$GITHUB_REPOSITORY/git/refs" -f "ref=refs/tags/$tag" -f "sha=$GITHUB_SHA" >/dev/null && echo "tagged $tag" || echo "::warning::could not create $tag (exists?)"
+          done
+
+  maven:
+    needs: plan
+    if: needs.plan.outputs.maven == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    environment: maven-central
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: kotlin
+    env:
+      VERSION: ${{ needs.plan.outputs.maven_version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Test
+        run: ./gradlew --no-daemon :nanoflags-core:test :nanoflags-android:testDebugUnitTest :nanoflags-openfeature:test
+      - name: Build and sign
+        env:
+          ORG_GRADLE_PROJECT_signingKey: ${{ secrets.GPG_SIGNING_KEY }}
+          ORG_GRADLE_PROJECT_signingPassword: ${{ secrets.GPG_SIGNING_PASSWORD }}
+        run: |
+          ./gradlew --no-daemon publishAllPublicationsToStagingRepository
+          missing=$(find build/staging-deploy -type f \( -name '*.jar' -o -name '*.aar' -o -name '*.pom' -o -name '*.module' \) ! -exec test -e '{}.asc' \; -print)
+          if [ -n "$missing" ]; then echo "::error::unsigned files: $missing"; exit 1; fi
+          (cd build/staging-deploy && zip -qr ../central-bundle.zip io)
+      - name: Upload to the Central Portal and publish
+        env:
+          CENTRAL_USER: ${{ secrets.CENTRAL_TOKEN_USERNAME }}
+          CENTRAL_PASS: ${{ secrets.CENTRAL_TOKEN_PASSWORD }}
+        run: |
+          token=$(printf '%s:%s' "$CENTRAL_USER" "$CENTRAL_PASS" | base64 -w0)
+          id=$(curl -sSf -X POST -H "Authorization: Bearer $token" -F "bundle=@build/central-bundle.zip" \
+            "https://central.sonatype.com/api/v1/publisher/upload?name=nanoflags-kotlin-$VERSION&publishingType=AUTOMATIC")
+          echo "deployment id: $id"
+          for i in $(seq 1 120); do
+            state=$(curl -sSf -X POST -H "Authorization: Bearer $token" "https://central.sonatype.com/api/v1/publisher/status?id=$id" | jq -r .deploymentState)
+            echo "state: $state"
+            case "$state" in PUBLISHING|PUBLISHED) exit 0;; FAILED) exit 1;; esac
+            sleep 15
+          done
+          echo "::error::deployment $id did not validate in time"; exit 1
+      - name: Tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api "repos/$GITHUB_REPOSITORY/git/refs" -f "ref=refs/tags/kotlin-v$VERSION" -f "sha=$GITHUB_SHA" >/dev/null || echo "::warning::could not create kotlin-v$VERSION"
+
+  dart:
+    needs: plan
+    if: needs.plan.outputs.dart != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.RELEASE_TAG_TOKEN }}
+      - env:
+          LIST: ${{ needs.plan.outputs.dart }}
+        run: |
+          # One tag per push so each starts its own release-dart.yml run; nanoflags first (the others depend on it).
+          for tag in $(jq -r '.[]' <<<"$LIST"); do
+            git tag "$tag" "$GITHUB_SHA" && git push origin "refs/tags/$tag" && echo "pushed $tag"
+          done

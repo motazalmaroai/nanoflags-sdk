@@ -1,0 +1,58 @@
+name: Release Dart / Flutter SDK
+
+# Tags: dart-nanoflags-v<version>, dart-nanoflags_openfeature-v<version>, dart-nanoflags_flutter-v<version>
+on:
+  push:
+    tags: ["dart-nanoflags-v*", "dart-nanoflags_openfeature-v*", "dart-nanoflags_flutter-v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pub.dev
+    permissions:
+      contents: read
+      id-token: write # OIDC token for pub.dev
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # Exchanges the GitHub OIDC token for a pub.dev token (needs id-token: write).
+      - uses: dart-lang/setup-dart@2286a0c042b44434fe26d292bbce8d34f7ec662b # v1.8.2
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+          flutter-version: "3.50.0"
+      - name: Select the package from the tag
+        id: pkg
+        run: |
+          tag="$GITHUB_REF_NAME"
+          case "$tag" in
+            dart-nanoflags_openfeature-v*) pkg=nanoflags_openfeature; tool=dart ;;
+            dart-nanoflags_flutter-v*)     pkg=nanoflags_flutter;     tool=flutter ;;
+            dart-nanoflags-v*)             pkg=nanoflags;             tool=dart ;;
+            *) echo "::error::unexpected tag $tag"; exit 1 ;;
+          esac
+          version="${tag##*-v}"
+          dir="packages/sdk-dart/$pkg"
+          actual=$(grep -E '^version:' "$dir/pubspec.yaml" | awk '{print $2}')
+          if [ "$actual" != "$version" ]; then
+            echo "::error::Tag $tag does not match version $actual in $dir/pubspec.yaml"; exit 1
+          fi
+          if curl -sf "https://pub.dev/api/packages/$pkg/versions/$version" > /dev/null; then
+            echo "::error::$pkg $version is already on pub.dev. Bump the version."; exit 1
+          fi
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+          echo "tool=$tool" >> "$GITHUB_OUTPUT"
+      - name: Test
+        working-directory: ${{ steps.pkg.outputs.dir }}
+        run: |
+          # The published packages depend on the released `nanoflags`, not the sibling directory.
+          rm -f pubspec_overrides.yaml example/pubspec_overrides.yaml
+          ${{ steps.pkg.outputs.tool }} pub get
+          ${{ steps.pkg.outputs.tool }} test
+      - name: Publish
+        working-directory: ${{ steps.pkg.outputs.dir }}
+        run: |
+          ${{ steps.pkg.outputs.tool }} pub publish --dry-run
+          ${{ steps.pkg.outputs.tool }} pub publish --force

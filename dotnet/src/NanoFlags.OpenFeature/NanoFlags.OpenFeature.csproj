@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFrameworks>netstandard2.0;net8.0</TargetFrameworks>
+    <RootNamespace>NanoFlags.OpenFeature</RootNamespace>
+    <PackageId>NanoFlags.OpenFeature</PackageId>
+    <Title>NanoFlags OpenFeature provider for .NET</Title>
+    <Description>OpenFeature (https://openfeature.dev) provider for the NanoFlags .NET server SDK: local evaluation, reasons and variants, provider events for configuration changes.</Description>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="OpenFeature" Version="2.9.0" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../NanoFlags/NanoFlags.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="/" />
+    <None Include="../../LICENSE" Pack="true" PackagePath="/" />
+    <None Include="../../NOTICE" Pack="true" PackagePath="/" />
+    <InternalsVisibleTo Include="NanoFlags.OpenFeature.Tests" />
+  </ItemGroup>
+</Project>

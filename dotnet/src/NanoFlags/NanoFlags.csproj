@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFrameworks>netstandard2.0;net8.0</TargetFrameworks>
+    <RootNamespace>NanoFlags</RootNamespace>
+    <PackageId>NanoFlags</PackageId>
+    <Title>NanoFlags server SDK for .NET</Title>
+    <Description>NanoFlags feature flags for .NET servers: local, synchronous evaluation (a port of the shared NanoFlags engine, checked against the cross-language conformance fixtures), Ed25519-verified bundles, live WebSocket updates with SSE and polling fallbacks, last-known-good persistence and privacy-preserving telemetry.</Description>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="8.0.3" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="/" />
+    <None Include="../../LICENSE" Pack="true" PackagePath="/" />
+    <None Include="../../NOTICE" Pack="true" PackagePath="/" />
+    <InternalsVisibleTo Include="NanoFlags.Tests" />
+  </ItemGroup>
+</Project>

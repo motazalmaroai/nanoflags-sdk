@@ -1,0 +1,66 @@
+# .NET server SDK (dotnet/): build, test and pack only. Nothing is published here (see dotnet/PUBLISHING.md).
+# The conformance tests read the shared fixtures in packages/engine/fixtures and go/internal/testdata.
+name: .NET SDK
+
+on:
+  push:
+    branches: [main]
+    paths: ["dotnet/**", "packages/engine/fixtures/**", "go/internal/testdata/**", ".github/workflows/dotnet.yml"]
+  pull_request:
+    branches: [main]
+    paths: ["dotnet/**", "packages/engine/fixtures/**", "go/internal/testdata/**", ".github/workflows/dotnet.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dotnet-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: dotnet
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  DOTNET_NOLOGO: "1"
+
+jobs:
+  test:
+    name: .NET 8 on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: Restore
+        run: dotnet restore
+      - name: Build (netstandard2.0 and net8.0, warnings are errors)
+        run: dotnet build -c Release --no-restore
+      - name: Test (21,998 conformance cases + extra, verification, fake edge, OpenFeature)
+        run: dotnet test -c Release --no-build --logger "console;verbosity=normal"
+      - name: Pack (not published)
+        if: matrix.os == 'ubuntu-latest'
+        run: dotnet pack -c Release --no-build -o artifacts
+      # Read-only check against the real edge with the PUBLIC demo browser key (also in mobile-android.yml):
+      # loads and verifies a signed bundle and opens the live socket. Changes nothing; never blocks the build.
+      - name: Production check (read-only, public demo key)
+        if: matrix.os == 'ubuntu-latest' && github.event_name != 'pull_request'
+        continue-on-error: true
+        env:
+          NANOFLAGS_PRODUCTION_TESTS: "1"
+          NANOFLAGS_SDK_KEY: nf_pub_4ced72c484c4f388a900aeeaf81e130c110c11730d555dd8
+        run: dotnet test -c Release --no-build --filter ProductionTests --logger "console;verbosity=detailed"
+      - uses: actions/upload-artifact@v4
+        if: matrix.os == 'ubuntu-latest'
+        with:
+          name: nuget-packages
+          path: dotnet/artifacts/
+          if-no-files-found: error

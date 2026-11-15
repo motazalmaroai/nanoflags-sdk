@@ -1,0 +1,89 @@
+# Ruby SDK CI: tests only, nothing is published (ruby/nanoflags -> gem nanoflags, ruby/nanoflags-openfeature -> gem
+# nanoflags-openfeature; see their READMEs). No secrets: the optional live check uses the PUBLIC demo browser key
+# (client view of the public demo environment, read-only).
+name: Ruby SDK
+
+on:
+  push:
+    branches: [main]
+    paths: ["ruby/**", "packages/engine/fixtures/**", "go/internal/testdata/**", ".github/workflows/ruby.yml"]
+  pull_request:
+    branches: [main]
+    paths: ["ruby/**", "packages/engine/fixtures/**", "go/internal/testdata/**", ".github/workflows/ruby.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ruby-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sdk:
+    name: nanoflags · Ruby ${{ matrix.ruby }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        ruby: ["3.1", "3.2", "3.3", "3.4"]
+    defaults:
+      run:
+        working-directory: ruby/nanoflags
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ matrix.ruby }}
+          bundler-cache: true
+          working-directory: ruby/nanoflags
+      - name: Test (unit, engine parity incl. extra.json, local HTTP, fork safety)
+        run: bundle exec rake test
+      - name: Build the gem (not published)
+        run: gem build nanoflags.gemspec
+
+  openfeature:
+    name: nanoflags-openfeature · Ruby ${{ matrix.ruby }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # openfeature-sdk resolves to 0.5.x on Ruby < 3.4 and to the newest release on 3.4.
+        ruby: ["3.1", "3.4"]
+    defaults:
+      run:
+        working-directory: ruby/nanoflags-openfeature
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ matrix.ruby }}
+          bundler-cache: true
+          working-directory: ruby/nanoflags-openfeature
+      - name: Test
+        run: bundle exec rake test
+      - name: Build the gem (not published)
+        run: gem build nanoflags-openfeature.gemspec
+
+  live:
+    name: hosted edge (read-only, public demo key)
+    if: github.event_name != 'pull_request'
+    needs: sdk
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: ruby/nanoflags
+    env:
+      NANOFLAGS_LIVE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+          bundler-cache: true
+          working-directory: ruby/nanoflags
+      - name: Verified bundle and event stream from https://edge.nanoflags.io
+        run: bundle exec ruby -Ilib -Itest test/test_live.rb

@@ -1,0 +1,80 @@
+#!/usr/bin/env php
+<?php
+
+/**
+ * nanoflags-sync: keeps the shared bundle cache current for PHP web workers (the "relay" mode).
+ *
+ *   vendor/bin/nanoflags-sync path/to/nanoflags.php [--interval=30] [--no-stream] [--once]
+ *
+ * The config file returns a NanoFlags\Client configured with the SAME sdkKey, baseUrl and cache as the web workers,
+ * for example:
+ *
+ *   <?php return new NanoFlags\Client(getenv('NANOFLAGS_SDK_KEY'), service: 'web', cache: new NanoFlags\Store\FileStore('/var/cache/nanoflags'));
+ *
+ * Web workers then create their clients with `refresh: false` (never wait for the edge) or keep the default (they
+ * revalidate themselves only when the daemon falls behind). Run it under systemd, supervisord or a sidecar
+ * container; it exits non-zero when the config file is unusable.
+ */
+
+declare(strict_types=1);
+
+foreach ([__DIR__ . '/../vendor/autoload.php', __DIR__ . '/../../../autoload.php', __DIR__ . '/../autoload.php'] as $autoload) {
+    if (is_file($autoload)) {
+        require $autoload;
+        break;
+    }
+}
+
+$args = array_slice($argv, 1);
+$config = null;
+$interval = 30.0;
+$stream = true;
+$once = false;
+foreach ($args as $a) {
+    if ($a === '--help' || $a === '-h') {
+        fwrite(STDOUT, "usage: nanoflags-sync <config.php> [--interval=SECONDS] [--no-stream] [--once]\n");
+        exit(0);
+    } elseif (str_starts_with($a, '--interval=')) {
+        $interval = max(1.0, (float) substr($a, 11));
+    } elseif ($a === '--no-stream') {
+        $stream = false;
+    } elseif ($a === '--once') {
+        $once = true;
+    } elseif ($config === null) {
+        $config = $a;
+    } else {
+        fwrite(STDERR, "nanoflags-sync: unexpected argument $a\n");
+        exit(2);
+    }
+}
+if ($config === null || !is_file($config)) {
+    fwrite(STDERR, "usage: nanoflags-sync <config.php> [--interval=SECONDS] [--no-stream] [--once]\n");
+    exit(2);
+}
+$client = require $config;
+if (is_callable($client)) {
+    $client = $client();
+}
+if (!$client instanceof NanoFlags\Client) {
+    fwrite(STDERR, "nanoflags-sync: $config must return a NanoFlags\\Client\n");
+    exit(2);
+}
+$client->onError(static function (NanoFlags\NanoFlagsException $e): void {
+    fwrite(STDERR, sprintf("[%s] nanoflags-sync: %s (%s)\n", gmdate('c'), $e->getMessage(), $e->errorCode));
+});
+$report = static function (NanoFlags\Client $c): void {
+    fwrite(STDOUT, sprintf("[%s] nanoflags-sync: %s, revision %s\n", gmdate('c'), $c->status(), $c->revision() ?? '-'));
+};
+if ($once) {
+    $ok = $client->refresh();
+    $report($client);
+    exit($ok ? 0 : 1);
+}
+$last = null;
+$client->run(pollInterval: $interval, stream: $stream, onSync: static function (NanoFlags\Client $c) use (&$last, $report): void {
+    $now = [$c->status(), $c->revision()];
+    if ($now !== $last) {
+        $report($c);
+        $last = $now;
+    }
+});

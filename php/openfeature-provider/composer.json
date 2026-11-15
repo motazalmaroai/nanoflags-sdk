@@ -1,0 +1,52 @@
+{
+    "name": "nanoflags/openfeature-provider",
+    "description": "OpenFeature provider for NanoFlags (PHP): local feature-flag evaluation through the OpenFeature PHP SDK.",
+    "type": "library",
+    "license": "Apache-2.0",
+    "keywords": [
+        "openfeature",
+        "feature flags",
+        "nanoflags",
+        "provider"
+    ],
+    "homepage": "https://nanoflags.io",
+    "authors": [
+        {
+            "name": "Alibtekarat Althkiya Company for Trading & Marketing (Intinovate)",
+            "email": "support@nanoflags.io",
+            "homepage": "https://nanoflags.io"
+        }
+    ],
+    "support": {
+        "email": "support@nanoflags.io",
+        "issues": "https://github.com/motazalmaroai/nanoflags-sdk/issues",
+        "source": "https://github.com/motazalmaroai/nanoflags-sdk/tree/main/php/openfeature-provider",
+        "docs": "https://nanoflags.io/docs"
+    },
+    "require": {
+        "php": ">=8.1",
+        "nanoflags/nanoflags": "^0.1",
+        "open-feature/sdk": "^2.0"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^10.5 || ^11.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "NanoFlags\\OpenFeature\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "NanoFlags\\OpenFeature\\Tests\\": "tests/"
+        }
+    },
+    "config": {
+        "sort-packages": true
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true,
+    "scripts": {
+        "test": "phpunit"
+    }
+}

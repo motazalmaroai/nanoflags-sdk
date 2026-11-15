@@ -14,7 +14,12 @@ module NanoFlags
     module Json
       module_function
 
-      PARSE_OPTS = { allow_nan: false, max_nesting: false, create_additions: false, allow_duplicate_key: true }.freeze
+      PARSE_OPTS = begin
+        opts = { allow_nan: false, max_nesting: false, create_additions: false }
+        # json >= 2.13 warns about repeated keys unless told that JSON.parse semantics (last one wins) are wanted.
+        opts[:allow_duplicate_key] = true if Gem::Version.new(::JSON::VERSION) >= Gem::Version.new("2.13")
+        opts.freeze
+      end
 
       # Parses JSON text exactly like JavaScript's `JSON.parse`.
       def parse(text)
@@ -25,7 +30,7 @@ module NanoFlags
         if text.valid_encoding?
           begin
             return convert(::JSON.parse(text, PARSE_OPTS))
-          rescue ::JSON::ParserError, EncodingError
+          rescue ::JSON::ParserError, EncodingError, ArgumentError
             # fall through to the exact parser
           end
         end

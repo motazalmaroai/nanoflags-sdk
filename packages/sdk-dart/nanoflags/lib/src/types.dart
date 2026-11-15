@@ -3,7 +3,7 @@ import 'store.dart';
 import 'keys.dart';
 
 /// Version of this SDK (sent as `sdk: "dart/<version>"` with telemetry and in the User-Agent).
-const String sdkVersion = '0.1.0';
+const String sdkVersion = '0.1.1';
 
 /// WebSocket close code of the edge for an environment that was deleted: the SDK stops reconnecting.
 const int closeEnvironmentDeleted = 4004;
@@ -232,7 +232,7 @@ final class NanoFlagsOptions {
   /// Poll interval in data-saver mode (no socket, no stream).
   final Duration dataSaverPollInterval;
 
-  /// Appended to the SDK's User-Agent (`nanoflags-dart/0.1.0 (<platform>)`) on native platforms.
+  /// Appended to the SDK's User-Agent (`nanoflags-dart/0.1.1 (<platform>)`) on native platforms.
   final String? userAgent;
 
   /// A copy with the given members replaced.

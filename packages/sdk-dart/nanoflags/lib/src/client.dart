@@ -389,8 +389,17 @@ class NanoFlagsClient {
     _changed();
   }
 
+  /// Error codes already printed because nothing listened on [errors] (printed once per code per client).
+  final Set<NanoFlagsErrorCode> _warnedCodes = <NanoFlagsErrorCode>{};
+
   void _emitError(NanoFlagsException e) {
-    if (!_errors.isClosed) _errors.add(e);
+    if (_errors.isClosed) return;
+    if (!_errors.hasListener && _warnedCodes.add(e.code)) {
+      // Without a listener the error would be dropped silently; say it once so a wrong key or URL is noticed.
+      // ignore: avoid_print
+      print('[nanoflags] ${e.code.name}: ${e.message} (listen on client.errors to handle errors yourself)');
+    }
+    _errors.add(e);
   }
 
   _VerifyConfig? _verifyConfig() {

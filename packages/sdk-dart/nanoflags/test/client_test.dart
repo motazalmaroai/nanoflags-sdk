@@ -118,6 +118,26 @@ void main() {
       expect(errors.map((e) => e.code), contains(NanoFlagsErrorCode.signature));
     });
 
+    test('an error with no listener on errors is printed once per code; a listener silences it', () async {
+      await edge.publish(bundleDoc(1, {'checkout': boolFlag(true)}));
+      edge.bundleMode = 'unsigned';
+      final printed = <String>[];
+      await runZoned(() async {
+        final c = client(live: false, streaming: false);
+        await c.ready();
+        await c.refresh();
+      }, zoneSpecification: ZoneSpecification(print: (self, parent, zone, line) => printed.add(line)));
+      expect(printed.where((l) => l.startsWith('[nanoflags] signature:')), hasLength(1));
+
+      printed.clear();
+      await runZoned(() async {
+        final c = client(live: false, streaming: false);
+        c.errors.listen((_) {});
+        await c.ready();
+      }, zoneSpecification: ZoneSpecification(print: (self, parent, zone, line) => printed.add(line)));
+      expect(printed.where((l) => l.startsWith('[nanoflags]')), isEmpty);
+    });
+
     test('unsigned bundles are accepted when require is false', () async {
       await edge.publish(bundleDoc(1, {'checkout': boolFlag(true)}));
       edge.bundleMode = 'unsigned';

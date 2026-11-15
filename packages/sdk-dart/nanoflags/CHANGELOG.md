@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.1
+
+- An error emitted while nothing listens on `client.errors` is printed once per error code (prefixed `[nanoflags]`)
+  instead of being dropped silently. Listening on `client.errors` turns this off.
+
 ## 0.1.0
 
 First release.

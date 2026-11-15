@@ -2,7 +2,7 @@ name: nanoflags
 description: >-
   NanoFlags client SDK for Dart and Flutter: local, synchronous feature-flag evaluation with signed
   configuration bundles, live updates over WebSocket and offline-first persistence. Client (nf_pub_) keys only.
-version: 0.1.0
+version: 0.1.1
 homepage: https://nanoflags.io
 repository: https://github.com/motazalmaroai/nanoflags-sdk/tree/main/packages/sdk-dart/nanoflags
 issue_tracker: https://github.com/motazalmaroai/nanoflags-sdk/issues

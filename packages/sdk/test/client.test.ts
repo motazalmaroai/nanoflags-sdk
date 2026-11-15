@@ -598,7 +598,7 @@ describe("events", () => {
     const edge = mockEdge({ bundle: bundleResponse(makeBundle(3)) });
     const c = client({ fetch: edge.fetch, events: { sampleRate: 1, flushIntervalMs: 0 } });
     await c.ready();
-    c.boolean("checkout-v2", false, { key: "user-secret-id", signedIn: true, region: "US", email: "secret@example.com", plan: "pro", cart: { total: 99 } });
+    c.boolean("checkout-v2", false, { key: "user-secret-id", signedIn: true, region: "US", email: "secret@example.com", plan: "pro", cart: { total: 98765.4321 } });
     c.string("search-ranking", "fb", { key: "user-secret-id", email: "secret@example.com" });
     await c.flush();
     const sent = JSON.stringify(edge.last("/v1/events")!.body);
@@ -607,7 +607,7 @@ describe("events", () => {
     expect(events[0]!.context).toEqual({ email: "string", signedIn: "boolean", region: "string", key: "string" });
     // search-ranking has no rules: nothing is sent.
     expect(events[1]!.context).toEqual({});
-    for (const secret of ["user-secret-id", "secret@example.com", "pro", "99", "cart", "plan"]) expect(sent).not.toContain(secret);
+    for (const secret of ["user-secret-id", "secret@example.com", "pro", "98765", "cart", "plan"]) expect(sent).not.toContain(secret);
   });
 
   it("custom redact decides what leaves the process", async () => {

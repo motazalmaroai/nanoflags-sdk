@@ -1,0 +1,63 @@
+# Java server SDK (java/): build and test only. Nothing is published here (see java/PUBLISHING.md).
+# The conformance tests read the shared fixtures in packages/engine/fixtures and go/internal/testdata.
+name: Java SDK
+
+on:
+  push:
+    branches: [main]
+    paths: ["java/**", "packages/engine/fixtures/**", "go/internal/testdata/**", ".github/workflows/java.yml"]
+  pull_request:
+    branches: [main]
+    paths: ["java/**", "packages/engine/fixtures/**", "go/internal/testdata/**", ".github/workflows/java.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: java-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: java
+
+jobs:
+  test:
+    name: JDK ${{ matrix.java }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # 11: the built-in Ed25519 verifier; 17 / 21: the JDK's Ed25519 provider.
+        java: ["11", "17", "21"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1 (caches Gradle)
+      - name: Build and test (21,998 conformance cases + extra, verification, fake edge, OpenFeature; javadoc)
+        run: ./gradlew --no-daemon build
+      - name: Maven Central layout (local staging directory only, unsigned)
+        if: matrix.java == '17'
+        run: |
+          ./gradlew --no-daemon publishAllPublicationsToStagingRepository
+          find build/staging-deploy -name '*.pom' -print
+      # Read-only check against the real edge with the PUBLIC demo browser key (also in mobile-android.yml):
+      # loads and verifies a signed bundle and opens the live socket. Changes nothing; never blocks the build.
+      - name: Production check (read-only, public demo key)
+        if: github.event_name != 'pull_request'
+        continue-on-error: true
+        env:
+          NANOFLAGS_PRODUCTION_TESTS: "1"
+          NANOFLAGS_SDK_KEY: nf_pub_4ced72c484c4f388a900aeeaf81e130c110c11730d555dd8
+        run: ./gradlew --no-daemon :nanoflags-java:test --tests '*ProductionTest*'
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: java-test-reports-jdk${{ matrix.java }}
+          path: java/**/build/reports/tests/
+          if-no-files-found: ignore

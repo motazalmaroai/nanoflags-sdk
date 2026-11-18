@@ -9,7 +9,7 @@ pushes every published revision over a WebSocket, already signed, typically with
 | `io.nanoflags:nanoflags-java` | The client: engine (a port of `@nanoflags/engine`), Ed25519 signature verification, live WebSocket → SSE → ETag polling, persistence, telemetry. Java 11+, **no runtime dependencies** (JDK `java.net.http` only). |
 | `io.nanoflags:nanoflags-java-openfeature` | [OpenFeature](https://openfeature.dev) provider for the official Java SDK (`dev.openfeature:sdk` 1.x). |
 
-Version 0.1.0 (unreleased, not on Maven Central yet — build from source, see [Building and testing](#building-and-testing)).
+Version 0.1.0 on [Maven Central](https://central.sonatype.com/artifact/io.nanoflags/nanoflags-java). Maven: `<dependency><groupId>io.nanoflags</groupId><artifactId>nanoflags-java</artifactId><version>0.1.0</version></dependency>`.
 Apache-2.0. Android apps use the Kotlin SDK in [`kotlin/`](../kotlin) instead (client keys, lifecycle, Compose).
 
 ## Quickstart

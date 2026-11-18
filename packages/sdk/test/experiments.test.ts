@@ -66,6 +66,8 @@ describe("sha256Hex / unitHash", () => {
   });
 
   it("scopes the unit to project, environment and attribute (documented format)", () => {
+    // Documented test vector (/docs/experiments/track).
+    expect(unitHash("commerce", "production", "key", "user-1")).toBe("1080ed9b5d7279af40f8645e827ac76c42472fdb4a6b33071f2196d9b11817b9");
     expect(unitHash("commerce", "production", "key", "user-1")).toBe(createHash("sha256").update("nanoflags-unit-v1\ncommerce\nproduction\nkey\nuser-1").digest("hex"));
     expect(unitHash("commerce", "staging", "key", "user-1")).not.toBe(unitHash("commerce", "production", "key", "user-1"));
     expect(unitHash("commerce", "production", "accountId", "user-1")).not.toBe(unitHash("commerce", "production", "key", "user-1"));

@@ -1,0 +1,235 @@
+{
+  "name": "vscode-nanoflags",
+  "displayName": "NanoFlags",
+  "description": "See NanoFlags feature flags where they are used: hovers with per-environment status, flag key completion, unknown and archived flag warnings, and a flag explorer.",
+  "version": "0.1.0",
+  "publisher": "nanoflags",
+  "license": "Apache-2.0",
+  "private": true,
+  "homepage": "https://nanoflags.io/docs",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/motazalmaroai/nanoflags-sdk.git",
+    "directory": "vscode"
+  },
+  "bugs": {
+    "url": "https://github.com/motazalmaroai/nanoflags-sdk/issues"
+  },
+  "engines": {
+    "vscode": "^1.100.0",
+    "node": ">=20"
+  },
+  "categories": [
+    "Other",
+    "Linters"
+  ],
+  "keywords": [
+    "feature flags",
+    "feature toggles",
+    "nanoflags",
+    "remote config",
+    "rollout"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onLanguage:javascript",
+    "onLanguage:javascriptreact",
+    "onLanguage:typescript",
+    "onLanguage:typescriptreact",
+    "onLanguage:vue",
+    "onLanguage:svelte",
+    "onLanguage:astro",
+    "onLanguage:python",
+    "onLanguage:go",
+    "onLanguage:java",
+    "onLanguage:csharp",
+    "onLanguage:php",
+    "onLanguage:ruby",
+    "onLanguage:kotlin",
+    "onLanguage:swift",
+    "onLanguage:dart"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": true
+    },
+    "virtualWorkspaces": true
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "nanoflags.signIn",
+        "title": "Sign In",
+        "category": "NanoFlags",
+        "icon": "$(sign-in)"
+      },
+      {
+        "command": "nanoflags.signOut",
+        "title": "Sign Out",
+        "category": "NanoFlags"
+      },
+      {
+        "command": "nanoflags.refresh",
+        "title": "Refresh Flags",
+        "category": "NanoFlags",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "nanoflags.selectProject",
+        "title": "Select Project",
+        "category": "NanoFlags",
+        "icon": "$(project)"
+      },
+      {
+        "command": "nanoflags.copyFlagKey",
+        "title": "Copy Flag Key",
+        "category": "NanoFlags",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "nanoflags.openInDashboard",
+        "title": "Open in NanoFlags",
+        "category": "NanoFlags",
+        "icon": "$(link-external)"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "nanoflags",
+          "title": "NanoFlags",
+          "icon": "media/flag.svg"
+        }
+      ]
+    },
+    "views": {
+      "nanoflags": [
+        {
+          "id": "nanoflags.flags",
+          "name": "Flags",
+          "icon": "media/flag.svg",
+          "contextualTitle": "NanoFlags"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "nanoflags.flags",
+        "contents": "Sign in with a NanoFlags Management API token (flags:read scope) to see your flags here and in your code.\n[Sign In](command:nanoflags.signIn)\nCreate a token in the dashboard under Settings \u2192 API tokens.",
+        "when": "!nanoflags.signedIn"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "nanoflags.refresh",
+          "when": "view == nanoflags.flags && nanoflags.signedIn",
+          "group": "navigation@1"
+        },
+        {
+          "command": "nanoflags.selectProject",
+          "when": "view == nanoflags.flags && nanoflags.signedIn",
+          "group": "navigation@2"
+        },
+        {
+          "command": "nanoflags.signOut",
+          "when": "view == nanoflags.flags && nanoflags.signedIn"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "nanoflags.copyFlagKey",
+          "when": "view == nanoflags.flags && viewItem =~ /^flag/",
+          "group": "inline@1"
+        },
+        {
+          "command": "nanoflags.openInDashboard",
+          "when": "view == nanoflags.flags && viewItem =~ /^flag/",
+          "group": "inline@2"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "nanoflags.openInDashboard",
+          "when": "nanoflags.signedIn",
+          "group": "navigation@90"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "NanoFlags",
+      "properties": {
+        "nanoflags.project": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Project key whose flags are used in this workspace. Empty: the API token's project, or the one picked with **NanoFlags: Select Project**.",
+          "scope": "resource"
+        },
+        "nanoflags.baseUrl": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "NanoFlags edge URL (the Management API is served under `/api/v1`). Empty: `https://edge.nanoflags.io`.",
+          "scope": "machine-overridable"
+        },
+        "nanoflags.dashboardUrl": {
+          "type": "string",
+          "default": "https://app.nanoflags.io",
+          "description": "Dashboard URL used by \u201cOpen in NanoFlags\u201d.",
+          "scope": "machine-overridable"
+        },
+        "nanoflags.cacheMinutes": {
+          "type": "number",
+          "default": 5,
+          "minimum": 1,
+          "description": "Minutes before cached flags are refreshed in the background. \u201cNanoFlags: Refresh Flags\u201d reloads at once."
+        },
+        "nanoflags.diagnostics.unknownFlags": {
+          "type": "string",
+          "enum": [
+            "error",
+            "warning",
+            "information",
+            "hint",
+            "off"
+          ],
+          "default": "warning",
+          "description": "Severity of problems for flag keys that do not exist in the project."
+        },
+        "nanoflags.diagnostics.archivedFlags": {
+          "type": "string",
+          "enum": [
+            "error",
+            "warning",
+            "information",
+            "hint",
+            "off"
+          ],
+          "default": "warning",
+          "description": "Severity of problems for archived flags still used in code."
+        },
+        "nanoflags.codeLens.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show an \u201cOpen in NanoFlags\u201d CodeLens above flag references."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "package": "vsce package --no-dependencies --out vscode-nanoflags.vsix",
+    "vscode:prepublish": "npm run typecheck && npm run test && node esbuild.mjs --production"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "@types/vscode": "1.100.0",
+    "@vscode/vsce": "^4.1.0",
+    "esbuild": "^0.28.2",
+    "ovsx": "^1.3.0",
+    "typescript": "~5.9.3",
+    "vitest": "^3.2.4"
+  }
+}

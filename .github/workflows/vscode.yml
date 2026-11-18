@@ -1,0 +1,83 @@
+name: VS Code extension
+
+# Builds, tests and packages vscode/ (vscode-nanoflags) on pull requests and pushes; the .vsix is uploaded as an
+# artifact. Publishing happens only on a tag vscode-v<version> matching vscode/package.json, to the Visual Studio
+# Marketplace (secret VSCE_PAT) and Open VSX (secret OVSX_PAT), each skipped with a notice while its secret is missing.
+# Secrets live in the environment `vscode-marketplace`. See vscode/PUBLISHING.md.
+
+on:
+  push:
+    branches: [main]
+    tags: ["vscode-v*"]
+    paths: ["vscode/**", ".github/workflows/vscode.yml"]
+  pull_request:
+    paths: ["vscode/**", ".github/workflows/vscode.yml"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vscode-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+defaults:
+  run:
+    working-directory: vscode
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: vscode/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - name: Package
+        # vscode:prepublish typechecks, tests and builds the minified bundle.
+        run: npx vsce package --no-dependencies --out vscode-nanoflags.vsix
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vscode-nanoflags-vsix
+          path: vscode/vscode-nanoflags.vsix
+          retention-days: 14
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/vscode-v')
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: vscode-marketplace
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: vscode/package-lock.json
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: vscode-nanoflags-vsix
+          path: vscode
+      - name: Check the tag matches package.json
+        run: |
+          version=$(node -p "require('./package.json').version")
+          if [ "$GITHUB_REF_NAME" != "vscode-v$version" ]; then echo "::error::tag $GITHUB_REF_NAME does not match package.json version $version"; exit 1; fi
+      - name: Visual Studio Marketplace
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: |
+          if [ -z "$VSCE_PAT" ]; then echo "::notice title=VSCE_PAT missing::Not published to the Visual Studio Marketplace (vscode/PUBLISHING.md)."; exit 0; fi
+          npx vsce publish --packagePath vscode-nanoflags.vsix --skip-duplicate
+      - name: Open VSX
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+        run: |
+          if [ -z "$OVSX_PAT" ]; then echo "::notice title=OVSX_PAT missing::Not published to Open VSX (vscode/PUBLISHING.md)."; exit 0; fi
+          npx ovsx publish vscode-nanoflags.vsix --skip-duplicate

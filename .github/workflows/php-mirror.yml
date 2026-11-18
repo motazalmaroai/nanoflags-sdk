@@ -35,6 +35,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          # The push must use PHP_MIRROR_TOKEN; a persisted GITHUB_TOKEN header would override it (403 on the mirror).
+          persist-credentials: false
       - name: Split and push
         env:
           TOKEN: ${{ secrets.PHP_MIRROR_TOKEN }}

@@ -45,7 +45,7 @@ $limit  = $flags->numberVariation('rate-limit', 100, $user);    // int for whole
 $layout = $flags->jsonVariation('layout', ['cols' => 3], $user);  // associative arrays
 
 $d = $flags->boolVariationDetail('new-checkout', false, $user);
-echo $d->value, $d->reason, $d->ruleId, $d->revision;           // true rule_match beta 57
+var_dump($d->value, $d->reason, $d->ruleId, $d->revision);      // bool(true) "rule_match" "beta" int(57)
 ```
 
 Each variation takes the flag key, the value to serve when the flag cannot be evaluated (nothing loaded yet,

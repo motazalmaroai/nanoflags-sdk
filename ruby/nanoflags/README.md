@@ -82,7 +82,8 @@ on_worker_boot { NanoFlags::Client.after_fork }
 ```
 
 With `preload_app!`, creating the client in the master is fine; pass `start: false` there if the master should not
-open any connection, and the workers start it on first use.
+open any connection, and start it in each worker: `on_worker_boot { FLAGS.start }` (a client created with
+`start: false` does not start by itself).
 
 ### Test sessions (`x-nanoflags-session`)
 

@@ -12,7 +12,7 @@
 
 ## 0.1.0 — 2026-11-18
 
-First release of the Java server SDK. Nothing is on Maven Central yet.
+First release of the Java server SDK, on Maven Central.
 
 - `nanoflags-java` (Java 11+, no runtime dependencies): engine port of `@nanoflags/engine` (engine version 1) passing
   all 21,998 shared conformance cases, the murmur3 / bucket / `supportsEngine` / browser-view vectors and the Go port's

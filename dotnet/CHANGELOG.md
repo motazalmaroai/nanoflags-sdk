@@ -13,7 +13,7 @@
 
 ## 0.1.0 — 2026-11-18
 
-First release of the .NET server SDK. Nothing is on NuGet yet.
+First release of the .NET server SDK, on NuGet.
 
 - `NanoFlags` (`netstandard2.0`, `net8.0`): engine port of `@nanoflags/engine` (engine version 1) passing all 21,998
   shared conformance cases, the murmur3 / bucket / `supportsEngine` / browser-view vectors and the Go port's 3,491 extra

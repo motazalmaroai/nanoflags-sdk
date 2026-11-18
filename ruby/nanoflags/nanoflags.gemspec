@@ -9,8 +9,9 @@ Gem::Specification.new do |spec|
   spec.email = ["support@nanoflags.io"]
   spec.summary = "NanoFlags server SDK for Ruby: local, deterministic feature-flag evaluation with signed live updates."
   spec.description = "Evaluates NanoFlags feature flags locally (the same engine and results as every NanoFlags SDK), " \
-                     "keeps the configuration current in background threads (event stream + ETag polling), verifies " \
-                     "bundle signatures, survives forks (Puma, Unicorn, Passenger, Resque) and reports sampled, " \
+                     "keeps the configuration current in background threads (live WebSocket pushes, with the event " \
+                     "stream and ETag polling as fallback), verifies bundle signatures, resolves test sessions " \
+                     "(Rack middleware), survives forks (Puma, Unicorn, Passenger, Resque) and reports sampled, " \
                      "redacted evaluation telemetry. No runtime dependencies."
   spec.homepage = "https://nanoflags.io"
   spec.license = "Apache-2.0"

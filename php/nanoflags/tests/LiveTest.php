@@ -28,5 +28,7 @@ final class LiveTest extends TestCase
         self::assertGreaterThan(0, $c->revision());
         self::assertIsArray($c->allFlags(['key' => 'ci']));
         self::assertStringContainsString('"flags"', (string) $c->bundleJson());
+        self::assertFalse($c->session('nf_ts_unknown_ci_token')->isActive()); // an unknown test session is not an error
+        self::assertNull($c->lastError());
     }
 }

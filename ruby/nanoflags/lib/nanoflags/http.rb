@@ -8,7 +8,8 @@ module NanoFlags
   # environment (`HTTPS_PROXY`, `NO_PROXY`), the CA store from OpenSSL's defaults (`SSL_CERT_FILE`). Redirects are
   # never followed.
   #
-  # Any object with the same two methods can be passed as the client's +http:+ option.
+  # Any object with the same methods can be passed as the client's +http:+ option (+websocket+ is optional: without it
+  # the client uses the event stream instead of the live socket).
   module HTTP
     # A complete response; header names are lower-case.
     Response = Struct.new(:status, :headers, :body) do
@@ -100,6 +101,12 @@ module NanoFlags
         status
       rescue IOError, Errno::EBADF
         status # closed from another thread
+      end
+
+      # Opens the live WebSocket (see {NanoFlags::WebSocket}); returns a {WebSocket::Connection}. Raises when no
+      # socket could be opened ({WebSocket::HandshakeError#status} carries the HTTP status of a refused upgrade).
+      def websocket(url, headers, protocols:, open_timeout:)
+        WebSocket.connect(url, headers: headers, protocols: protocols, open_timeout: open_timeout)
       end
 
       private

@@ -5,14 +5,14 @@ require "json"
 require "digest"
 
 # An in-process edge for the client tests: /v1/bundle (ETag, 304, signatures exactly as the hosted edge makes them),
-# /v1/keys, /v1/events and the /v1/stream event stream, signing with a throwaway Ed25519 key. Plugs in as the
-# client's +http:+ transport.
+# /v1/keys, /v1/events, /v1/session, the /v1/stream event stream and (with +live = true+) the /v1/live socket, signing
+# with a throwaway Ed25519 key. Plugs in as the client's +http:+ transport.
 class FakeEdge
   ENV_ID = "11111111-2222-3333-4444-555555555555"
   BASE = "https://flags.test"
 
-  attr_accessor :signed, :tamper, :stale, :down, :status_override, :env_id, :kid
-  attr_reader :jwk, :requests, :events, :text, :revision, :checksum, :stream_opens
+  attr_accessor :signed, :tamper, :stale, :down, :status_override, :env_id, :kid, :live, :live_accept
+  attr_reader :jwk, :requests, :events, :text, :revision, :checksum, :stream_opens, :sessions, :ws_connects, :sockets
 
   def initialize
     @key = OpenSSL::PKey.generate_key("ED25519")
@@ -24,6 +24,10 @@ class FakeEdge
     @events = []
     @streams = []
     @stream_opens = 0
+    @sessions = {}
+    @ws_connects = 0
+    @sockets = []
+    @live_accept = true
     @lock = Mutex.new
     set_bundle(self.class.bundle(1))
   end
@@ -69,6 +73,27 @@ class FakeEdge
     @lock.synchronize { @streams.each { |q| q << ["revision", JSON.generate({ "revision" => @revision, "checksum" => @checksum })] } }
   end
 
+  # Publishes a new revision and pushes it to every open live socket.
+  def push(bundle, tamper: false, committed_at: nil, sign_key: nil)
+    set_bundle(bundle)
+    msg = message("rev", tamper: tamper, committed_at: committed_at, sign_key: sign_key)
+    @lock.synchronize { @sockets.each { |ws| ws.deliver(msg) } }
+  end
+
+  def message(type, tamper: false, committed_at: nil, sign_key: nil)
+    @lock.synchronize do
+      text = @text
+      sig = sign_key ? sign(text, @revision, @checksum, sign_key) : @signature
+      text = text.sub('"blue"', '"red"') if tamper
+      JSON.generate({ "t" => type, "revision" => @revision, "checksum" => @checksum, "signature" => sig, "kid" => @kid,
+                      "environmentId" => @env_id, "bundle" => text, "committedAt" => committed_at })
+    end
+  end
+
+  def close_sockets(code, reason = "")
+    @lock.synchronize { @sockets.dup }.each { |ws| ws.close_from_server(code, reason) }
+  end
+
   def revoke!
     @lock.synchronize { @streams.each { |q| q << ["revoked", "{}"] } }
   end
@@ -83,6 +108,14 @@ class FakeEdge
     raise Errno::ECONNREFUSED, "connection refused" if @down
     return Resp.new(200, {}, JSON.generate({ "keys" => [@jwk.merge("alg" => "EdDSA")] })) if path == "/v1/keys"
     return Resp.new(@status_override, {}, '{"error":{"code":"x","message":"x"}}') if @status_override
+
+    if path == "/v1/session"
+      s = @sessions[headers["X-NanoFlags-Session"]]
+      return Resp.new(404, {}, '{"error":{"code":"session_not_found","message":"x"}}') if s.nil?
+      return Resp.new(s, {}, '{"error":{"code":"x","message":"x"}}') if s.is_a?(Integer)
+
+      return Resp.new(200, {}, JSON.generate(s))
+    end
 
     if path == "/v1/events" && method == "POST"
       @events << JSON.parse(body)
@@ -126,6 +159,76 @@ class FakeEdge
     200
   ensure
     @lock.synchronize { @streams.delete(q) } if q
+  end
+
+  # The live socket (the transport's optional +websocket+ method).
+  def websocket(url, headers, protocols:, open_timeout:)
+    @requests << { method: "GET", path: URI(url).path, headers: headers, protocols: protocols }
+    raise NanoFlags::WebSocket::HandshakeError.new("no live socket here", 404) unless @live
+    raise Errno::ECONNREFUSED, "connection refused" if @down
+    raise NanoFlags::WebSocket::HandshakeError.new("refused", @status_override) if @status_override
+
+    @lock.synchronize { @ws_connects += 1 }
+    raise NanoFlags::WebSocket::HandshakeError.new("refused", 503) unless @live_accept && headers["Authorization"]
+
+    ws = Socket.new(self)
+    @lock.synchronize { @sockets << ws }
+    ws.deliver(message("hello"))
+    ws
+  end
+
+  def forget(ws) = @lock.synchronize { @sockets.delete(ws) }
+
+  # One fake live connection: the interface of NanoFlags::WebSocket::Connection.
+  class Socket
+    attr_reader :sent
+
+    def initialize(edge)
+      @edge = edge
+      @queue = Queue.new
+      @sent = []
+      @closed = false
+    end
+
+    def deliver(text) = @queue << text
+    def close_from_server(code, reason) = @queue << [:close, code, reason]
+    def closed? = @closed
+
+    def send_text(text)
+      raise NanoFlags::WebSocket::Closed if @closed
+
+      @sent << text
+      @queue << "pong" if text == "ping"
+    end
+
+    def recv(timeout)
+      raise NanoFlags::WebSocket::Closed if @closed
+
+      item = FakeEdge.pop(@queue, timeout)
+      return nil if item.nil?
+      return item unless item.is_a?(Array)
+
+      @closed = true
+      @edge.forget(self)
+      raise NanoFlags::WebSocket::Closed.new(item[1], item[2])
+    end
+
+    def close(_code = 1000, _reason = "")
+      @closed = true
+      @edge.forget(self)
+      @queue << [:close, nil, nil]
+    end
+  end
+
+  def self.pop(queue, timeout)
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
+    loop do
+      return queue.pop(true)
+    rescue ThreadError
+      return nil if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
+
+      sleep 0.005
+    end
   end
 
   private

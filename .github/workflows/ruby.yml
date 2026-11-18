@@ -85,5 +85,5 @@ jobs:
           ruby-version: "3.3"
           bundler-cache: true
           working-directory: ruby/nanoflags
-      - name: Verified bundle and event stream from https://edge.nanoflags.io
+      - name: Verified bundle, live socket and event stream from https://edge.nanoflags.io
         run: bundle exec ruby -Ilib -Itest test/test_live.rb

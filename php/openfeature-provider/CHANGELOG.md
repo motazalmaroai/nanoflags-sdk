@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Documented test sessions through the `$evaluator` argument (`fn () => $flags->sessionFromGlobals()`).
+
 ## 0.1.0 (2026-11-18)
 
 First release of `nanoflags/openfeature-provider`: an OpenFeature (open-feature/sdk 2.x) provider backed by

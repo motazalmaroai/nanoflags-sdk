@@ -22,8 +22,13 @@ name: Auto release
 #            -> pushes the tag dotnet-v<version> with RELEASE_TAG_TOKEN, which starts release-dotnet.yml (Trusted
 #            Publishing: nuget.org only trusts that workflow file). Skipped with a notice until the repository variable
 #            NUGET_USER (the nuget.org profile name) exists.
+#   RubyGems nanoflags, nanoflags-openfeature (ruby/*/lib/**/version.rb VERSION)
+#            -> pushes the tags ruby-nanoflags-v<version> / ruby-nanoflags-openfeature-v<version> (nanoflags first)
+#            with RELEASE_TAG_TOKEN, which start release-ruby.yml (Trusted Publishing: rubygems.org only trusts that
+#            workflow file, environment `rubygems`). Skipped with a notice while a gem is not on rubygems.org yet or
+#            the secret is missing; skipped while the tag already exists (release-ruby.yml handles it).
 # PyPI (release-python.yml) and Go (go/v* tags) are released by tag as before. PHP is published from the mirrors
-# (php-mirror.yml) and Ruby by hand (ruby/PUBLISHING.md).
+# (php-mirror.yml).
 
 on:
   push:
@@ -48,6 +53,7 @@ jobs:
       java: ${{ steps.plan.outputs.java }}
       java_version: ${{ steps.plan.outputs.java_version }}
       dotnet_tag: ${{ steps.plan.outputs.dotnet_tag }}
+      ruby: ${{ steps.plan.outputs.ruby }}
     steps:
       - uses: actions/checkout@v4
       - id: plan
@@ -106,6 +112,23 @@ jobs:
           elif [ -z "$NUGET_USER" ]; then echo "::notice title=NUGET_USER missing::NanoFlags $dv needs the repository variable NUGET_USER (nuget.org profile name) for Trusted Publishing."
           elif [ "$HAS_TAG_TOKEN" != true ]; then echo "::notice title=RELEASE_TAG_TOKEN missing::NanoFlags $dv needs RELEASE_TAG_TOKEN to start release-dotnet.yml."
           else echo "nuget NanoFlags $dv: to release"; echo "dotnet_tag=dotnet-v$dv" >> "$GITHUB_OUTPUT"; fi
+
+          ruby_list=()
+          for entry in nanoflags:ruby/nanoflags/lib/nanoflags/version.rb nanoflags-openfeature:ruby/nanoflags-openfeature/lib/nanoflags/openfeature/version.rb; do
+            gem="${entry%%:*}"; file="${entry#*:}"
+            v=$(sed -n 's/^ *VERSION = "\([^"]*\)".*/\1/p' "$file")
+            tag="ruby-$gem-v$v"
+            tag_exists=$(git ls-remote --tags origin "refs/tags/$tag" | wc -l)
+            code=$(curl -s -o "$RUNNER_TEMP/rubygems-$gem.json" -w '%{http_code}' "https://rubygems.org/api/v1/versions/$gem.json")
+            if [ -z "$v" ]; then echo "::error::no VERSION in $file"; exit 1
+            elif [ "$code" = 200 ] && jq -e --arg v "$v" 'any(.[]; .number == $v)' "$RUNNER_TEMP/rubygems-$gem.json" > /dev/null; then echo "rubygems $gem $v: published"
+            elif [ "$code" = 404 ]; then echo "::notice title=RubyGems first push needed::$gem is not on rubygems.org yet; push its first version by hand and add the trusted publisher (ruby/PUBLISHING.md)."
+            elif [ "$code" != 200 ]; then echo "::warning::rubygems.org answered $code for $gem; not released this time"
+            elif [ "$tag_exists" != 0 ]; then echo "rubygems $gem $v: tag $tag exists (release-ruby.yml handles it)"
+            elif [ "$HAS_TAG_TOKEN" != true ]; then echo "::notice title=RELEASE_TAG_TOKEN missing::$gem $v needs RELEASE_TAG_TOKEN to start release-ruby.yml."
+            else echo "rubygems $gem $v: to release"; ruby_list+=("\"$tag\""); fi
+          done
+          echo "ruby=[$(IFS=,; echo "${ruby_list[*]}")]" >> "$GITHUB_OUTPUT"
 
   npm:
     needs: plan
@@ -276,3 +299,21 @@ jobs:
       - env:
           TAG: ${{ needs.plan.outputs.dotnet_tag }}
         run: git tag "$TAG" "$GITHUB_SHA" && git push origin "refs/tags/$TAG" && echo "pushed $TAG"
+
+  ruby:
+    needs: plan
+    if: needs.plan.outputs.ruby != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.RELEASE_TAG_TOKEN }}
+      - env:
+          LIST: ${{ needs.plan.outputs.ruby }}
+        run: |
+          # One tag per push so each starts its own release-ruby.yml run; nanoflags first (nanoflags-openfeature
+          # depends on it, and release-ruby.yml runs one release at a time in push order).
+          for tag in $(jq -r '.[]' <<<"$LIST"); do
+            git tag "$tag" "$GITHUB_SHA" && git push origin "refs/tags/$tag" && echo "pushed $tag"
+          done

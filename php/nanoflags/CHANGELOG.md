@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Test sessions: `Client::session($token, $service)` and `Client::sessionFromGlobals()` resolve `x-nanoflags-session`
+  tokens (`GET /v1/session` with `X-NanoFlags-Session` / `X-NanoFlags-Service`) and return a `SessionEvaluator` that
+  evaluates against the session's pinned bundle with `session context + your context`; `headers()` propagates the
+  token to downstream calls; sampled events carry `sessionId`. Never throws (new error code `session`). Active
+  sessions are cached until expiry in the client and in the shared cache under their own key (a hash of service and
+  token, never the token; the bundle entry is never touched; TTL at most 1 h); unknown tokens (15 s) and failures (3 s)
+  only in the client. PSR-15 `NanoFlags\SessionMiddleware` (request attribute `nanoflags.flags`);
+  `psr/http-server-middleware` is suggested, not required.
+
 ## 0.1.0 (2026-11-18)
 
 First release of the NanoFlags server SDK for PHP (`nanoflags/nanoflags`).

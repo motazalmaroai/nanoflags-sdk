@@ -5,12 +5,18 @@ require "monitor"
 require "time"
 
 module NanoFlags
+  # WebSocket subprotocol of the edge's live socket (+/v1/live+).
+  LIVE_PROTOCOL = "nanoflags.v1"
+  # Close code of the live socket for a deleted environment: the client keeps its last bundle and stops reconnecting.
+  CLOSE_ENVIRONMENT_DELETED = 4004
+
   # The NanoFlags client for Ruby servers (Rails, Puma, Sidekiq, Rack, plain scripts).
   #
   # Flags are evaluated locally and synchronously against an in-memory bundle; a variation call never performs I/O
   # and never raises. The network is used in background threads only: to load the bundle (`/v1/bundle`, with ETag
-  # revalidation), to hear about new revisions as soon as they are published (server-sent events, `/v1/stream`,
-  # with polling as the safety net), and to send sampled telemetry plus the periodic service report (`/v1/events`).
+  # revalidation), to receive new revisions as soon as they are published (pushed over the live WebSocket `/v1/live`;
+  # while no socket can be opened, server-sent events on `/v1/stream`; polling as the safety net), and to send sampled
+  # telemetry plus the periodic service report (`/v1/events`). Test sessions ({#session}) are resolved on demand.
   #
   # Create one client per process and share it between threads. It is fork-safe: after a fork (Puma and Unicorn
   # workers, Passenger, Resque, Sidekiq Swarm) the child keeps the configuration it inherited and restarts the
@@ -29,6 +35,17 @@ module NanoFlags
     MAX_BATCH = 50
     MAX_EVENT_VALUE_CHARS = 1024
     KEYS_REFETCH = 60.0
+    LIVE_CONNECT_TIMEOUT = 10.0
+    LIVE_PING = 30.0
+    LIVE_PONG_TIMEOUT = 10.0
+    LIVE_MAX_BACKOFF = 300.0
+    # A healthy socket is replaced after about this long, so the edge validates the key again (it drops sockets older
+    # than 2 h).
+    LIVE_ROTATE = 50 * 60.0
+    LIVE_STABLE = 30.0
+    MAX_SESSIONS = 1000
+    SESSION_MISS_TTL = 15.0
+    SESSION_ERROR_TTL = 3.0
     ACCEPT_BOOL = ->(v) { v == true || v == false }
     ACCEPT_STRING = ->(v) { v.is_a?(String) }
     ACCEPT_NUMBER = ->(v) { v.is_a?(Float) && v.finite? }
@@ -43,8 +60,12 @@ module NanoFlags
     # @param sdk_key [String] `nf_srv_…` (server view) or `nf_pub_…` (client-exposed flags only)
     # @param base_url [String] the edge; signatures are verified by default on the hosted edge
     # @param service [String, nil] the name shown in "which revision is each service running"
-    # @param poll_interval [Numeric] seconds between polls (0 disables polling)
-    # @param streaming [Boolean] hear about new revisions over server-sent events (false: polling only)
+    # @param poll_interval [Numeric] seconds between polls while no live socket is open (0 disables polling)
+    # @param streaming [Boolean] receive new revisions without polling (live WebSocket, else server-sent events);
+    #   false: polling only
+    # @param live [Boolean] false skips the live WebSocket and uses server-sent events + polling
+    # @param live_poll_interval [Numeric] seconds between safety polls while the live socket is healthy
+    # @param live_url [String, nil] WebSocket URL of /v1/live when it is not +base_url+ with ws(s):// (advanced)
     # @param bootstrap [Hash, String, nil] a bundle (Hash or JSON text) to use until the edge answers
     # @param cache_path [String, nil] keep the last good bundle in this file (restored, and verified again, on start)
     # @param store [#get, #set, nil] custom persistence; overrides +cache_path+
@@ -57,14 +78,18 @@ module NanoFlags
     # @param logger [Logger, nil] debug output of the background activity
     # @param start [Boolean] false defers the background work until {#start}
     # @param http [#call, nil] the transport (see {HTTP::NetHttp})
-    def initialize(sdk_key, base_url: OFFICIAL_EDGE_URL, service: nil, poll_interval: 30, streaming: true, bootstrap: nil,
-                   cache_path: nil, store: nil, events: nil, verify: nil, on_change: nil, on_error: nil, logger: nil,
-                   start: true, http: nil, request_timeout: 10, stream_read_timeout: 90, random: nil)
+    def initialize(sdk_key, base_url: OFFICIAL_EDGE_URL, service: nil, poll_interval: 30, streaming: true, live: true,
+                   live_poll_interval: 300, live_url: nil, bootstrap: nil, cache_path: nil, store: nil, events: nil,
+                   verify: nil, on_change: nil, on_error: nil, logger: nil, start: true, http: nil, request_timeout: 10,
+                   stream_read_timeout: 90, random: nil)
       @sdk_key = sdk_key.to_s
       @base_url = base_url.to_s.sub(%r{/+\z}, "")
       @service = service.to_s.empty? ? "unknown" : service.to_s
       @poll_interval = poll_interval.to_f
       @streaming = streaming
+      @live_enabled = live
+      @live_poll_interval = live_poll_interval.to_f
+      @live_url = live_url&.to_s
       @request_timeout = request_timeout.to_f
       @stream_read_timeout = stream_read_timeout.to_f
       @http = http || HTTP::NetHttp.new
@@ -103,6 +128,12 @@ module NanoFlags
       @started = false
       @ready = false
       @stream_open = false
+      @live_open = false
+      @live_socket = nil
+      @live_revision = 0
+      @environment_deleted = false
+      @sessions = {}
+      @session_locks = {}
       @queue = []
       @last_report = monotonic
       @attrs = {}
@@ -152,6 +183,7 @@ module NanoFlags
         @sleep_cv.broadcast
       end
       close_stream
+      drop_live
       mark_ready
       @threads.each { |t| t.join(2) unless t == Thread.current }
       nil
@@ -184,8 +216,13 @@ module NanoFlags
     # True when a configuration is in use (ready or stale).
     def initialized? = !@bundle.nil?
 
-    # :stream while the event stream is connected, otherwise :poll.
-    def transport = @stream_open ? :stream : :poll
+    # :live while the live socket is open, :stream while the event stream is connected, otherwise :poll.
+    def transport
+      return :poll if Process.pid != @pid # a forked child has none of the parent's connections
+      return :live if @live_open
+
+      @stream_open ? :stream : :poll
+    end
 
     # The last background error, if any.
     def last_error = @last_error
@@ -251,6 +288,49 @@ module NanoFlags
       {}
     end
 
+    # ------------------------------------------------------------------ test sessions
+
+    # Resolves a test session (+GET /v1/session+, once per token and service, cached until the session expires) and
+    # returns a {SessionEvaluator} scoped to it. Pass the incoming +x-nanoflags-session+ header value. Blocks on the
+    # first call per token; never raises. Unknown tokens are remembered for 15 s, failed lookups for 3 s. Without an
+    # active session the evaluator behaves exactly like the client.
+    #
+    # +service+ is sent as +X-NanoFlags-Service+ (default: the client's +service+); a session may be limited to
+    # certain services.
+    def session(token, service: nil)
+      check_fork
+      return SessionEvaluator.new(self, nil) if !NanoFlags.session_token?(token) || @closed || !@base_url.match?(%r{\Ahttps?://}i)
+
+      name = service.to_s.empty? ? (@service == "unknown" ? nil : @service) : service.to_s
+      key = "#{name}\n#{token}"
+      if (hit = cached_session(key))
+        return SessionEvaluator.new(self, hit[0])
+      end
+
+      # One lookup per token at a time: concurrent requests of the same session wait for it instead of repeating it.
+      lock = @sessions_mutex.synchronize { @session_locks[key] ||= Mutex.new }
+      lock.synchronize do
+        if (hit = cached_session(key))
+          return SessionEvaluator.new(self, hit[0])
+        end
+
+        state, failed = fetch_session(token, name)
+        until_ts = state ? state.expires_at_ts : Time.now.to_f + (failed ? SESSION_ERROR_TTL : SESSION_MISS_TTL)
+        @sessions_mutex.synchronize do
+          if @sessions.size >= MAX_SESSIONS
+            now = Time.now.to_f
+            @sessions.delete_if { |_, v| now >= v[1] }
+            @sessions.delete(@sessions.first[0]) while @sessions.size >= MAX_SESSIONS # oldest first
+          end
+          @sessions[key] = [state, until_ts]
+          @session_locks.delete(key)
+        end
+        SessionEvaluator.new(self, state)
+      end
+    rescue StandardError
+      SessionEvaluator.new(self, nil)
+    end
+
     # ------------------------------------------------------------------ fork safety
 
     # @api private
@@ -285,6 +365,8 @@ module NanoFlags
       @cv = @mutex.new_cond # wakes the poll loop (sync requested, close)
       @sleep_cv = @mutex.new_cond # wakes the other loops (close)
       @ready_cv = @mutex.new_cond
+      @sessions_mutex = Mutex.new
+      @rescheduled = false
       @sync_mutex = Mutex.new
       @keys_mutex = Mutex.new
       @queue_mutex = Mutex.new
@@ -308,6 +390,10 @@ module NanoFlags
         init_concurrency
         @queue = []
         @stream_open = false
+        # The parent's socket is the parent's: never write to it (not even a close frame) from the child.
+        @live_open = false
+        @live_socket = nil
+        @session_locks = {}
         @started = false
         @last_report = monotonic
         start if was_started && !@closed
@@ -406,7 +492,7 @@ module NanoFlags
                 "this SDK supports up to #{Engine::VERSION}. Upgrade the nanoflags gem. The configuration in use is unchanged.", :engine)
     end
 
-    def adopt(bundle, etag:, checksum:, sig:, raw:, status:, source:, transport:)
+    def adopt(bundle, etag:, checksum:, sig:, raw:, status:, source:, transport:, latency_ms: nil)
       event = nil
       @mutex.synchronize do
         prev = @bundle
@@ -417,7 +503,7 @@ module NanoFlags
         @checksum = checksum
         @sig = sig
         @raw = raw
-        event = UpdateEvent.new(revision: bundle["revision"].to_i, previous_revision: prev_rev, checksum: checksum, source: source, transport: transport) if is_new
+        event = UpdateEvent.new(revision: bundle["revision"].to_i, previous_revision: prev_rev, checksum: checksum, source: source, transport: transport, latency_ms: latency_ms) if is_new
       end
       set_status(status)
       mark_ready
@@ -433,10 +519,16 @@ module NanoFlags
       v.is_a?(Hash) ? v : {}
     end
 
-    def run(key, default, context, accepts)
+    # +scope+: a live test session ({SessionState}) or nil for the configuration in use.
+    def run(key, default, context, accepts, scope = nil)
       check_fork
-      b = @bundle
-      ctx = to_context(context)
+      if scope
+        b = scope.bundle
+        ctx = scope.context.merge(to_context(context))
+      else
+        b = @bundle
+        ctx = to_context(context)
+      end
       fallback = Engine::Js.from_ruby(default)
       r = Engine.evaluate(b, key.to_s, ctx, fallback)
       if accepts && r.reason != "flag_not_found" && r.reason != "error" && !accepts.(r.value)
@@ -444,7 +536,7 @@ module NanoFlags
         r = Engine::Result.new(key.to_s, fallback, "error", r.revision, nil, Engine::UNDEFINED, nil, nil,
                                r.trace + [Engine::TraceStep.new("result", "Returned the fallback", error)], error)
       end
-      record(r, context, ctx, b)
+      record(r, scope ? nil : context, ctx, b, scope&.id)
       EvaluationDetail.from_result(r, default)
     rescue StandardError => e
       EvaluationDetail.new(flag_key: key.to_s, value: default, reason: "error", revision: 0, error: e.message)
@@ -459,12 +551,18 @@ module NanoFlags
       return if @closed
 
       spawn("nanoflags-events") { events_loop } if @events_enabled && @flush_interval.positive?
-      start_stream if @streaming
+      if @streaming
+        if live_wanted?
+          spawn("nanoflags-socket") { live_loop }
+        else
+          start_stream
+        end
+      end
       loop do
-        @mutex.synchronize do
+        due = @mutex.synchronize do
           return if @closed
 
-          unless @sync_requested
+          unless @sync_requested || @rescheduled
             if @poll_interval.positive?
               @cv.wait(next_delay)
             else
@@ -473,9 +571,24 @@ module NanoFlags
           end
           return if @closed
 
+          # Rescheduled (the live socket opened or closed): wait again with the new interval, without a request.
+          if @rescheduled && !@sync_requested
+            @rescheduled = false
+            next false
+          end
+          @rescheduled = false
           @sync_requested = false
+          true
         end
-        sync
+        sync if due
+      end
+    end
+
+    # Restarts the poll wait (its interval depends on whether the live socket is open).
+    def reschedule
+      @mutex.synchronize do
+        @rescheduled = true
+        @cv.broadcast
       end
     end
 
@@ -488,7 +601,8 @@ module NanoFlags
 
     def next_delay
       jitter = 0.8 + (0.4 * @random.call)
-      base = @failures.positive? ? [@poll_interval, 2.0**[@failures - 1, 10].min].min : @poll_interval
+      interval = @live_open ? [@poll_interval, @live_poll_interval].max : @poll_interval
+      base = @failures.positive? ? [@poll_interval, 2.0**[@failures - 1, 10].min].min : interval
       [0.25, base * jitter].max
     end
 
@@ -545,6 +659,9 @@ module NanoFlags
           return
         end
         checksum = body["checksum"].is_a?(String) ? body["checksum"] : nil
+        # A revision pushed while this request was under way (or that the edge's cache does not point at yet) wins.
+        return if cur && bundle["revision"].to_i < @live_revision && cur["revision"].to_i >= @live_revision
+
         @pinned_env = sig.environment_id if sig
         adopt(bundle, etag: res.header("ETag"), checksum: checksum, sig: sig, raw: raw,
                       status: served_stale ? STATUS_STALE : STATUS_READY, source: :network, transport: transport)
@@ -561,6 +678,7 @@ module NanoFlags
           emit_error(e) # same bundle, same status; polling retries with backoff
           return
         end
+        drop_live if e.code == :unauthorized
         set_status(STATUS_STALE) if @bundle
         emit_error(e)
       end
@@ -692,11 +810,248 @@ module NanoFlags
       emit_error(Error.new("Could not read the persisted bundle: #{e.message}", :store))
     end
 
+    # ------------------------------------------------------------------ test sessions (internals)
+
+    # @api private
+    SessionState = Struct.new(:id, :bundle, :context, :expires_at, :expires_at_ts)
+
+    def cached_session(key)
+      @sessions_mutex.synchronize do
+        hit = @sessions[key]
+        return nil unless hit
+        return hit if Time.now.to_f < hit[1]
+
+        @sessions.delete(key)
+        nil
+      end
+    end
+
+    # [state or nil, failed]. nil without failure: no such session (unknown, expired, revoked, service not permitted).
+    def fetch_session(token, service)
+      extra = { "X-NanoFlags-Session" => token, "Cache-Control" => "no-store", "Accept" => "application/json" }
+      extra["X-NanoFlags-Service"] = service if service
+      res = begin
+        request("GET", "/v1/session", extra)
+      rescue StandardError => e
+        raise Error.new("Could not load the test session: #{e.message}", :session)
+      end
+      return [nil, false] if res.status == 404
+      raise Error.new("Session request failed with HTTP #{res.status}.", [401, 403].include?(res.status) ? :unauthorized : :session, res.status) unless res.ok?
+
+      body = begin
+        Engine::Json.parse(res.body)
+      rescue Engine::InvalidJsonError
+        nil
+      end
+      expires_ts = begin
+        body.is_a?(Hash) && body["expires_at"].is_a?(String) ? Time.iso8601(body["expires_at"]).to_f : nil
+      rescue ArgumentError
+        nil
+      end
+      raise Error.new("The edge returned an invalid session.", :session) unless body.is_a?(Hash) && body["id"].is_a?(String) && Engine.bundle?(body["bundle"]) && expires_ts
+
+      bundle = body["bundle"]
+      raise engine_error(bundle) unless Engine.supports_engine?(bundle.fetch("engine", Engine::UNDEFINED))
+      return [nil, false] if expires_ts <= Time.now.to_f
+
+      context = body["context"].is_a?(Hash) ? body["context"] : {}
+      [SessionState.new(body["id"], bundle, context, Time.at(expires_ts).utc.iso8601(3), expires_ts), false]
+    rescue StandardError => e
+      emit_error(e.is_a?(Error) ? e : Error.new("Could not load the test session: #{e.message}", :session)) unless @closed
+      [nil, true]
+    end
+
+    # ------------------------------------------------------------------ live WebSocket (/v1/live)
+
+    def live_url
+      return @live_url if @live_url && !@live_url.empty?
+
+      if @base_url.match?(%r{\Ahttps://}i) then "wss://#{@base_url.sub(%r{\Ahttps://}i, "")}/v1/live"
+      elsif @base_url.match?(%r{\Ahttp://}i) then "ws://#{@base_url.sub(%r{\Ahttp://}i, "")}/v1/live"
+      end
+    end
+
+    def live_wanted?
+      @streaming && @live_enabled && !live_url.nil? && @http.respond_to?(:websocket)
+    end
+
+    # Closes the current socket (for a rejected key); the loop reconnects with backoff.
+    def drop_live
+      ws = @live_socket
+      ws&.close(1000, "bye")
+    rescue StandardError
+      nil
+    end
+
+    # Keeps one live socket open, reconnecting with jittered exponential backoff (1 s · 2ⁿ, at most 5 min, × 0.5–1.5).
+    # While no socket can be opened, server-sent events + polling take over.
+    def live_loop
+      attempt = 0
+      current = -> { !@closed && !@environment_deleted && Process.pid == @pid }
+      while current.()
+        opened = false
+        opened_at = 0.0
+        rotating = false
+        close_code = nil
+        ws = nil
+        begin
+          ws = @http.websocket(live_url, headers, protocols: [LIVE_PROTOCOL], open_timeout: LIVE_CONNECT_TIMEOUT)
+          opened = true
+          opened_at = monotonic
+          rotating = live_session(ws, opened_at)
+        rescue WebSocket::Closed => e
+          close_code = e.code
+          log { "live socket closed: #{e.message}" }
+        rescue StandardError => e
+          log { "live socket failed: #{e.class}: #{e.message}" }
+        ensure
+          @live_open = false
+          @live_socket = nil
+          begin
+            ws&.close(1000, rotating ? "rotate" : "bye")
+          rescue StandardError
+            nil
+          end
+        end
+        return if @closed || Process.pid != @pid
+
+        if close_code == CLOSE_ENVIRONMENT_DELETED
+          # Keep evaluating the last bundle; it can no longer be updated. No socket, no stream; the regular poll stays
+          # (it reports the key as rejected, and recovers if the environment turns out to exist after all).
+          @environment_deleted = true
+          close_stream
+          set_status(STATUS_STALE) if @bundle
+          emit_error(Error.new("The environment of this SDK key was deleted. The last configuration stays in use; it will not be updated.", :environment_deleted))
+          reschedule
+          return
+        end
+        next if rotating # planned replacement: no fallback, no backoff
+
+        attempt = opened && monotonic - opened_at > LIVE_STABLE ? 1 : attempt + 1
+        if opened
+          reschedule # back to the normal poll interval
+        else
+          start_stream # SSE + polling take over until a socket opens again
+        end
+        wait = [LIVE_MAX_BACKOFF, 2.0**[attempt - 1, 10].min].min * (0.5 + @random.call)
+        @mutex.synchronize { @sleep_cv.wait(wait) unless @closed }
+      end
+    end
+
+    # Serves one open socket until it closes, dies or is due for rotation. Returns true for a rotation; raises
+    # {WebSocket::Closed} when the edge closed it.
+    def live_session(ws, opened_at)
+      @live_socket = ws
+      @live_open = true
+      close_stream # SSE is not used while the socket is healthy
+      reschedule # the poll becomes a safety net
+      rotate_at = opened_at + (LIVE_ROTATE * (0.9 + (0.2 * @random.call)))
+      next_ping = opened_at + (LIVE_PING * (0.9 + (0.2 * @random.call)))
+      pong_deadline = nil
+      until @closed || Process.pid != @pid
+        now = monotonic
+        return true if now >= rotate_at
+        return false if pong_deadline && now >= pong_deadline # silence after a ping: the connection is dead
+
+        if now >= next_ping
+          ws.send_text("ping") # the edge answers "pong" without waking anything up
+          pong_deadline ||= now + LIVE_PONG_TIMEOUT
+          next_ping = now + (LIVE_PING * (0.9 + (0.2 * @random.call)))
+        end
+        wait = [next_ping, rotate_at, pong_deadline || rotate_at].min - monotonic
+        msg = ws.recv([0.05, wait].max)
+        next if msg.nil?
+
+        pong_deadline = nil
+        next if msg == "pong"
+
+        m = begin
+          JSON.parse(msg)
+        rescue JSON::ParserError
+          nil
+        end
+        apply_push(m) if m.is_a?(Hash)
+      end
+      false
+    end
+
+    # Applies one +rev+ / +hello+ message. A message that cannot be trusted changes nothing.
+    def apply_push(m)
+      return if @closed || !%w[rev hello].include?(m["t"])
+
+      revision = m["revision"]
+      text = m["bundle"]
+      revision = revision.to_i if revision.is_a?(Float) && revision.finite? && revision == revision.floor
+      return unless revision.is_a?(Integer) && revision >= 1 && text.is_a?(String) # revision 0 / no bundle: nothing published yet
+
+      cur = @bundle
+      return if cur && revision < cur["revision"].to_i # never backwards
+
+      checksum = m["checksum"].is_a?(String) ? m["checksum"] : nil
+      info = nil
+      if @verifier
+        reject = lambda do |why|
+          emit_error(Error.new("Pushed bundle r#{revision} was rejected: #{why} The configuration in use is unchanged.", :signature))
+          request_sync # the regular (verified) request path says what is really current
+        end
+        signature = m["signature"]
+        env_id = m["environmentId"]
+        return reject.("it carries no complete signature.") unless signature.is_a?(String) && !signature.empty? && env_id.is_a?(String) && !env_id.empty? && checksum
+        return reject.("it was signed for a different environment.") if @pinned_env && @pinned_env != env_id
+
+        kid = m["kid"].is_a?(String) && !m["kid"].empty? ? m["kid"] : nil
+        info = Signature::Info.new(signature, kid, env_id, revision, checksum)
+        ok = begin
+          Signature.verify(load_keys(kid), info, text)
+        rescue StandardError
+          false
+        end
+        return if @closed
+        return reject.("its signature does not verify.") unless ok
+      end
+      parsed = begin
+        Engine::Json.parse(text)
+      rescue Engine::InvalidJsonError
+        nil
+      end
+      unless Engine.bundle?(parsed) && parsed["revision"].is_a?(Float) && parsed["revision"] == revision.to_f
+        return emit_error(Error.new("The edge pushed an invalid bundle; it was ignored.", :invalid_bundle))
+      end
+      return emit_error(engine_error(parsed)) unless Engine.supports_engine?(parsed.fetch("engine", Engine::UNDEFINED))
+
+      confirm = false
+      proceed = @mutex.synchronize do
+        cur = @bundle
+        next false if cur && revision < cur["revision"].to_i
+
+        @failures = 0
+        if cur && revision == cur["revision"].to_i
+          # Already in use: the push only confirms that it is current.
+          confirm = @checksum.nil? || @checksum == checksum
+          next false
+        end
+        @pinned_env = info.environment_id if info
+        @live_revision = revision
+        true
+      end
+      set_status(STATUS_READY) if confirm
+      return unless proceed
+
+      committed = m["committedAt"]
+      latency = committed.is_a?(Numeric) && committed.to_f.finite? ? (Time.now.to_f * 1000) - committed : nil
+      adopt(parsed,
+            # What /v1/bundle would send as ETag for this revision, so the safety poll gets a 304.
+            etag: checksum ? %("#{checksum}-#{@browser_key ? "client" : "server"}") : nil,
+            checksum: checksum, sig: info, raw: text,
+            status: STATUS_READY, source: :network, transport: :live, latency_ms: latency)
+      persist
+    end
+
     # ------------------------------------------------------------------ event stream (SSE)
 
     def start_stream
       gen = @mutex.synchronize do
-        return if @closed || !@streaming || @stream_active
+        return if @closed || !@streaming || @stream_active || @environment_deleted
 
         @stream_active = true
         @stream_gen += 1
@@ -786,7 +1141,7 @@ module NanoFlags
       @attrs[flag_key] ||= Engine.attributes_used_by(bundle, flag_key)
     end
 
-    def record(r, user_context, ctx, bundle)
+    def record(r, user_context, ctx, bundle, session_id = nil)
       return if !@events_enabled || @closed || @sample_rate <= 0 || @random.call >= @sample_rate
 
       context =
@@ -806,6 +1161,7 @@ module NanoFlags
       ev["revision"] = rev.finite? ? rev.to_i.to_f : 0.0
       ev["context"] = context
       ev["at"] = Time.now.utc.strftime("%Y-%m-%dT%H:%M:%S.%LZ")
+      ev["sessionId"] = session_id unless session_id.nil?
       ev["sampleRate"] = @sample_rate
       text = Engine::Js.stringify(ev)
       @queue_mutex.synchronize { @queue << text if @queue.length < MAX_QUEUE } # bounded: drop instead of growing

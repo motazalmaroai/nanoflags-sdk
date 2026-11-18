@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Documented and tested test sessions through `evaluator: -> { NanoFlags.flags_for(client) }` (needs the `nanoflags`
+  release with test sessions).
+
 ## 0.1.0 (2026-11-18)
 
 First release of `nanoflags-openfeature`: an OpenFeature (openfeature-sdk >= 0.4) provider backed by the `nanoflags`

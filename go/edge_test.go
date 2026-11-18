@@ -44,6 +44,8 @@ type fakeEdge struct {
 	events     []map[string]any
 	requests   map[string]int
 	extraKeys  []JWK
+	sessions   map[string]func() (int, string) // token → (status, body) for GET /v1/session; unknown tokens: 404
+	sessionReq []http.Header                   // headers of every /v1/session request
 }
 
 func newFakeEdge(t *testing.T) *fakeEdge {
@@ -232,6 +234,20 @@ func (e *fakeEdge) serve(w http.ResponseWriter, r *http.Request) {
 				w.(http.Flusher).Flush()
 			}
 		}
+	case "/v1/session":
+		e.mu.Lock()
+		e.sessionReq = append(e.sessionReq, r.Header.Clone())
+		sessionFn := e.sessions[r.Header.Get("X-NanoFlags-Session")]
+		e.mu.Unlock()
+		if sessionFn == nil {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = io.WriteString(w, `{"error":{"code":"session_not_found","message":"x"}}`)
+			return
+		}
+		status, body := sessionFn()
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(status)
+		_, _ = io.WriteString(w, body)
 	case "/v1/events":
 		var body map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&body)

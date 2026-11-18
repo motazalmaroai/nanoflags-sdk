@@ -11,6 +11,8 @@ public enum ErrorCode {
     SIGNATURE("signature"),
     ENGINE("engine"),
     ENVIRONMENT_DELETED("environment_deleted"),
+    /** A test-session lookup failed; the session evaluator falls back to normal evaluation. */
+    SESSION("session"),
     NOT_READY("not_ready");
 
     private final String wire;

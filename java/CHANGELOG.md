@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Test sessions (`x-nanoflags-session`), as in the JS and Python SDKs: `NanoFlagsClient.session(token[, service])` /
+  `sessionAsync(...)` resolve a shared test session (`GET /v1/session`, cached until it expires; unknown tokens 15 s,
+  failures 3 s; concurrent callers share one request) and return a `SessionEvaluator` that evaluates the session's
+  pinned bundle with `{...session.context, ...context}` while active and behaves like the client otherwise. Sampled
+  events carry `sessionId`. `TestSessions` holds the current request's session per thread (`open` / `withSession`,
+  `flagsFor`, `currentSession`, `sessionHeaders`, `propagate` for `java.net.http`, `wrap` for executors); the README
+  shows a servlet filter. New error code `ErrorCode.SESSION` (`"session"`).
+
 ## 0.1.0 — 2026-11-18
 
 First release of the Java server SDK. Nothing is on Maven Central yet.

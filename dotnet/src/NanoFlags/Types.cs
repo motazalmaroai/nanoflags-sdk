@@ -61,6 +61,8 @@ namespace NanoFlags
         Engine,
         /// <summary>The environment of the SDK key was deleted ("environment_deleted").</summary>
         EnvironmentDeleted,
+        /// <summary>A test-session lookup failed; the session evaluator falls back to normal evaluation ("session").</summary>
+        Session,
     }
 
     /// <summary>Wire spellings.</summary>
@@ -79,6 +81,7 @@ namespace NanoFlags
                 case ErrorCode.Config: return "config";
                 case ErrorCode.Signature: return "signature";
                 case ErrorCode.Engine: return "engine";
+                case ErrorCode.Session: return "session";
                 default: return "environment_deleted";
             }
         }

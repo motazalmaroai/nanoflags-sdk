@@ -27,6 +27,7 @@ type event struct {
 	Revision  int64           `json:"revision"`
 	Context   map[string]any  `json:"context"`
 	At        string          `json:"at"`
+	SessionID string          `json:"sessionId,omitempty"`
 }
 
 // eventQueue samples evaluations and sends them, with the periodic service report ("this
@@ -68,7 +69,7 @@ func (q *eventQueue) start() {
 	}()
 }
 
-func (q *eventQueue) record(r *engine.Result, ctx Context, s *snapshot) {
+func (q *eventQueue) record(r *engine.Result, ctx Context, s *snapshot, sessionID string) {
 	cfg := &q.c.cfg
 	if !q.enabled() || q.c.closed.Load() || cfg.sampleRate <= 0 || cfg.random() >= cfg.sampleRate {
 		return
@@ -80,7 +81,7 @@ func (q *eventQueue) record(r *engine.Result, ctx Context, s *snapshot) {
 	if full {
 		return
 	}
-	e := event{FlagKey: r.FlagKey, Reason: string(r.Reason), At: time.Now().UTC().Format("2006-01-02T15:04:05.000Z")}
+	e := event{FlagKey: r.FlagKey, Reason: string(r.Reason), At: time.Now().UTC().Format("2006-01-02T15:04:05.000Z"), SessionID: sessionID}
 	if n, ok := r.Revision.Number(); ok {
 		e.Revision = int64(n)
 	}

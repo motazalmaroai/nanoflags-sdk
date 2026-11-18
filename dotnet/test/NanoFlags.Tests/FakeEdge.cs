@@ -26,7 +26,7 @@ namespace NanoFlags.Tests
     /// <summary>
     /// A fake NanoFlags edge (Kestrel) that signs like the real publisher (Ed25519 over the canonical string, kid in a
     /// header), serves /v1/bundle (ETag / 304), /v1/keys, /v1/live (WebSocket: hello, rev, ping/pong, close codes),
-    /// /v1/stream (SSE) and records /v1/events.
+    /// /v1/stream (SSE), /v1/session (test sessions) and records /v1/events.
     /// </summary>
     internal sealed class FakeEdge : IAsyncDisposable
     {
@@ -91,6 +91,9 @@ namespace NanoFlags.Tests
         internal int BundleRequests, NotModified, KeysRequests, LiveConnects, StreamRequests;
         internal readonly ConcurrentQueue<(string Path, string Authorization, string UserAgent)> Requests = new ConcurrentQueue<(string, string, string)>();
         internal readonly ConcurrentQueue<JsonValue> Events = new ConcurrentQueue<JsonValue>();
+        /// <summary>GET /v1/session: token → (status, body); unknown tokens answer 404 like the edge.</summary>
+        internal readonly ConcurrentDictionary<string, Func<(int Status, string Body)>> Sessions = new ConcurrentDictionary<string, Func<(int, string)>>();
+        internal readonly ConcurrentQueue<IHeaderDictionary> SessionRequests = new ConcurrentQueue<IHeaderDictionary>();
         private readonly ConcurrentDictionary<WebSocket, SemaphoreSlim> _sockets = new ConcurrentDictionary<WebSocket, SemaphoreSlim>();
 
         internal int SocketCount => _sockets.Count;
@@ -310,6 +313,26 @@ namespace NanoFlags.Tests
                     }
                     ctx.Response.ContentType = "text/event-stream";
                     await ctx.Response.WriteAsync(": hello\n\nevent: revision\ndata: {\"revision\":" + Revision + ",\"checksum\":\"" + Checksum + "\"}\n\n").ConfigureAwait(false);
+                    return;
+                }
+                case "/v1/session":
+                {
+                    SessionRequests.Enqueue(new HeaderDictionary(ctx.Request.Headers.ToDictionary(h => h.Key, h => h.Value)));
+                    if (!Authed(ctx))
+                    {
+                        ctx.Response.StatusCode = 401;
+                        return;
+                    }
+                    if (!Sessions.TryGetValue(ctx.Request.Headers["X-NanoFlags-Session"].ToString(), out var make))
+                    {
+                        ctx.Response.StatusCode = 404;
+                        await ctx.Response.WriteAsync("{\"error\":{\"code\":\"session_not_found\",\"message\":\"x\"}}").ConfigureAwait(false);
+                        return;
+                    }
+                    var (status, body) = make();
+                    ctx.Response.StatusCode = status;
+                    ctx.Response.Headers.CacheControl = "no-store";
+                    await ctx.Response.WriteAsync(body).ConfigureAwait(false);
                     return;
                 }
                 case "/v1/events":

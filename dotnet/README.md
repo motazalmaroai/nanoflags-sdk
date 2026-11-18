@@ -84,6 +84,62 @@ is never replaced by an older HTTP answer, and an edge answer marked `X-NanoFlag
 When the edge closes the socket with **4004** (environment deleted), the client stops reconnecting, keeps evaluating
 its last configuration, reports `Stale` and an error with code `EnvironmentDeleted`.
 
+## Test sessions
+
+A shared test session (dashboard: **Scenarios → Shared test session**; Scale plan) pins a configuration snapshot and a
+synthetic context to a token (`nf_ts_…`). A service that receives the token in the `x-nanoflags-session` header
+evaluates against that snapshot, with the session's context overlaid by the call's context (the call wins), for that
+request only. Sampled events from a session carry its id. A session changes which snapshot and context an evaluation
+uses; it grants no data access and must not be used for authorization.
+
+```csharp
+var s = await flags.SessionAsync(Request.Headers[NanoFlagsClient.SessionHeader].FirstOrDefault()); // or (token, "checkout-api")
+s.BoolVariation("checkout-v2", ctx, false); // session bundle while active
+_ = (s.IsActive, s.Id, s.ExpiresAt, s.Revision);
+```
+
+Per request, without passing the evaluator around (`NanoFlagsSession`, an `AsyncLocal` that follows the request
+through awaits). ASP.NET Core needs no extra package in the SDK, a few lines of middleware do:
+
+```csharp
+app.Use(async (http, next) =>
+{
+    using (NanoFlagsSession.Begin(http.Request.Headers[NanoFlagsSession.Header].FirstOrDefault()))
+    {
+        await NanoFlagsSession.FlagsForAsync(flags); // resolve once, before the endpoint runs
+        await next();
+    }
+});
+
+app.MapGet("/cart", () => NanoFlagsSession.FlagsFor(flags).BoolVariation("checkout-v2", ctx, false));
+
+// The next service joins the session: every request of this HttpClient carries the header.
+builder.Services.AddHttpClient("pricing").AddHttpMessageHandler(() => new NanoFlagsSessionHandler());
+
+// Queues, jobs and tests
+await NanoFlagsSession.RunAsync(job.SessionToken, async () => { var f = await NanoFlagsSession.FlagsForAsync(flags); /* … */ });
+```
+
+| API | Description |
+| --- | --- |
+| `client.SessionAsync(token, service?, ct)` / `Session(token, service?)` | resolves the session (`GET /v1/session`) and returns a `SessionEvaluator`; `service` is sent as `X-NanoFlags-Service` (default: `Service`); `ct` ends only the wait |
+| `SessionEvaluator` | the client's variation methods, plus `IsActive`, `Id`, `ExpiresAt`, `Revision` |
+| `NanoFlagsSession.Begin(token)` / `Run` / `RunAsync` | makes `token` the current session of this async flow (disposing restores the previous one); an absent or malformed token runs outside any session |
+| `NanoFlagsSession.FlagsForAsync(client, service?, ct)` | the current request's evaluator, resolved once per scope and client; outside a session it behaves like the client |
+| `NanoFlagsSession.FlagsFor(client)` | synchronous, never blocks: the evaluator resolved by `FlagsForAsync`, otherwise behaves like the client |
+| `NanoFlagsSession.CurrentSession` / `Headers()` | the current token (or `null`); `{x-nanoflags-session: token}` (or empty) |
+| `NanoFlagsSessionHandler` | `DelegatingHandler` that adds the header to outgoing `HttpClient` requests inside a session |
+| `NanoFlagsClient.SessionHeader`, `IsSessionToken(s)` | `"x-nanoflags-session"`; 1–512 printable ASCII characters |
+
+- The edge is asked once per token and service, concurrent callers share the request, and the answer is cached until
+  the session expires. Unknown tokens are remembered for 15 s, failed lookups (reported as error code `session`) for 3 s.
+- It **never throws**: without an active session (absent, malformed, unknown, expired, revoked or not permitted for
+  this service) the evaluator behaves exactly like the client. When a session expires mid-flight, it turns inactive and
+  evaluations continue on the published configuration. A newly published revision does not change an active session.
+- An unknown session is still propagated downstream: the next service decides for itself.
+- Session bundles are not signed; verification does not apply to them. A revoked session keeps working in a process
+  that already cached it, until its expiry time.
+
 ## Trust and resilience
 
 - **Signatures, on by default.** With the default base URL (`https://edge.nanoflags.io`) every bundle's Ed25519

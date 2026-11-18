@@ -72,6 +72,7 @@ namespace NanoFlags
         private readonly bool _browserKey;
         internal readonly Verifier? Verifier;
         internal readonly EventQueue Events;
+        internal readonly Sessions Sessions;
         internal readonly Dispatcher Dispatcher;
         private readonly Live _live;
 
@@ -116,6 +117,7 @@ namespace NanoFlags
             var cfgErrors = new List<NanoFlagsException>();
             Verifier = Verifier.Create(this, cfgErrors);
             Events = new EventQueue(this);
+            Sessions = new Sessions(this);
             _live = new Live(this);
             foreach (var e in cfgErrors) EmitError(e);
             var boot = cfg.Bootstrap;
@@ -262,6 +264,7 @@ namespace NanoFlags
             {
                 // ignore
             }
+            Sessions.Clear();
             MarkReady();
             Dispatcher.Shutdown();
             if (_ownsHttp) Http.Dispose();
@@ -681,10 +684,21 @@ namespace NanoFlags
 
         private static bool IsLong(JsonValue v) => IsFinite(v) && v is JsonValue.Num n && n.Value == Math.Floor(n.Value) && Math.Abs(n.Value) <= 9007199254740992.0;
 
-        private EngineResult Eval(string key, IReadOnlyDictionary<string, object?>? ctx, JsonValue fallback, Func<JsonValue, bool>? accepts, bool record)
+        /// <summary>
+        /// Evaluates against the configuration in use, or, with a live <paramref name="scope"/>, against the session's
+        /// pinned bundle with the context <c>{...session.context, ...ctx}</c> (the call's attributes win).
+        /// </summary>
+        private EngineResult Eval(Sessions.State? scope, string key, IReadOnlyDictionary<string, object?>? ctx, JsonValue fallback, Func<JsonValue, bool>? accepts, bool record)
         {
-            var s = Snap;
+            var s = scope != null ? scope.Snap : Snap;
             var c = ctx ?? EmptyContext;
+            if (scope != null && scope.Context.Count > 0)
+            {
+                var merged = new Dictionary<string, object?>(StringComparer.Ordinal);
+                foreach (var kv in scope.Context) merged[kv.Key] = kv.Value;
+                foreach (var kv in c) merged[kv.Key] = kv.Value;
+                c = merged;
+            }
             var res = Evaluator.Evaluate(s == null ? JsonValue.Null : s.Bundle.Value, key, EvalContexts.Of(c), fallback);
             if (accepts != null && res.Reason != Reason.FlagNotFound && res.Reason != Reason.Error && !accepts(res.Value))
             {
@@ -693,7 +707,7 @@ namespace NanoFlags
                 trace.Add(new TraceStep("result", "Returned the fallback", msg));
                 res = new EngineResult(key, fallback, Reason.Error, trace.AsReadOnly(), res.Revision, error: msg);
             }
-            if (record) Events.Record(res, c, s);
+            if (record) Events.Record(res, c, s, scope?.Id);
             return res;
         }
 
@@ -711,9 +725,11 @@ namespace NanoFlags
         public bool BoolVariation(string key, IReadOnlyDictionary<string, object?>? context, bool fallback) => BoolVariationDetail(key, context, fallback).Value;
 
         /// <summary><see cref="BoolVariation"/> with the full evaluation result.</summary>
-        public EvaluationDetail<bool> BoolVariationDetail(string key, IReadOnlyDictionary<string, object?>? context, bool fallback)
+        public EvaluationDetail<bool> BoolVariationDetail(string key, IReadOnlyDictionary<string, object?>? context, bool fallback) => BoolVariationDetail(null, key, context, fallback);
+
+        internal EvaluationDetail<bool> BoolVariationDetail(Sessions.State? scope, string key, IReadOnlyDictionary<string, object?>? context, bool fallback)
         {
-            var r = Eval(key, context, JsonValue.Bool.Of(fallback), v => v is JsonValue.Bool, true);
+            var r = Eval(scope, key, context, JsonValue.Bool.Of(fallback), v => v is JsonValue.Bool, true);
             return Detail(r, r.Value is JsonValue.Bool b ? b.Value : fallback);
         }
 
@@ -721,9 +737,11 @@ namespace NanoFlags
         public string StringVariation(string key, IReadOnlyDictionary<string, object?>? context, string fallback) => StringVariationDetail(key, context, fallback).Value;
 
         /// <summary><see cref="StringVariation"/> with the full evaluation result.</summary>
-        public EvaluationDetail<string> StringVariationDetail(string key, IReadOnlyDictionary<string, object?>? context, string fallback)
+        public EvaluationDetail<string> StringVariationDetail(string key, IReadOnlyDictionary<string, object?>? context, string fallback) => StringVariationDetail(null, key, context, fallback);
+
+        internal EvaluationDetail<string> StringVariationDetail(Sessions.State? scope, string key, IReadOnlyDictionary<string, object?>? context, string fallback)
         {
-            var r = Eval(key, context, fallback == null ? JsonValue.Null : new JsonValue.Str(fallback), v => v is JsonValue.Str, true);
+            var r = Eval(scope, key, context, fallback == null ? JsonValue.Null : new JsonValue.Str(fallback), v => v is JsonValue.Str, true);
             return Detail(r, !Failed(r) && r.Value is JsonValue.Str s ? s.Value : fallback!);
         }
 
@@ -731,9 +749,11 @@ namespace NanoFlags
         public double DoubleVariation(string key, IReadOnlyDictionary<string, object?>? context, double fallback) => DoubleVariationDetail(key, context, fallback).Value;
 
         /// <summary><see cref="DoubleVariation"/> with the full evaluation result.</summary>
-        public EvaluationDetail<double> DoubleVariationDetail(string key, IReadOnlyDictionary<string, object?>? context, double fallback)
+        public EvaluationDetail<double> DoubleVariationDetail(string key, IReadOnlyDictionary<string, object?>? context, double fallback) => DoubleVariationDetail(null, key, context, fallback);
+
+        internal EvaluationDetail<double> DoubleVariationDetail(Sessions.State? scope, string key, IReadOnlyDictionary<string, object?>? context, double fallback)
         {
-            var r = Eval(key, context, new JsonValue.Num(fallback), IsFinite, true);
+            var r = Eval(scope, key, context, new JsonValue.Num(fallback), IsFinite, true);
             return Detail(r, IsFinite(r.Value) ? ((JsonValue.Num)r.Value).Value : fallback);
         }
 
@@ -741,9 +761,11 @@ namespace NanoFlags
         public int IntVariation(string key, IReadOnlyDictionary<string, object?>? context, int fallback) => IntVariationDetail(key, context, fallback).Value;
 
         /// <summary><see cref="IntVariation"/> with the full evaluation result.</summary>
-        public EvaluationDetail<int> IntVariationDetail(string key, IReadOnlyDictionary<string, object?>? context, int fallback)
+        public EvaluationDetail<int> IntVariationDetail(string key, IReadOnlyDictionary<string, object?>? context, int fallback) => IntVariationDetail(null, key, context, fallback);
+
+        internal EvaluationDetail<int> IntVariationDetail(Sessions.State? scope, string key, IReadOnlyDictionary<string, object?>? context, int fallback)
         {
-            var r = Eval(key, context, new JsonValue.Num(fallback), IsInt, true);
+            var r = Eval(scope, key, context, new JsonValue.Num(fallback), IsInt, true);
             return Detail(r, IsInt(r.Value) ? (int)((JsonValue.Num)r.Value).Value : fallback);
         }
 
@@ -751,9 +773,11 @@ namespace NanoFlags
         public long LongVariation(string key, IReadOnlyDictionary<string, object?>? context, long fallback) => LongVariationDetail(key, context, fallback).Value;
 
         /// <summary><see cref="LongVariation"/> with the full evaluation result.</summary>
-        public EvaluationDetail<long> LongVariationDetail(string key, IReadOnlyDictionary<string, object?>? context, long fallback)
+        public EvaluationDetail<long> LongVariationDetail(string key, IReadOnlyDictionary<string, object?>? context, long fallback) => LongVariationDetail(null, key, context, fallback);
+
+        internal EvaluationDetail<long> LongVariationDetail(Sessions.State? scope, string key, IReadOnlyDictionary<string, object?>? context, long fallback)
         {
-            var r = Eval(key, context, new JsonValue.Num(fallback), IsLong, true);
+            var r = Eval(scope, key, context, new JsonValue.Num(fallback), IsLong, true);
             return Detail(r, IsLong(r.Value) ? (long)((JsonValue.Num)r.Value).Value : fallback);
         }
 
@@ -764,9 +788,11 @@ namespace NanoFlags
         public object? JsonVariation(string key, IReadOnlyDictionary<string, object?>? context, object? fallback) => JsonVariationDetail(key, context, fallback).Value;
 
         /// <summary><see cref="JsonVariation"/> with the full evaluation result.</summary>
-        public EvaluationDetail<object?> JsonVariationDetail(string key, IReadOnlyDictionary<string, object?>? context, object? fallback)
+        public EvaluationDetail<object?> JsonVariationDetail(string key, IReadOnlyDictionary<string, object?>? context, object? fallback) => JsonVariationDetail(null, key, context, fallback);
+
+        internal EvaluationDetail<object?> JsonVariationDetail(Sessions.State? scope, string key, IReadOnlyDictionary<string, object?>? context, object? fallback)
         {
-            var r = Eval(key, context, JsonValue.Of(fallback), v => !v.IsUndefined, true);
+            var r = Eval(scope, key, context, JsonValue.Of(fallback), v => !v.IsUndefined, true);
             return Detail(r, Failed(r) ? fallback : r.Value.ToObject());
         }
 
@@ -774,18 +800,72 @@ namespace NanoFlags
         public JsonValue JsonValueVariation(string key, IReadOnlyDictionary<string, object?>? context, JsonValue? fallback) => JsonValueVariationDetail(key, context, fallback).Value;
 
         /// <summary><see cref="JsonValueVariation"/> with the full evaluation result.</summary>
-        public EvaluationDetail<JsonValue> JsonValueVariationDetail(string key, IReadOnlyDictionary<string, object?>? context, JsonValue? fallback)
+        public EvaluationDetail<JsonValue> JsonValueVariationDetail(string key, IReadOnlyDictionary<string, object?>? context, JsonValue? fallback) => JsonValueVariationDetail(null, key, context, fallback);
+
+        internal EvaluationDetail<JsonValue> JsonValueVariationDetail(Sessions.State? scope, string key, IReadOnlyDictionary<string, object?>? context, JsonValue? fallback)
         {
             var fb = fallback ?? JsonValue.Null;
-            var r = Eval(key, context, fb, v => !v.IsUndefined, true);
+            var r = Eval(scope, key, context, fb, v => !v.IsUndefined, true);
             return Detail(r, Failed(r) ? fb : r.Value);
         }
 
         /// <summary>The full engine result without any type check.</summary>
-        public EvaluationDetail<object?> Evaluate(string key, IReadOnlyDictionary<string, object?>? context, object? fallback = null)
+        public EvaluationDetail<object?> Evaluate(string key, IReadOnlyDictionary<string, object?>? context, object? fallback = null) => Evaluate(null, key, context, null);
+
+        internal EvaluationDetail<object?> Evaluate(Sessions.State? scope, string key, IReadOnlyDictionary<string, object?>? context, object? fallback)
         {
-            var r = Eval(key, context, JsonValue.Of(fallback), null, true);
+            var r = Eval(scope, key, context, JsonValue.Of(fallback), null, true);
             return Detail(r, Failed(r) ? fallback : r.Value.ToObject());
+        }
+
+        /* ---------------- test sessions ---------------- */
+
+        /// <summary>The header that carries a test-session token between services (<c>"x-nanoflags-session"</c>).</summary>
+        public const string SessionHeader = Sessions.Header;
+
+        /// <summary>
+        /// Whether <paramref name="token"/> can be a test-session token: an opaque string that only has to be safe to put in
+        /// a header (1 to 512 printable ASCII characters, no spaces).
+        /// </summary>
+        public static bool IsSessionToken(string? token) => Sessions.IsToken(token);
+
+        /// <summary>
+        /// Resolves a test session (<c>GET /v1/session</c>, once per token and service until the session expires; concurrent
+        /// callers share one request) and returns an evaluator scoped to it. Pass the incoming <c>x-nanoflags-session</c>
+        /// header value. Never throws: an absent, malformed, unknown, expired or not permitted token, a failed lookup
+        /// (reported through <see cref="Error"/> with <see cref="ErrorCode.Session"/>), or <paramref name="cancellationToken"/>
+        /// ending first yields an evaluator whose <see cref="SessionEvaluator.IsActive"/> is false and that behaves like the client.
+        /// </summary>
+        /// <param name="token">The session token.</param>
+        /// <param name="service">Sent as <c>X-NanoFlags-Service</c> (null: <see cref="NanoFlagsOptions.Service"/>); a session may be limited to certain services.</param>
+        /// <param name="cancellationToken">Ends the wait (not the shared lookup).</param>
+        public async Task<SessionEvaluator> SessionAsync(string? token, string? service = null, CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                var lookup = Sessions.Resolve(token, service);
+                if (!lookup.IsCompleted && cancellationToken.CanBeCanceled)
+                {
+                    var cancelled = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                    using (cancellationToken.Register(() => cancelled.TrySetResult(true)))
+                    {
+                        if (await Task.WhenAny(lookup, cancelled.Task).ConfigureAwait(false) != lookup) return new SessionEvaluator(this, null);
+                    }
+                }
+                return new SessionEvaluator(this, await lookup.ConfigureAwait(false));
+            }
+            catch (Exception)
+            {
+                return new SessionEvaluator(this, null); // never thrown: lookups complete normally
+            }
+        }
+
+        /// <summary>Synchronous <see cref="SessionAsync"/> (blocks on the first call per token, at most the request timeout).</summary>
+        public SessionEvaluator Session(string? token, string? service = null)
+        {
+            var lookup = Sessions.Resolve(token, service);
+            if (lookup.IsCompleted) return new SessionEvaluator(this, lookup.Result);
+            return Task.Run(() => SessionAsync(token, service)).GetAwaiter().GetResult();
         }
 
         /// <summary>Every flag of the configuration in use, as plain .NET values (no telemetry). Empty without a configuration.</summary>

@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Test sessions (`x-nanoflags-session`), as in the JS and Python SDKs: `NanoFlagsClient.SessionAsync(token, service?)` /
+  `Session(...)` resolve a shared test session (`GET /v1/session`, cached until it expires; unknown tokens 15 s,
+  failures 3 s; concurrent callers share one request) and return a `SessionEvaluator` that evaluates the session's
+  pinned bundle with `{...session.context, ...context}` while active and behaves like the client otherwise. Sampled
+  events carry `sessionId`. `NanoFlagsSession` holds the current request's session in an `AsyncLocal` (`Begin`, `Run`,
+  `RunAsync`, `FlagsForAsync`, `FlagsFor`, `CurrentSession`, `Headers`); `NanoFlagsSessionHandler` propagates it on
+  outgoing `HttpClient` requests. The README shows the ASP.NET Core middleware (no new dependency). New error code
+  `ErrorCode.Session` (`"session"`).
+
 ## 0.1.0 — 2026-11-18
 
 First release of the .NET server SDK. Nothing is on NuGet yet.

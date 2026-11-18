@@ -27,6 +27,8 @@ const (
 	ErrSignature          ErrorCode = "signature"
 	ErrEngine             ErrorCode = "engine"
 	ErrEnvironmentDeleted ErrorCode = "environment_deleted"
+	// ErrSession: a test-session lookup failed (the evaluator falls back to normal evaluation).
+	ErrSession ErrorCode = "session"
 )
 
 // Error is a client error. A failed update never changes the configuration in use.

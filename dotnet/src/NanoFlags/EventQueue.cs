@@ -62,7 +62,7 @@ namespace NanoFlags
             }
         }
 
-        internal void Record(EngineResult r, IReadOnlyDictionary<string, object?> ctx, NanoFlagsClient.Snapshot? s)
+        internal void Record(EngineResult r, IReadOnlyDictionary<string, object?> ctx, NanoFlagsClient.Snapshot? s, string? sessionId = null)
         {
             if (!_opts.Enabled || _c.Closed || _sampleRate <= 0 || _c.Cfg.Random() >= _sampleRate) return;
             try
@@ -90,6 +90,7 @@ namespace NanoFlags
                 }
                 e.Put("context", context);
                 e.Put("at", new JsonValue.Str(NanoFlagsClient.IsoNow()));
+                if (sessionId != null) e.Put("sessionId", new JsonValue.Str(sessionId));
                 e.Put("sampleRate", new JsonValue.Num(_sampleRate));
                 var built = e.Build();
                 lock (_lock)

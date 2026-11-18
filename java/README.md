@@ -90,6 +90,58 @@ is never replaced by an older HTTP answer, and an edge answer marked `X-NanoFlag
 When the edge closes the socket with **4004** (environment deleted), the client stops reconnecting, keeps evaluating
 its last configuration, reports `STALE` and an error with code `ENVIRONMENT_DELETED`.
 
+## Test sessions
+
+A shared test session (dashboard: **Scenarios → Shared test session**; Scale plan) pins a configuration snapshot and a
+synthetic context to a token (`nf_ts_…`). A service that receives the token in the `x-nanoflags-session` header
+evaluates against that snapshot, with the session's context overlaid by the call's context (the call wins), for that
+request only. Sampled events from a session carry its id. A session changes which snapshot and context an evaluation
+uses; it grants no data access and must not be used for authorization.
+
+```java
+SessionEvaluator s = flags.session(request.getHeader(NanoFlagsClient.SESSION_HEADER));   // or session(token, "checkout-api")
+s.boolVariation("checkout-v2", Map.of("key", userId), false); // session bundle while active
+s.isActive(); s.id(); s.expiresAt(); s.revision();
+```
+
+Per request, without passing the evaluator around (`TestSessions`, held per thread; no servlet dependency in the SDK):
+
+```java
+public final class NanoFlagsSessionFilter implements Filter {        // jakarta.servlet or javax.servlet
+    public void doFilter(ServletRequest req, ServletResponse res, FilterChain chain) throws IOException, ServletException {
+        try (TestSessions.Scope scope = TestSessions.open(((HttpServletRequest) req).getHeader(TestSessions.HEADER))) {
+            TestSessions.flagsFor(flags);                             // resolve once, before the handler runs
+            chain.doFilter(req, res);
+        }
+    }
+}
+
+// anywhere in the request
+boolean v2 = TestSessions.flagsFor(flags).boolVariation("checkout-v2", Map.of("key", userId), false);
+HttpRequest call = TestSessions.propagate(HttpRequest.newBuilder(pricingUri)).GET().build(); // the next service joins
+executor.submit(TestSessions.wrap(task));                            // hand the session to another thread
+TestSessions.withSession(job.sessionToken(), () -> process(job));    // queues, jobs and tests
+```
+
+| API | Description |
+| --- | --- |
+| `client.session(token[, service])` / `sessionAsync(...)` | resolves the session (`GET /v1/session`) and returns a `SessionEvaluator`; `service` is sent as `X-NanoFlags-Service` (default: the client's `service`) |
+| `SessionEvaluator` | the client's variation methods, plus `isActive()`, `id()`, `expiresAt()`, `revision()` |
+| `TestSessions.open(token)` / `withSession(token, fn)` | makes `token` the current session of this thread (`Scope` is `AutoCloseable` and restores the previous one); an absent or malformed token runs outside any session |
+| `TestSessions.flagsFor(client[, service])` | the current request's evaluator, resolved once per scope and client; outside a session it behaves like the client |
+| `TestSessions.currentSession()` / `sessionHeaders()` / `propagate(builder)` | the current token (or `null`); `{x-nanoflags-session: token}` (or empty); adds the header to a `java.net.http` request |
+| `TestSessions.wrap(Runnable / Callable)` | runs work on another thread inside the current session |
+| `NanoFlagsClient.SESSION_HEADER`, `isSessionToken(s)` | `"x-nanoflags-session"`; 1–512 printable ASCII characters |
+
+- The edge is asked once per token and service, concurrent callers share the request, and the answer is cached until
+  the session expires. Unknown tokens are remembered for 15 s, failed lookups (reported as error code `session`) for 3 s.
+- It **never throws**: without an active session (absent, malformed, unknown, expired, revoked or not permitted for
+  this service) the evaluator behaves exactly like the client. When a session expires mid-flight, it turns inactive and
+  evaluations continue on the published configuration. A newly published revision does not change an active session.
+- An unknown session is still propagated downstream: the next service decides for itself.
+- Session bundles are not signed; verification does not apply to them. A revoked session keeps working in a process
+  that already cached it, until its expiry time.
+
 ## Trust and resilience
 
 - **Signatures, on by default.** With the default base URL (`https://edge.nanoflags.io`) every bundle's Ed25519

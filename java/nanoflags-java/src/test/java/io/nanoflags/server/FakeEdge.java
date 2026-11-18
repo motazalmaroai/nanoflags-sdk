@@ -20,7 +20,7 @@ import org.bouncycastle.crypto.signers.Ed25519Signer;
 /**
  * A fake NanoFlags edge that signs like the real publisher (Ed25519 over the canonical string, kid in a header),
  * serves {@code /v1/bundle} (ETag / 304), {@code /v1/keys}, {@code /v1/live} (WebSocket: hello, rev, ping/pong, close
- * codes), {@code /v1/stream} (SSE) and records {@code /v1/events}.
+ * codes), {@code /v1/stream} (SSE), {@code /v1/session} (test sessions) and records {@code /v1/events}.
  */
 final class FakeEdge implements AutoCloseable {
     static final String FLAGS = "{\"new-checkout\":{\"type\":\"boolean\",\"enabled\":true,\"clientExposed\":true,\"default\":false,\"off\":false,\"rules\":["
@@ -80,6 +80,9 @@ final class FakeEdge implements AutoCloseable {
     final List<WebSocket> sockets = new CopyOnWriteArrayList<>();
     final List<JsonValue> events = new CopyOnWriteArrayList<>();
     final List<RecordedRequest> requests = new CopyOnWriteArrayList<>();
+    /** {@code GET /v1/session}: token → response; unknown tokens answer 404 like the edge. */
+    final java.util.Map<String, java.util.function.Supplier<MockResponse>> sessions = new java.util.concurrent.ConcurrentHashMap<>();
+    final List<RecordedRequest> sessionRequests = new CopyOnWriteArrayList<>();
 
     FakeEdge() throws Exception {
         setFlags(1, FLAGS, 1);
@@ -197,6 +200,13 @@ final class FakeEdge implements AutoCloseable {
                 if (!sseEnabled) return new MockResponse().setResponseCode(503);
                 return new MockResponse().addHeader("Content-Type", "text/event-stream")
                     .setBody(": hello\n\nevent: revision\ndata: {\"revision\":" + revision + ",\"checksum\":\"" + checksum + "\"}\n\n");
+            }
+            case "/v1/session": {
+                sessionRequests.add(r);
+                if (!authed(r)) return new MockResponse().setResponseCode(401);
+                java.util.function.Supplier<MockResponse> make = sessions.get(String.valueOf(r.getHeader("X-NanoFlags-Session")));
+                if (make == null) return new MockResponse().setResponseCode(404).setBody("{\"error\":{\"code\":\"session_not_found\",\"message\":\"x\"}}");
+                return make.get();
             }
             case "/v1/events":
                 events.add(JsonValue.parse(r.getBody().readUtf8()));

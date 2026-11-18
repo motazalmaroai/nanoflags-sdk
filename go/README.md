@@ -101,6 +101,63 @@ When the edge closes the socket with **4004** (environment deleted), the client 
 keeps evaluating its last configuration, reports `StatusStale` and an error with code
 `environment_deleted`.
 
+## Test sessions
+
+A shared test session (dashboard: **Scenarios → Shared test session**; Scale plan) pins a
+configuration snapshot and a synthetic context to a token (`nf_ts_…`). A service that receives the
+token in the `x-nanoflags-session` header evaluates against that snapshot, with the session's context
+overlaid by the call's context (the call wins), for that request only. Sampled events from a session
+carry its id. A session changes which snapshot and context an evaluation uses; it grants no data
+access and must not be used for authorization.
+
+```go
+// net/http middleware: reads x-nanoflags-session and resolves the session once per request.
+mux := http.NewServeMux()
+mux.HandleFunc("/cart", func(w http.ResponseWriter, r *http.Request) {
+	flags := client.FlagsFor(r.Context()) // session-scoped while the session is active
+	v2 := flags.BoolVariation("checkout-v2", nanoflags.Context{"key": userID}, false)
+
+	// The next service joins the same session (or add nanoflags.SessionHeaders(r.Context())).
+	downstream := &http.Client{Transport: &nanoflags.SessionTransport{}}
+	req, _ := http.NewRequestWithContext(r.Context(), http.MethodGet, pricingURL, nil)
+	res, err := downstream.Do(req)
+	// …
+})
+http.ListenAndServe(":8080", nanoflags.SessionMiddleware(client)(mux))
+
+// Anywhere else (queues, jobs, tests): carry the token in a context.Context.
+ctx := nanoflags.WithSession(context.Background(), job.SessionToken)
+client.FlagsFor(ctx).BoolVariation("checkout-v2", nanoflags.Context{"key": job.UserID}, false)
+
+// Or resolve one explicitly.
+s := client.Session(ctx, r.Header.Get(nanoflags.SessionHeader), nanoflags.SessionService("checkout-api"))
+s.Active(); s.ID(); s.ExpiresAt(); s.Revision()
+```
+
+| API | Description |
+| --- | --- |
+| `client.Session(ctx, token, opts...) *SessionEvaluator` | resolves the session (`GET /v1/session`) and returns an evaluator scoped to it; `ctx` bounds only the wait |
+| `SessionEvaluator` | the client's variation methods, plus `Active()`, `ID()`, `ExpiresAt()`, `Revision()` |
+| `SessionMiddleware(client, opts...) func(http.Handler) http.Handler` | net/http middleware; the handler runs inside the request's session |
+| `client.FlagsFor(ctx, opts...) *SessionEvaluator` | the evaluator of the request `ctx` belongs to (resolved once per request and client); outside a session it behaves like the client |
+| `WithSession(ctx, token) context.Context` | `ctx` with `token` as the current session; an absent or malformed token leaves any session |
+| `CurrentSession(ctx) string` | the current token, or `""` |
+| `SessionHeaders(ctx) http.Header` | `x-nanoflags-session: token` inside a session, otherwise empty |
+| `SessionTransport{Base}` | `http.RoundTripper` that adds the header to outgoing requests made with a session context |
+| `SessionService(name)` | sent as `X-NanoFlags-Service` (default: `WithService`); a session may be limited to certain services |
+| `SessionHeader`, `IsSessionToken(s)` | `"x-nanoflags-session"`; 1–512 printable ASCII characters |
+
+- The edge is asked once per token and service, concurrent callers share the request, and the
+  answer is cached until the session expires. Unknown tokens are remembered for 15 s, failed
+  lookups (reported through `OnError` with code `session`) for 3 s.
+- It **never fails**: without an active session (absent, malformed, unknown, expired, revoked or not
+  permitted for this service) the evaluator behaves exactly like the client. When a session expires
+  mid-flight, `Active()` turns false and evaluations continue on the published configuration. A
+  newly published revision does not change what an active session evaluates.
+- An unknown session is still propagated downstream: the next service decides for itself.
+- Session bundles are not signed; verification does not apply to them. A revoked session keeps
+  working in a process that already cached it, until its expiry time.
+
 ## Trust and resilience
 
 - **Signatures, on by default.** With the default base URL (`https://edge.nanoflags.io`) every bundle's

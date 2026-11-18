@@ -46,7 +46,7 @@ final class EventQueue {
         }, ms, ms, TimeUnit.MILLISECONDS);
     }
 
-    void record(EngineResult r, Map<String, ?> ctx, NanoFlagsClient.Snapshot s) {
+    void record(EngineResult r, Map<String, ?> ctx, NanoFlagsClient.Snapshot s, String sessionId) {
         if (!opts.enabled || c.closed.get() || opts.sampleRate <= 0 || c.cfg.random.getAsDouble() >= opts.sampleRate) return;
         try {
             synchronized (lock) {
@@ -68,6 +68,7 @@ final class EventQueue {
             }
             e.put("context", context);
             e.put("at", new JsonValue.Str(NanoFlagsClient.isoNow()));
+            if (sessionId != null) e.put("sessionId", new JsonValue.Str(sessionId));
             e.put("sampleRate", new JsonValue.Num(opts.sampleRate));
             JsonValue.Obj built = e.build();
             synchronized (lock) {

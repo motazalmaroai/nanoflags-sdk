@@ -96,6 +96,7 @@ public final class NanoFlagsClient implements AutoCloseable {
     final Verifier verifier;
     final EventQueue events;
     final Listeners listeners;
+    final Sessions sessions;
     final ScheduledExecutorService scheduler;
     private final Live live;
 
@@ -135,6 +136,7 @@ public final class NanoFlagsClient implements AutoCloseable {
         List<NanoFlagsException> cfgErrors = new ArrayList<>();
         this.verifier = Verifier.create(this, cfgErrors);
         this.events = new EventQueue(this);
+        this.sessions = new Sessions(this);
         this.live = new Live(this);
         for (NanoFlagsException e : cfgErrors) emitError(e);
         Bundle boot = cfg.bootstrap;
@@ -273,6 +275,7 @@ public final class NanoFlagsClient implements AutoCloseable {
         join(pollThread);
         live.join();
         scheduler.shutdownNow();
+        sessions.clear();
         markReady();
         listeners.shutdown();
     }
@@ -663,9 +666,18 @@ public final class NanoFlagsClient implements AutoCloseable {
         return d == Math.floor(d) && Math.abs(d) <= 9.007199254740992E15;
     }
 
-    private EngineResult eval(String key, Map<String, ?> ctx, JsonValue fallback, Predicate<JsonValue> accepts, boolean record) {
-        Snapshot s = snap.get();
+    /**
+     * Evaluates against the configuration in use, or, with a live {@code scope}, against the session's pinned bundle
+     * with the context {@code {...session.context, ...ctx}} (the call's attributes win).
+     */
+    private EngineResult eval(Sessions.State scope, String key, Map<String, ?> ctx, JsonValue fallback, Predicate<JsonValue> accepts, boolean record) {
+        Snapshot s = scope != null ? scope.snap : snap.get();
         Map<String, ?> c = ctx == null ? Collections.emptyMap() : ctx;
+        if (scope != null && !scope.context.isEmpty()) {
+            Map<String, Object> merged = new LinkedHashMap<>(scope.context);
+            merged.putAll(c);
+            c = merged;
+        }
         EngineResult res;
         try {
             res = Engine.evaluate(s == null ? JsonValue.NULL : s.bundle.value(), key, EvalContext.of(c), fallback);
@@ -680,7 +692,7 @@ public final class NanoFlagsClient implements AutoCloseable {
             trace.add(new TraceStep("result", "Returned the fallback", msg));
             res = new EngineResult(key, fallback, Reason.ERROR, -1, JsonValue.UNDEFINED, null, null, res.revision(), trace, msg);
         }
-        if (record) events.record(res, c, s);
+        if (record) events.record(res, c, s, scope == null ? null : scope.id);
         return res;
     }
 
@@ -693,45 +705,73 @@ public final class NanoFlagsClient implements AutoCloseable {
 
     private static boolean failed(EngineResult r) { return r.reason() == Reason.ERROR || r.reason() == Reason.FLAG_NOT_FOUND; }
 
+    /* The typed accessors, shared with SessionEvaluator ({@code scope} null: the configuration in use). */
+
+    EvaluationDetail<Boolean> boolDetail(Sessions.State scope, String key, Map<String, ?> context, boolean fallback) {
+        EngineResult r = eval(scope, key, context, JsonValue.Bool.of(fallback), v -> v instanceof JsonValue.Bool, true);
+        return detail(r, r.value() instanceof JsonValue.Bool ? ((JsonValue.Bool) r.value()).value() : fallback);
+    }
+
+    EvaluationDetail<String> stringDetail(Sessions.State scope, String key, Map<String, ?> context, String fallback) {
+        EngineResult r = eval(scope, key, context, fallback == null ? JsonValue.NULL : new JsonValue.Str(fallback), v -> v instanceof JsonValue.Str, true);
+        return detail(r, failed(r) || !(r.value() instanceof JsonValue.Str) ? fallback : ((JsonValue.Str) r.value()).value());
+    }
+
+    EvaluationDetail<Double> doubleDetail(Sessions.State scope, String key, Map<String, ?> context, double fallback) {
+        EngineResult r = eval(scope, key, context, new JsonValue.Num(fallback), NanoFlagsClient::isFinite, true);
+        return detail(r, isFinite(r.value()) ? ((JsonValue.Num) r.value()).value() : fallback);
+    }
+
+    EvaluationDetail<Integer> intDetail(Sessions.State scope, String key, Map<String, ?> context, int fallback) {
+        EngineResult r = eval(scope, key, context, new JsonValue.Num(fallback), NanoFlagsClient::isInt, true);
+        return detail(r, isInt(r.value()) ? (int) ((JsonValue.Num) r.value()).value() : fallback);
+    }
+
+    EvaluationDetail<Long> longDetail(Sessions.State scope, String key, Map<String, ?> context, long fallback) {
+        EngineResult r = eval(scope, key, context, new JsonValue.Num(fallback), NanoFlagsClient::isLong, true);
+        return detail(r, isLong(r.value()) ? (long) ((JsonValue.Num) r.value()).value() : fallback);
+    }
+
+    EvaluationDetail<Object> jsonDetail(Sessions.State scope, String key, Map<String, ?> context, Object fallback) {
+        EngineResult r = eval(scope, key, context, JsonValue.of(fallback), v -> !v.isUndefined(), true);
+        return detail(r, failed(r) ? fallback : r.value().toJava());
+    }
+
+    EvaluationDetail<JsonValue> jsonValueDetail(Sessions.State scope, String key, Map<String, ?> context, JsonValue fallback) {
+        JsonValue fb = fallback == null ? JsonValue.NULL : fallback;
+        EngineResult r = eval(scope, key, context, fb, v -> !v.isUndefined(), true);
+        return detail(r, failed(r) ? fb : r.value());
+    }
+
+    EvaluationDetail<Object> evaluateDetail(Sessions.State scope, String key, Map<String, ?> context, Object fallback) {
+        EngineResult r = eval(scope, key, context, JsonValue.of(fallback), null, true);
+        return detail(r, failed(r) ? fallback : r.value().toJava());
+    }
+
     /** The boolean value of flag {@code key} for {@code context}, or {@code fallback} when it is missing, not loaded, or serves another type. */
     public boolean boolVariation(String key, Map<String, ?> context, boolean fallback) { return boolVariationDetail(key, context, fallback).value(); }
 
-    public EvaluationDetail<Boolean> boolVariationDetail(String key, Map<String, ?> context, boolean fallback) {
-        EngineResult r = eval(key, context, JsonValue.Bool.of(fallback), v -> v instanceof JsonValue.Bool, true);
-        return detail(r, r.value() instanceof JsonValue.Bool ? ((JsonValue.Bool) r.value()).value() : fallback);
-    }
+    public EvaluationDetail<Boolean> boolVariationDetail(String key, Map<String, ?> context, boolean fallback) { return boolDetail(null, key, context, fallback); }
 
     /** The string value of flag {@code key}, or {@code fallback}. */
     public String stringVariation(String key, Map<String, ?> context, String fallback) { return stringVariationDetail(key, context, fallback).value(); }
 
-    public EvaluationDetail<String> stringVariationDetail(String key, Map<String, ?> context, String fallback) {
-        EngineResult r = eval(key, context, fallback == null ? JsonValue.NULL : new JsonValue.Str(fallback), v -> v instanceof JsonValue.Str, true);
-        return detail(r, failed(r) || !(r.value() instanceof JsonValue.Str) ? fallback : ((JsonValue.Str) r.value()).value());
-    }
+    public EvaluationDetail<String> stringVariationDetail(String key, Map<String, ?> context, String fallback) { return stringDetail(null, key, context, fallback); }
 
     /** The (finite) numeric value of flag {@code key}, or {@code fallback}. */
     public double doubleVariation(String key, Map<String, ?> context, double fallback) { return doubleVariationDetail(key, context, fallback).value(); }
 
-    public EvaluationDetail<Double> doubleVariationDetail(String key, Map<String, ?> context, double fallback) {
-        EngineResult r = eval(key, context, new JsonValue.Num(fallback), NanoFlagsClient::isFinite, true);
-        return detail(r, isFinite(r.value()) ? ((JsonValue.Num) r.value()).value() : fallback);
-    }
+    public EvaluationDetail<Double> doubleVariationDetail(String key, Map<String, ?> context, double fallback) { return doubleDetail(null, key, context, fallback); }
 
     /** The value of a number flag that serves whole numbers in the {@code int} range, or {@code fallback}. */
     public int intVariation(String key, Map<String, ?> context, int fallback) { return intVariationDetail(key, context, fallback).value(); }
 
-    public EvaluationDetail<Integer> intVariationDetail(String key, Map<String, ?> context, int fallback) {
-        EngineResult r = eval(key, context, new JsonValue.Num(fallback), NanoFlagsClient::isInt, true);
-        return detail(r, isInt(r.value()) ? (int) ((JsonValue.Num) r.value()).value() : fallback);
-    }
+    public EvaluationDetail<Integer> intVariationDetail(String key, Map<String, ?> context, int fallback) { return intDetail(null, key, context, fallback); }
 
     /** The value of a number flag that serves whole numbers (|n| ≤ 2^53), or {@code fallback}. */
     public long longVariation(String key, Map<String, ?> context, long fallback) { return longVariationDetail(key, context, fallback).value(); }
 
-    public EvaluationDetail<Long> longVariationDetail(String key, Map<String, ?> context, long fallback) {
-        EngineResult r = eval(key, context, new JsonValue.Num(fallback), NanoFlagsClient::isLong, true);
-        return detail(r, isLong(r.value()) ? (long) ((JsonValue.Num) r.value()).value() : fallback);
-    }
+    public EvaluationDetail<Long> longVariationDetail(String key, Map<String, ?> context, long fallback) { return longDetail(null, key, context, fallback); }
 
     /**
      * The value of a JSON flag as plain Java data ({@code null}, {@link Boolean}, {@link Double}, {@link String},
@@ -739,24 +779,57 @@ public final class NanoFlagsClient implements AutoCloseable {
      */
     public Object jsonVariation(String key, Map<String, ?> context, Object fallback) { return jsonVariationDetail(key, context, fallback).value(); }
 
-    public EvaluationDetail<Object> jsonVariationDetail(String key, Map<String, ?> context, Object fallback) {
-        EngineResult r = eval(key, context, JsonValue.of(fallback), v -> !v.isUndefined(), true);
-        return detail(r, failed(r) ? fallback : r.value().toJava());
-    }
+    public EvaluationDetail<Object> jsonVariationDetail(String key, Map<String, ?> context, Object fallback) { return jsonDetail(null, key, context, fallback); }
 
     /** {@link #jsonVariation} with JavaScript-typed values ({@link JsonValue}). */
     public JsonValue jsonValueVariation(String key, Map<String, ?> context, JsonValue fallback) { return jsonValueVariationDetail(key, context, fallback).value(); }
 
-    public EvaluationDetail<JsonValue> jsonValueVariationDetail(String key, Map<String, ?> context, JsonValue fallback) {
-        JsonValue fb = fallback == null ? JsonValue.NULL : fallback;
-        EngineResult r = eval(key, context, fb, v -> !v.isUndefined(), true);
-        return detail(r, failed(r) ? fb : r.value());
-    }
+    public EvaluationDetail<JsonValue> jsonValueVariationDetail(String key, Map<String, ?> context, JsonValue fallback) { return jsonValueDetail(null, key, context, fallback); }
 
     /** The full engine result without any type check ({@code fallback} is converted with {@link JsonValue#of(Object)}). */
-    public EvaluationDetail<Object> evaluate(String key, Map<String, ?> context, Object fallback) {
-        EngineResult r = eval(key, context, JsonValue.of(fallback), null, true);
-        return detail(r, failed(r) ? fallback : r.value().toJava());
+    public EvaluationDetail<Object> evaluate(String key, Map<String, ?> context, Object fallback) { return evaluateDetail(null, key, context, fallback); }
+
+    /* ---------------- test sessions ---------------- */
+
+    /** The header that carries a test-session token between services. */
+    public static final String SESSION_HEADER = Sessions.HEADER;
+
+    /**
+     * Whether {@code token} can be a test-session token: an opaque string that only has to be safe to put in a header
+     * (1 to 512 printable ASCII characters, no spaces).
+     */
+    public static boolean isSessionToken(String token) { return Sessions.isToken(token); }
+
+    /** {@link #session(String, String)} with the client's {@link NanoFlagsOptions.Builder#service service}. */
+    public SessionEvaluator session(String token) { return session(token, null); }
+
+    /**
+     * Resolves a test session ({@code GET /v1/session}, once per token and service until the session expires;
+     * concurrent callers share one request) and returns an evaluator scoped to it. Pass the incoming
+     * {@code x-nanoflags-session} header value. Blocks on the first call per token (at most the request timeout).
+     * Never throws: an absent, malformed, unknown, expired or not permitted token, or a failed lookup (reported
+     * through {@link #onError} with {@link ErrorCode#SESSION}), yields an evaluator whose {@link SessionEvaluator#isActive()}
+     * is false and that behaves like the client.
+     *
+     * @param service sent as {@code X-NanoFlags-Service} ({@code null}: the client's service); a session may be limited to certain services
+     */
+    public SessionEvaluator session(String token, String service) {
+        try {
+            return sessionAsync(token, service).get();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (Exception e) {
+            // never thrown: lookups complete normally
+        }
+        return new SessionEvaluator(this, null);
+    }
+
+    /** {@link #sessionAsync(String, String)} with the client's service. */
+    public CompletableFuture<SessionEvaluator> sessionAsync(String token) { return sessionAsync(token, null); }
+
+    /** {@link #session(String, String)} without blocking: completes (never exceptionally) once the session is resolved. */
+    public CompletableFuture<SessionEvaluator> sessionAsync(String token, String service) {
+        return sessions.resolve(token, service).thenApply(st -> new SessionEvaluator(this, st));
     }
 
     /** Every flag of the configuration in use, as plain Java values (no telemetry). Empty without a configuration. */

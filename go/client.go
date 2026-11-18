@@ -188,6 +188,7 @@ type Client struct {
 
 	listeners listeners
 	events    *eventQueue
+	sessions  sessionCache
 }
 
 // New creates a client for sdkKey (`nf_srv_…` on servers) and starts loading the configuration
@@ -353,6 +354,7 @@ func (c *Client) Close() error {
 	cancel()
 	c.cancel()
 	c.stopStream()
+	c.sessions.clear()
 	c.markReady()
 	c.wg.Wait()
 	return nil
@@ -770,7 +772,25 @@ func acceptNumber(v engine.Value) bool { _, ok := v.Number(); return ok }
 func acceptJSON(v engine.Value) bool   { return !v.IsUndefined() }
 
 func (c *Client) eval(key string, ctx Context, fallback engine.Value, accepts acceptor, record bool) engine.Result {
+	return c.evalIn(nil, key, ctx, fallback, accepts, record)
+}
+
+// evalIn evaluates against the session's pinned bundle with {session.context, ...ctx} when scope
+// is non-nil, otherwise against the configuration in use.
+func (c *Client) evalIn(scope *sessionState, key string, ctx Context, fallback engine.Value, accepts acceptor, record bool) engine.Result {
 	s := c.snap.Load()
+	sessionID := ""
+	if scope != nil {
+		s, sessionID = scope.snap, scope.id
+		merged := make(Context, len(scope.context)+len(ctx))
+		for k, v := range scope.context {
+			merged[k] = v
+		}
+		for k, v := range ctx {
+			merged[k] = v
+		}
+		ctx = merged
+	}
 	var b *engine.Bundle
 	if s != nil {
 		b = s.bundle
@@ -782,7 +802,7 @@ func (c *Client) eval(key string, ctx Context, fallback engine.Value, accepts ac
 			Trace: append(res.Trace, engine.TraceStep{Kind: "result", Title: "Returned the fallback", Detail: msg})}
 	}
 	if record {
-		c.events.record(&res, ctx, s)
+		c.events.record(&res, ctx, s, sessionID)
 	}
 	return res
 }

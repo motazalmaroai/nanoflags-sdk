@@ -27,7 +27,9 @@ name: Auto release
 #            with RELEASE_TAG_TOKEN, which start release-ruby.yml (Trusted Publishing: rubygems.org only trusts that
 #            workflow file, environment `rubygems`). Skipped with a notice while a gem is not on rubygems.org yet or
 #            the secret is missing; skipped while the tag already exists (release-ruby.yml handles it).
-# PyPI (release-python.yml) and Go (go/v* tags) are released by tag as before. PHP is published from the mirrors
+#   Go       github.com/motazalmaroai/nanoflags-sdk/go (SDKVersion in go/client.go) -> tests, then the tag go/v<version>
+#            (the Go module proxy serves tags; nothing to upload).
+# PyPI (release-python.yml) is released by tag as before. PHP is published from the mirrors
 # (php-mirror.yml).
 
 on:
@@ -53,6 +55,7 @@ jobs:
       java: ${{ steps.plan.outputs.java }}
       java_version: ${{ steps.plan.outputs.java_version }}
       dotnet_tag: ${{ steps.plan.outputs.dotnet_tag }}
+      go_version: ${{ steps.plan.outputs.go_version }}
       ruby: ${{ steps.plan.outputs.ruby }}
     steps:
       - uses: actions/checkout@v4
@@ -103,6 +106,10 @@ jobs:
           elif [ "$java_tag" != 0 ]; then echo "maven java $jv: released (java-v$jv exists; Central can take ~30 min to sync)"; echo "java=false" >> "$GITHUB_OUTPUT"
           elif [ "$HAS_MAVEN_SECRETS" != true ]; then echo "::notice title=Maven Central not set up::io.nanoflags:nanoflags-java $jv is not on Maven Central."; echo "java=false" >> "$GITHUB_OUTPUT"
           else echo "maven java $jv: to release"; echo "java=true" >> "$GITHUB_OUTPUT"; fi
+
+          gv=$(sed -n 's/^const SDKVersion = "\(.*\)"$/\1/p' go/client.go)
+          if git ls-remote --tags origin "refs/tags/go/v$gv" | grep -q .; then echo "go $gv: tagged"
+          else echo "go $gv: to tag"; echo "go_version=$gv" >> "$GITHUB_OUTPUT"; fi
 
           dv=$(sed -n 's:.*<VersionPrefix>\(.*\)</VersionPrefix>.*:\1:p' dotnet/Directory.Build.props)
           code=$(curl -s -o /dev/null -w '%{http_code}' "https://api.nuget.org/v3-flatcontainer/nanoflags/$dv/nanoflags.$dv.nupkg")
@@ -317,3 +324,24 @@ jobs:
           for tag in $(jq -r '.[]' <<<"$LIST"); do
             git tag "$tag" "$GITHUB_SHA" && git push origin "refs/tags/$tag" && echo "pushed $tag"
           done
+
+  go:
+    needs: plan
+    if: needs.plan.outputs.go_version != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go/go.mod
+      - name: Test
+        working-directory: go
+        run: go test ./...
+      - name: Tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.plan.outputs.go_version }}
+        run: gh api "repos/$GITHUB_REPOSITORY/git/refs" -f "ref=refs/tags/go/v$VERSION" -f "sha=$GITHUB_SHA" >/dev/null && echo "tagged go/v$VERSION"

@@ -30,7 +30,7 @@ namespace NanoFlags
     public sealed class NanoFlagsClient : IDisposable
     {
         /// <summary>The version of this SDK, reported to the edge as <c>dotnet/&lt;version&gt;</c>.</summary>
-        public const string Version = "0.1.0";
+        public const string Version = "0.2.0";
 
         /// <summary>The newest bundle format (<c>bundle.engine</c>) this SDK evaluates. Newer bundles are refused.</summary>
         public const int SupportedEngineVersion = Evaluator.Version;

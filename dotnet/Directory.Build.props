@@ -7,7 +7,7 @@
     <Deterministic>true</Deterministic>
     <ImplicitUsings>disable</ImplicitUsings>
     <!-- 0.1.0, unreleased (see CHANGELOG.md). -->
-    <VersionPrefix>0.1.0</VersionPrefix>
+    <VersionPrefix>0.2.0</VersionPrefix>
     <Authors>NanoFlags</Authors>
     <Company>NanoFlags</Company>
     <Copyright>Copyright 2026 Alibtekarat Althkiya Company for Trading &amp; Marketing (Intinovate)</Copyright>

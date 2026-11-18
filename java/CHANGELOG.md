@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 — 2026-11-18
 
 - Test sessions (`x-nanoflags-session`), as in the JS and Python SDKs: `NanoFlagsClient.session(token[, service])` /
   `sessionAsync(...)` resolve a shared test session (`GET /v1/session`, cached until it expires; unknown tokens 15 s,

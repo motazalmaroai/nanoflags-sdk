@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 (2026-11-18)
+
+- Requires the `nanoflags` gem ~> 0.2 (test sessions).
 
 - Documented and tested test sessions through `evaluator: -> { NanoFlags.flags_for(client) }` (needs the `nanoflags`
   release with test sessions).

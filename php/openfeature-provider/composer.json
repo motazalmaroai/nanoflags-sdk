@@ -25,7 +25,7 @@
     },
     "require": {
         "php": ">=8.1",
-        "nanoflags/nanoflags": "^0.1",
+        "nanoflags/nanoflags": "^0.2",
         "open-feature/sdk": "^2.0"
     },
     "require-dev": {

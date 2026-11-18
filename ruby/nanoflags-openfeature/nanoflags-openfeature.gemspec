@@ -26,6 +26,6 @@ Gem::Specification.new do |spec|
   spec.files = Dir["lib/**/*.rb"] + %w[README.md CHANGELOG.md LICENSE NOTICE]
   spec.require_paths = ["lib"]
 
-  spec.add_dependency "nanoflags", "~> 0.1"
+  spec.add_dependency "nanoflags", "~> 0.2"
   spec.add_dependency "openfeature-sdk", ">= 0.4", "< 1.0"
 end

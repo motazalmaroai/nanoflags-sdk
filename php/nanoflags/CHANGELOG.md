@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 (2026-11-18)
 
 - Test sessions: `Client::session($token, $service)` and `Client::sessionFromGlobals()` resolve `x-nanoflags-session`
   tokens (`GET /v1/session` with `X-NanoFlags-Session` / `X-NanoFlags-Service`) and return a `SessionEvaluator` that

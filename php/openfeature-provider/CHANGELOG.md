@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 (2026-11-18)
+
+- Requires `nanoflags/nanoflags` ^0.2 (test sessions).
 
 - Documented test sessions through the `$evaluator` argument (`fn () => $flags->sessionFromGlobals()`).
 

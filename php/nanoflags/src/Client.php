@@ -52,7 +52,7 @@ use Psr\SimpleCache\CacheInterface;
  */
 final class Client
 {
-    public const SDK_VERSION = '0.1.0';
+    public const SDK_VERSION = '0.2.0';
     /** The newest bundle format (`bundle.engine`) this SDK evaluates. Newer bundles are refused. */
     public const SUPPORTED_ENGINE_VERSION = Engine::VERSION;
     /** Header that carries a test-session token between services. */

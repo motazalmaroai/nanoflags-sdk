@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 (2026-11-18)
 
 - Live updates over the edge's WebSocket (`/v1/live`, subprotocol `nanoflags.v1`, the key in the `Authorization`
   header): the same protocol as the JavaScript, Python, Go and Java SDKs. `hello` / `rev` pushes are verified like

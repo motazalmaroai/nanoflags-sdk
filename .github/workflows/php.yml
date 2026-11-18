@@ -82,7 +82,7 @@ jobs:
         run: composer validate --strict --no-check-lock
       - name: Install (nanoflags/nanoflags from this repository)
         run: |
-          composer config repositories.nanoflags '{"type": "path", "url": "../nanoflags", "options": {"symlink": false, "versions": {"nanoflags/nanoflags": "0.1.0"}}}'
+          composer config repositories.nanoflags '{"type": "path", "url": "../nanoflags", "options": {"symlink": false, "versions": {"nanoflags/nanoflags": "'"$(sed -n "s/.*SDK_VERSION = '\\(.*\\)';/\\1/p" ../nanoflags/src/Client.php)"'"}}}'
           composer install --no-interaction --no-progress --prefer-dist
       - name: Test
         run: vendor/bin/phpunit

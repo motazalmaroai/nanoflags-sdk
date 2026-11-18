@@ -61,6 +61,36 @@ export interface FlagConfig {
   off: JsonValue;
   /** Only client-exposed flags are included in bundles served to browser keys. */
   clientExposed?: boolean;
+  /** The experiment running on this flag in this environment, if any (see `exposureOf`). */
+  experiment?: ExperimentMeta;
+}
+
+/**
+ * Experiment metadata carried by a flag while an experiment runs on it. SDKs use it to log exposures; evaluation itself
+ * never reads it, so a bundle evaluates identically with or without it.
+ */
+export interface ExperimentMeta {
+  /** Experiment id (UUID). Exposures name it. */
+  id: string;
+  /** Human-readable experiment key (for logs only). */
+  key: string;
+  /** Only evaluations decided by this rule count as exposures (both sides of its rollout). */
+  ruleId: string;
+  /** Context attribute identifying the unit of randomisation. Default "key" (the rule's `bucketBy`). */
+  unit?: string;
+  /** Share of the rule's units enrolled in the experiment, 0–100. Default 100. */
+  traffic?: number;
+  /** Seed of the enrollment hash; independent of the rollout seed so enrollment does not correlate with the variant. */
+  seed: string;
+  /** Variant keys and the flag values that identify them. The first variant is the control. */
+  variants: { key: string; value: JsonValue }[];
+}
+
+/** One unit's exposure to an experiment. `unit` is the raw identity: SDKs must hash it before it leaves the process. */
+export interface Exposure {
+  experiment: string;
+  variant: string;
+  unit: string;
 }
 
 export interface Segment {
@@ -159,6 +189,29 @@ export function murmur3(input: string, seed = 0): number {
 /** Bucket in [0, 100) with two decimals of resolution. Stable for a given seed + identity. */
 export function bucketOf(seed: string, identity: string): number {
   return (murmur3(`${seed}:${identity}`) % 10000) / 100;
+}
+
+/* ---------------- experiments ---------------- */
+
+/**
+ * The exposure an evaluation represents, or null. An evaluation is an exposure when the flag carries experiment
+ * metadata, the experiment's rule decided it, the unit attribute is present, the unit falls inside the experiment's
+ * traffic (`bucketOf(seed, unit) < traffic`) and the served value is one of the variants. Deterministic: the same flag,
+ * context and value always give the same answer, so SDKs only have to de-duplicate repeated exposures.
+ */
+export function exposureOf(flag: FlagConfig | undefined, evaluation: Pick<Evaluation, "reason" | "ruleId" | "value">, ctx: Context): Exposure | null {
+  const x = flag?.experiment;
+  if (!x || typeof x !== "object" || typeof x.id !== "string" || !Array.isArray(x.variants)) return null;
+  if (evaluation.reason !== "rule_match" || evaluation.ruleId !== x.ruleId) return null;
+  const identity = own(ctx, x.unit ?? "key");
+  if (identity === undefined || identity === null || identity === "" || typeof identity === "object" || typeof identity === "boolean") return null;
+  const unit = String(identity);
+  const traffic = typeof x.traffic === "number" ? x.traffic : 100;
+  if (traffic < 100 && !(bucketOf(x.seed, unit) < traffic)) return null;
+  for (const v of x.variants) {
+    if (v && typeof v.key === "string" && looseEq(v.value, evaluation.value as JsonValue)) return { experiment: x.id, variant: v.key, unit };
+  }
+  return null;
 }
 
 /* ---------------- conditions ---------------- */
@@ -374,6 +427,10 @@ export function diffBundles(before: Pick<Bundle, "flags" | "segments"> | null, a
     if (a.enabled !== b.enabled) rows.push({ flagKey, field: "enabled", before: String(a.enabled), after: String(b.enabled) });
     if (!looseEq(a.default, b.default)) rows.push({ flagKey, field: "default", before: fmt(a.default), after: fmt(b.default) });
     if (!looseEq(a.off, b.off)) rows.push({ flagKey, field: "off value", before: fmt(a.off), after: fmt(b.off) });
+    if (JSON.stringify(a.experiment ?? null) !== JSON.stringify(b.experiment ?? null)) {
+      const label = (x: ExperimentMeta | undefined) => (x ? `${x.key} (${x.traffic ?? 100}% of rule ${x.ruleId})` : "—");
+      rows.push({ flagKey, field: "experiment", before: label(a.experiment), after: b.experiment ? label(b.experiment) : "stopped" });
+    }
     const n = Math.max(a.rules.length, b.rules.length);
     for (let i = 0; i < n; i++) {
       const ra = a.rules[i];

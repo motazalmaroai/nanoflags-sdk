@@ -32,6 +32,10 @@ $details = $client->getStringDetails('accent', 'blue', new EvaluationContext($us
 Configure the `Client` exactly as without OpenFeature (cache, verification, telemetry, `refresh: false` with the sync
 daemon, …); see the SDK README.
 
+For test sessions (`x-nanoflags-session`, needs a `nanoflags/nanoflags` release with `Client::session()`), pass the
+request's evaluator: `new NanoFlagsProvider($flags, fn () => $flags->sessionFromGlobals())` (or the evaluator the
+PSR-15 `NanoFlags\SessionMiddleware` put on the request). Outside a session it behaves exactly like the client.
+
 ## Mapping
 
 | NanoFlags | OpenFeature |

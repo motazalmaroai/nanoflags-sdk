@@ -100,6 +100,34 @@ final class NanoFlagsProviderTest extends TestCase
         self::assertEquals(ErrorCode::FLAG_NOT_FOUND(), $d->getError()?->getResolutionErrorCode());
     }
 
+    public function testTestSessionsThroughTheEvaluator(): void
+    {
+        $edge = new class () implements Transport {
+            public function send(string $method, string $url, array $headers, ?string $body, float $timeout): Response
+            {
+                if (str_ends_with($url, '/v1/session')) {
+                    if (($headers['X-NanoFlags-Session'] ?? null) !== 'nf_ts_of') {
+                        return new Response(404, [], '{}');
+                    }
+                    $pinned = str_replace('"default":"blue"', '"default":"session"', NanoFlagsProviderTest::bundleText());
+                    return new Response(200, [], '{"id":"s1","context":{"plan":"beta"},"expires_at":"2999-01-01T00:00:00Z","bundle":' . $pinned . '}');
+                }
+                return new Response(200, ['etag' => '"x"'], '{"revision":3,"checksum":"x","bundle":' . NanoFlagsProviderTest::bundleText() . '}');
+            }
+        };
+        $flags = new Client('nf_srv_test', baseUrl: 'https://flags.test', cache: new MemoryStore(), http: $edge, verify: false, events: false);
+        $token = null;
+        $p = new NanoFlagsProvider($flags, function () use ($flags, &$token) {
+            return $flags->session($token);
+        });
+        self::assertSame('blue', $p->resolveStringValue('accent', 'x')->getValue());
+        $token = 'nf_ts_of';
+        self::assertSame('session', $p->resolveStringValue('accent', 'x')->getValue());
+        $d = $p->resolveBooleanValue('new-checkout', false, new EvaluationContext('u1'));
+        self::assertTrue($d->getValue()); // the session context (plan: beta) applies
+        self::assertSame(Reason::TARGETING_MATCH, $d->getReason());
+    }
+
     public function testProviderNotReady(): void
     {
         $p = new NanoFlagsProvider(self::client(false));

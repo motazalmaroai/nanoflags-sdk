@@ -8,8 +8,8 @@ use NanoFlags\Http\Response;
 use NanoFlags\Http\Transport;
 
 /**
- * An in-memory edge: /v1/bundle (ETag, 304, signatures exactly as the hosted edge makes them), /v1/keys and
- * /v1/events, signing with a throwaway Ed25519 key.
+ * An in-memory edge: /v1/bundle (ETag, 304, signatures exactly as the hosted edge makes them), /v1/keys,
+ * /v1/events and /v1/session, signing with a throwaway Ed25519 key.
  */
 final class FakeEdge implements Transport
 {
@@ -34,6 +34,8 @@ final class FakeEdge implements Transport
     public array $requests = [];
     /** @var list<array<string, mixed>> */
     public array $events = [];
+    /** @var array<string, array<string, mixed>|int> test sessions by token (an int: answer with that status) */
+    public array $sessions = [];
 
     public function __construct()
     {
@@ -97,6 +99,16 @@ final class FakeEdge implements Transport
         }
         if ($this->statusOverride !== null) {
             return new Response($this->statusOverride, [], '{"error":{"code":"x","message":"x"}}');
+        }
+        if ($path === '/v1/session') {
+            $sess = $this->sessions[$headers['X-NanoFlags-Session'] ?? ''] ?? null;
+            if ($sess === null) {
+                return new Response(404, [], '{"error":{"code":"session_not_found","message":"x"}}');
+            }
+            if (is_int($sess)) {
+                return new Response($sess, [], '{"error":{"code":"x","message":"x"}}');
+            }
+            return new Response(200, ['content-type' => 'application/json'], (string) json_encode($sess, JSON_UNESCAPED_SLASHES));
         }
         if ($path === '/v1/events' && $method === 'POST') {
             $this->events[] = json_decode((string) $body, true);

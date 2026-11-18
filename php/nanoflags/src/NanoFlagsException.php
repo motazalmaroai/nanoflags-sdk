@@ -8,7 +8,8 @@ namespace NanoFlags;
  * An error of the client. It is reported through `onError` listeners and {@see Client::lastError()}; an accessor
  * never throws it. A failed update never changes the configuration in use.
  *
- * Codes: "network", "unauthorized", "http", "invalid_bundle", "store", "config", "signature", "engine".
+ * Codes: "network", "unauthorized", "http", "invalid_bundle", "store", "config", "signature", "engine", "session" (a
+ * test session could not be loaded).
  */
 final class NanoFlagsException extends \RuntimeException
 {
@@ -20,6 +21,7 @@ final class NanoFlagsException extends \RuntimeException
     public const CONFIG = 'config';
     public const SIGNATURE = 'signature';
     public const ENGINE = 'engine';
+    public const SESSION = 'session';
 
     public function __construct(
         string $message,

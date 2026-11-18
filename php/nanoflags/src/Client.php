@@ -44,6 +44,8 @@ use Psr\SimpleCache\CacheInterface;
  * - Sampled evaluation events (no attribute values by default) are buffered in the cache and sent at most once per
  *   flush interval, at the end of a request.
  *
+ * Test sessions (`x-nanoflags-session`) are resolved on demand with {@see session()}.
+ *
  * Create one client per request (or per worker in long-running PHP); construction does no I/O. For a fleet of web
  * workers that should never wait for the edge, run `vendor/bin/nanoflags-sync` (it keeps the shared cache current,
  * optionally over the edge's event stream) and create the web clients with `refresh: false`.
@@ -53,12 +55,23 @@ final class Client
     public const SDK_VERSION = '0.1.0';
     /** The newest bundle format (`bundle.engine`) this SDK evaluates. Newer bundles are refused. */
     public const SUPPORTED_ENGINE_VERSION = Engine::VERSION;
+    /** Header that carries a test-session token between services. */
+    public const SESSION_HEADER = 'x-nanoflags-session';
+    /** @internal */
+    public const ACCEPT_NUMBER = [self::class, 'acceptsNumber'];
+    /** @internal */
+    public const ACCEPT_ANY = [self::class, 'acceptsAny'];
 
     private const MAX_QUEUE = 500;
     private const MAX_BATCH = 50;
     private const MAX_EVENT_VALUE_CHARS = 1024;
     private const KEYS_REFETCH = 60.0;
     private const MEMO_SIZE = 16;
+    private const MAX_SESSIONS = 1000;
+    private const SESSION_MISS_TTL = 15.0;
+    private const SESSION_ERROR_TTL = 3.0;
+    /** Longest time an active session is kept in the shared cache before it is asked for again. */
+    private const SESSION_SHARED_TTL = 3600;
 
     /** @var array<string, array{JsObject, array<string, true>}> parsed bundles by text hash, with the signatures verified for them */
     private static array $memo = [];
@@ -109,6 +122,8 @@ final class Client
     private string $attrsFor = '';
     /** @var list<string> event JSON texts */
     private array $queue = [];
+    /** @var array<string, array{0: ?array, 1: float}> resolved test sessions of this client: [state, valid until] */
+    private array $sessions = [];
 
     /**
      * @param string $sdkKey `nf_srv_…` (server view) or `nf_pub_…` (client-exposed flags only)
@@ -288,13 +303,13 @@ final class Client
     /** A number flag; whole numbers are returned as int. */
     public function numberVariation(string $key, int|float $default, array|JsObject|\stdClass|null $context = null): int|float
     {
-        return $this->detail($key, $default, $context, self::acceptsNumber(...))->value;
+        return $this->detail($key, $default, $context, self::ACCEPT_NUMBER)->value;
     }
 
     /** A JSON flag as plain PHP data (objects as associative arrays); any served value is accepted. */
     public function jsonVariation(string $key, mixed $default, array|JsObject|\stdClass|null $context = null): mixed
     {
-        return $this->detail($key, $default, $context, static fn ($v) => !($v instanceof Undefined))->value;
+        return $this->detail($key, $default, $context, self::ACCEPT_ANY)->value;
     }
 
     public function boolVariationDetail(string $key, bool $default, array|JsObject|\stdClass|null $context = null): EvaluationDetail
@@ -309,12 +324,12 @@ final class Client
 
     public function numberVariationDetail(string $key, int|float $default, array|JsObject|\stdClass|null $context = null): EvaluationDetail
     {
-        return $this->detail($key, $default, $context, self::acceptsNumber(...));
+        return $this->detail($key, $default, $context, self::ACCEPT_NUMBER);
     }
 
     public function jsonVariationDetail(string $key, mixed $default, array|JsObject|\stdClass|null $context = null): EvaluationDetail
     {
-        return $this->detail($key, $default, $context, static fn ($v) => !($v instanceof Undefined));
+        return $this->detail($key, $default, $context, self::ACCEPT_ANY);
     }
 
     /** The full engine result without any type check. */
@@ -363,29 +378,48 @@ final class Client
         return $out;
     }
 
-    /** @param (callable(mixed): bool)|null $accepts */
-    private function detail(string $key, mixed $default, array|JsObject|\stdClass|null $context, ?callable $accepts): EvaluationDetail
+    /**
+     * @param (callable(mixed): bool)|null $accepts
+     * @param array{id: string, bundle: JsObject, context: JsObject}|null $scope an active test session
+     */
+    private function detail(string $key, mixed $default, array|JsObject|\stdClass|null $context, ?callable $accepts, ?array $scope = null): EvaluationDetail
     {
         try {
             $this->ensure();
-            $s = $this->snapshot;
-            $ctx = self::toContext($context);
+            if ($scope !== null) {
+                $bundle = $scope['bundle'];
+                $members = $scope['context']->members();
+                foreach (self::toContext($context)->members() as $k => $v) {
+                    $members[$k] = $v; // the request's context wins
+                }
+                $ctx = new JsObject($members);
+            } else {
+                $bundle = $this->snapshot['bundle'] ?? null;
+                $ctx = self::toContext($context);
+            }
             $fallback = Js::fromPhp($default);
-            $r = Engine::evaluate($s['bundle'] ?? null, $key, $ctx, $fallback);
+            $r = Engine::evaluate($bundle, $key, $ctx, $fallback);
             if ($accepts !== null && $r->reason !== Reason::FLAG_NOT_FOUND && $r->reason !== Reason::ERROR && !$accepts($r->value)) {
                 $error = sprintf('Flag "%s" has a %s value, which does not match the requested type.', $key, Js::typeName($r->value));
                 $r = new Result($key, $fallback, Reason::ERROR, $r->revision, null, Undefined::value(), null, null, [...$r->trace, new TraceStep('result', 'Returned the fallback', $error)], $error);
             }
-            $this->record($r, $context, $ctx, $s['bundle'] ?? null);
+            $this->record($r, $scope === null ? $context : null, $ctx, $bundle, $scope['id'] ?? null);
             return EvaluationDetail::fromResult($r, $default);
         } catch (\Throwable $e) {
             return new EvaluationDetail($key, $default, Reason::ERROR, 0, null, null, null, null, [], $e->getMessage());
         }
     }
 
-    private static function acceptsNumber(mixed $v): bool
+    /** @internal */
+    public static function acceptsNumber(mixed $v): bool
     {
         return is_float($v) && is_finite($v);
+    }
+
+    /** @internal */
+    public static function acceptsAny(mixed $v): bool
+    {
+        return !($v instanceof Undefined);
     }
 
     private static function toContext(array|JsObject|\stdClass|null $context): JsObject
@@ -981,6 +1015,208 @@ final class Client
         }
     }
 
+    /* ================================================================== test sessions */
+
+    /**
+     * Resolves a test session and returns an evaluator scoped to it. Pass the incoming `x-nanoflags-session` header
+     * value. Never throws: an unknown, expired, revoked or not permitted session (or a failed lookup) yields an
+     * evaluator that behaves exactly like the client.
+     *
+     * The edge is asked once per token and service (`GET /v1/session`, the token in `X-NanoFlags-Session`, $service —
+     * default: the client's service — in `X-NanoFlags-Service`). An active session is kept until it expires: in this
+     * client and, under its own key, in the shared cache (the normal bundle entry is never touched). Unknown tokens
+     * are remembered for 15 s and failed lookups for 3 s, in this client only, so that arbitrary header values cannot
+     * fill the shared cache. `offline: true` resolves nothing.
+     */
+    public function session(?string $token, ?string $service = null): SessionEvaluator
+    {
+        $valid = self::isSessionToken($token);
+        $state = null;
+        if ($valid) {
+            try {
+                $state = $this->resolveSession((string) $token, $service);
+            } catch (\Throwable) {
+                $state = null; // never throws
+            }
+        }
+        return new SessionEvaluator(
+            $valid ? $token : null,
+            $state,
+            fn (string $key, mixed $default, mixed $context, ?callable $accepts, ?array $scope): EvaluationDetail => $this->detail($key, $default, $context, $accepts, $scope),
+            fn (): float => $this->now(),
+            fn (): ?int => $this->revision(),
+        );
+    }
+
+    /** {@see session()} for the `X-NanoFlags-Session` header of the current request (`$_SERVER`). */
+    public function sessionFromGlobals(?string $service = null): SessionEvaluator
+    {
+        $v = $_SERVER['HTTP_X_NANOFLAGS_SESSION'] ?? null;
+        return $this->session(is_string($v) ? trim($v) : null, $service);
+    }
+
+    /** A session token is opaque; it only has to be safe to put in a header (1–512 printable ASCII characters). */
+    public static function isSessionToken(mixed $v): bool
+    {
+        return is_string($v) && preg_match('/^[\x21-\x7e]{1,512}$/D', $v) === 1;
+    }
+
+    /** @return array{id: string, bundle: JsObject, raw: string, context: JsObject, expiresAt: string, expiresAtTs: float, revision: int}|null */
+    private function resolveSession(string $token, ?string $service): ?array
+    {
+        if ($this->offline || !preg_match('#^https?://#i', $this->baseUrl)) {
+            return null;
+        }
+        // The published configuration is what the evaluator falls back to (and loading registers the telemetry flush).
+        $this->safeEnsure();
+        $name = $service !== null && $service !== '' ? $service : ($this->service !== 'unknown' ? $this->service : null);
+        $memoKey = ($name ?? '') . "\n" . $token;
+        $now = $this->now();
+        $hit = $this->sessions[$memoKey] ?? null;
+        if ($hit !== null && $now < $hit[1]) {
+            return $hit[0];
+        }
+        unset($this->sessions[$memoKey]);
+
+        $hash = hash('sha256', $this->id . "\n" . $memoKey);
+        $state = $this->readSharedSession($hash, $now);
+        $failed = false;
+        if ($state === null) {
+            [$state, $failed] = $this->fetchSession($token, $name, $now);
+            if ($state !== null) {
+                $this->writeSharedSession($hash, $state, $now);
+            }
+        }
+        if (count($this->sessions) >= self::MAX_SESSIONS) {
+            $this->sessions = array_filter($this->sessions, static fn ($e) => $now < $e[1]);
+            while (count($this->sessions) >= self::MAX_SESSIONS) {
+                array_shift($this->sessions); // oldest first
+            }
+        }
+        $this->sessions[$memoKey] = [$state, $state !== null ? $state['expiresAtTs'] : $now + ($failed ? self::SESSION_ERROR_TTL : self::SESSION_MISS_TTL)];
+        return $state;
+    }
+
+    /**
+     * @return array{0: ?array{id: string, bundle: JsObject, raw: string, context: JsObject, expiresAt: string, expiresAtTs: float, revision: int}, 1: bool}
+     *         the session (null: no such session) and whether the lookup failed
+     */
+    private function fetchSession(string $token, ?string $service, float $now): array
+    {
+        try {
+            $headers = $this->headers();
+            $headers['X-NanoFlags-Session'] = $token;
+            $headers['Cache-Control'] = 'no-store';
+            if ($service !== null) {
+                $headers['X-NanoFlags-Service'] = $service;
+            }
+            try {
+                $res = $this->http->send('GET', $this->baseUrl . '/v1/session', $headers, null, $this->timeout);
+            } catch (\Throwable $e) {
+                throw new NanoFlagsException('Could not load the test session: ' . $e->getMessage(), NanoFlagsException::SESSION, null, $e);
+            }
+            if ($res->status === 404) {
+                return [null, false];
+            }
+            if ($res->status < 200 || $res->status > 299) {
+                throw new NanoFlagsException(sprintf('Session request failed with HTTP %d.', $res->status), $res->status === 401 || $res->status === 403 ? NanoFlagsException::UNAUTHORIZED : NanoFlagsException::SESSION, $res->status);
+            }
+            try {
+                $body = Json::parse($res->body);
+            } catch (\Throwable) {
+                $body = null;
+            }
+            $bundle = $body instanceof JsObject ? $body->get('bundle') : null;
+            $id = $body instanceof JsObject ? $body->get('id') : null;
+            $expiresAtTs = $body instanceof JsObject ? self::parseTime($body->get('expires_at')) : null;
+            if (!is_string($id) || !Engine::isBundle($bundle) || $expiresAtTs === null) {
+                throw new NanoFlagsException('The edge returned an invalid session.', NanoFlagsException::SESSION);
+            }
+            /** @var JsObject $body */
+            /** @var JsObject $bundle */
+            if (!Engine::supportsEngine($bundle->get('engine'))) {
+                throw $this->engineError($bundle);
+            }
+            if ($expiresAtTs <= $now) {
+                return [null, false];
+            }
+            $context = $body->get('context');
+            return [[
+                'id' => $id, 'bundle' => $bundle, 'raw' => Signature::rawMember($res->body, 'bundle') ?? (string) Js::stringify($bundle),
+                'context' => $context instanceof JsObject ? $context : new JsObject([]),
+                'expiresAt' => self::isoNow($expiresAtTs), 'expiresAtTs' => $expiresAtTs, 'revision' => self::revisionOf($bundle),
+            ], false];
+        } catch (NanoFlagsException $e) {
+            $this->emitError($e);
+            return [null, true];
+        } catch (\Throwable $e) {
+            $this->emitError(new NanoFlagsException('Could not load the test session: ' . $e->getMessage(), NanoFlagsException::SESSION, null, $e));
+            return [null, true];
+        }
+    }
+
+    private static function parseTime(mixed $v): ?float
+    {
+        if (!is_string($v) || !preg_match('/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})$/D', $v)) {
+            return null;
+        }
+        try {
+            $t = (float) (new \DateTimeImmutable($v))->format('U.u');
+        } catch (\Throwable) {
+            return null;
+        }
+        return is_finite($t) ? $t : null;
+    }
+
+    /**
+     * An active session from the shared cache. Its key (`nanoflags.session.<hash>.<client>`) is separate from the
+     * bundle entry and names a hash of the service and token, never the token itself.
+     *
+     * @return array{id: string, bundle: JsObject, raw: string, context: JsObject, expiresAt: string, expiresAtTs: float, revision: int}|null
+     */
+    private function readSharedSession(string $hash, float $now): ?array
+    {
+        if ($this->store === null) {
+            return null;
+        }
+        try {
+            $e = json_decode((string) $this->store->get($this->cacheKey('session.' . substr($hash, 0, 40))), true);
+            if (!is_array($e) || ($e['v'] ?? null) !== 1 || ($e['key'] ?? null) !== $hash || !is_string($e['id'] ?? null) || !is_string($e['raw'] ?? null) || !is_string($e['context'] ?? null) || !is_numeric($e['expiresAtTs'] ?? null)) {
+                return null;
+            }
+            $expiresAtTs = (float) $e['expiresAtTs'];
+            if ($expiresAtTs <= $now) {
+                return null;
+            }
+            $parsed = $this->parseBundle($e['raw'], null);
+            $context = Json::parse($e['context']);
+            if ($parsed === null || !Engine::supportsEngine($parsed[0]->get('engine')) || !($context instanceof JsObject)) {
+                return null;
+            }
+        } catch (\Throwable) {
+            return null; // fetched again
+        }
+        return [
+            'id' => $e['id'], 'bundle' => $parsed[0], 'raw' => $e['raw'], 'context' => $context,
+            'expiresAt' => self::isoNow($expiresAtTs), 'expiresAtTs' => $expiresAtTs, 'revision' => self::revisionOf($parsed[0]),
+        ];
+    }
+
+    /** @param array{id: string, raw: string, context: JsObject, expiresAtTs: float} $state */
+    private function writeSharedSession(string $hash, array $state, float $now): void
+    {
+        if ($this->store === null) {
+            return;
+        }
+        $ttl = (int) max(1, min(self::SESSION_SHARED_TTL, ceil($state['expiresAtTs'] - $now)));
+        $entry = ['v' => 1, 'key' => $hash, 'id' => $state['id'], 'expiresAtTs' => $state['expiresAtTs'], 'context' => (string) Js::stringify($state['context']), 'raw' => $state['raw']];
+        try {
+            $this->store->set($this->cacheKey('session.' . substr($hash, 0, 40)), (string) json_encode($entry, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE), $ttl);
+        } catch (\Throwable $e) {
+            $this->emitError(new NanoFlagsException('Could not cache the test session: ' . $e->getMessage(), NanoFlagsException::STORE, null, $e));
+        }
+    }
+
     /* ================================================================== daemon / relay */
 
     /**
@@ -1057,7 +1293,7 @@ final class Client
     /* ================================================================== telemetry */
 
     /** @param array<mixed>|JsObject|\stdClass|null $userContext */
-    private function record(Result $r, array|JsObject|\stdClass|null $userContext, JsObject $ctx, ?JsObject $bundle): void
+    private function record(Result $r, array|JsObject|\stdClass|null $userContext, JsObject $ctx, ?JsObject $bundle, ?string $sessionId = null): void
     {
         if (!$this->eventsEnabled || $this->sampleRate <= 0 || ($this->random)() >= $this->sampleRate || count($this->queue) >= self::MAX_QUEUE) {
             return;
@@ -1081,6 +1317,9 @@ final class Client
             $ev['revision'] = is_finite($rev) ? (float) (int) $rev : 0.0;
             $ev['context'] = $context;
             $ev['at'] = self::isoNow($this->now());
+            if ($sessionId !== null) {
+                $ev['sessionId'] = $sessionId;
+            }
             $ev['sampleRate'] = $this->sampleRate;
             $this->queue[] = (string) Js::stringify(new JsObject($ev));
         } catch (\Throwable) {

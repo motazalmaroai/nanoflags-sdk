@@ -30,11 +30,13 @@
         "symfony/polyfill-intl-normalizer": "^1.27"
     },
     "require-dev": {
-        "phpunit/phpunit": "^10.5 || ^11.0"
+        "phpunit/phpunit": "^10.5 || ^11.0",
+        "psr/http-server-middleware": "^1.0"
     },
     "suggest": {
         "ext-sodium": "Required to verify bundle signatures (on by default for the hosted edge); or install paragonie/sodium_compat",
         "paragonie/sodium_compat": "Pure-PHP signature verification where ext-sodium is not available",
+        "psr/http-server-middleware": "For NanoFlags\\SessionMiddleware (PSR-15 test-session middleware); PSR-15 frameworks already have it",
         "ext-curl": "Built-in HTTP transport (a stream-based fallback is used without it, or pass any PSR-18 client)",
         "ext-apcu": "Default shared bundle cache between requests of one PHP-FPM pool",
         "ext-intl": "Faster Unicode normalisation for percentage rollouts (symfony/polyfill-intl-normalizer otherwise)"

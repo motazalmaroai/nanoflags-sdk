@@ -146,6 +146,42 @@ new Client($key, http: $psr18Client, requestFactory: $psr17Factory, streamFactor
 Configure the client's own timeout (short: a bundle request can run on the request path) and disable redirects.
 The built-in curl transport honours `HTTPS_PROXY` / `NO_PROXY` and `CURL_CA_BUNDLE` / `SSL_CERT_FILE`.
 
+### Test sessions (`x-nanoflags-session`)
+
+A test session, created in the dashboard (**Scenarios → Shared test session**), pins a configuration snapshot and a
+synthetic context to a token (`nf_ts_…`). A service that receives the token in the `x-nanoflags-session` header
+evaluates against that snapshot, with the context `session context + your context` (yours wins), for that request
+only. Sampled events from a session carry its id. Shared test sessions are part of the Scale plan.
+
+```php
+// Plain PHP / Laravel / Symfony: the header of the current request
+$f = $flags->sessionFromGlobals();              // or $flags->session($request->headers->get('x-nanoflags-session'))
+$f->boolVariation('checkout-v2', false, ['key' => $userId]); // session-scoped while the session is active
+$f->isActive(); $f->id(); $f->expiresAt(); $f->revision();
+$http->request('GET', $pricingUrl, ['headers' => $f->headers()]); // the next service joins the session ([] outside one)
+
+// PSR-15 (Slim, Mezzio, …): the evaluator becomes the request attribute "nanoflags.flags"
+$app->add(new NanoFlags\SessionMiddleware($flags));
+$f = $request->getAttribute(NanoFlags\SessionMiddleware::ATTRIBUTE);
+```
+
+- `session($token, $service = null)` asks the edge once per token and service (`GET /v1/session`, the token in
+  `X-NanoFlags-Session`, `$service` — default: the client's `service` — in `X-NanoFlags-Service`). It **never throws**:
+  an unknown, expired, revoked or not permitted session (or a failed lookup, reported as a `session` error) gives an
+  evaluator that behaves exactly like the client, so one code path serves normal traffic and tests. When a session
+  expires mid-request, `isActive()` turns false and evaluations continue on the published configuration.
+- **Caching.** An active session is kept until it expires: in the client and in the shared cache, under its own key
+  (`nanoflags.session.<hash>.<client>`, a hash of service and token — the token itself is never stored, and the
+  bundle entry that every other request uses is never touched), with the session's expiry as TTL (at most 1 h, then
+  it is asked for again). Unknown tokens are remembered for 15 s and failed lookups for 3 s **in the client only**, so
+  arbitrary header values cannot fill the shared cache. `offline: true` resolves nothing; with `refresh: false` sessions
+  are still fetched on demand (the sync daemon cannot know the tokens).
+- `NanoFlags\SessionMiddleware` implements PSR-15's `MiddlewareInterface`, which every PSR-15 framework already
+  installs (`psr/http-server-middleware`); it is not a dependency of this package, so do not load the class without it.
+- A session changes which snapshot and context an evaluation uses. It grants no data access and must not be used for
+  authorization. Client keys only receive client-exposed flags, in sessions too. Session bundles are not signed;
+  verification does not apply to them. A revoked session keeps working where it is cached until it expires.
+
 ### OpenFeature
 
 ```php
@@ -172,9 +208,11 @@ See [`nanoflags/openfeature-provider`](../openfeature-provider/README.md).
 | `status()` (`not-ready` / `ready` / `stale`), `revision()`, `source()` (`network` / `cache` / `bootstrap`), `isReady()`, `bundleJson()` | state |
 | `onError(callable)` → unsubscribe, `lastError()` | errors (`NanoFlagsException` with `errorCode`) |
 | `refresh()`, `flush()`, `run($pollInterval, $stream, $duration)` | revalidate now, send telemetry now, sync loop (daemon) |
+| `session($token, $service = null)`, `sessionFromGlobals($service = null)` → `SessionEvaluator` | test session: the typed variations, `evaluate`, `isActive()`, `id()`, `expiresAt()`, `revision()`, `headers()` |
+| `SessionMiddleware`, `Client::SESSION_HEADER`, `Client::isSessionToken($v)` | PSR-15 middleware, header name, token check |
 
 `baseUrl` defaults to the hosted edge `https://edge.nanoflags.io`. Error codes: `network`, `unauthorized`, `http`,
-`invalid_bundle`, `store`, `config`, `signature`, `engine`. Nothing is ever thrown from a variation call; without a
+`invalid_bundle`, `store`, `config`, `signature`, `engine`, `session`. Nothing is ever thrown from a variation call; without a
 listener or logger, errors are only visible through `lastError()`.
 
 ## Behaviour
@@ -199,8 +237,8 @@ listener or logger, errors are only visible through `lastError()`.
   drop some buffered events.
 - **Offline.** `offline: true` never touches the network (bootstrap and cache only, no telemetry), for tests and
   air-gapped builds. `bootstrap:` takes a bundle (JSON text or a decoded array) used when nothing better is available.
-- **Not included yet:** test sessions (`x-nanoflags-session`) and the live WebSocket (`/v1/live`); request-scoped
-  PHP revalidates per request instead, and the sync daemon uses the event stream.
+- **Not included:** the live WebSocket (`/v1/live`); request-scoped PHP revalidates per request instead, and the sync
+  daemon uses the event stream.
 
 ## Development
 

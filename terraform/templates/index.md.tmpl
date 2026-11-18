@@ -1,0 +1,45 @@
+---
+page_title: "NanoFlags Provider"
+description: |-
+  Manage NanoFlags feature flags, targeting, segments and publishing as code.
+---
+
+# NanoFlags Provider
+
+The NanoFlags provider manages feature flags, their per-environment targeting (rules and percentage rollouts),
+segments and publishing through the [NanoFlags Management API](https://nanoflags.io/docs/api-reference).
+Every request runs as the person who created the token, with that person's current role, narrowed by the token's
+scopes, and is recorded in the audit log.
+
+## Authentication
+
+Create a Management API token (`nf_api_…`) in the dashboard under **Settings → API tokens** (organization owners and
+admins). Give it the scopes the resources you use need, and prefer a token scoped to one project:
+
+| Resource / data source | Scopes |
+| --- | --- |
+| `nanoflags_flag`, `nanoflags_flag_environment`, data source `nanoflags_flag` | `flags:read`, `flags:write` |
+| `nanoflags_segment` | `segments:read`, `segments:write` |
+| `nanoflags_environment_publish` | `publish`, `flags:read` |
+| `nanoflags_slack_destination` | `integrations:write` (admin role) |
+| data source `nanoflags_sdk_keys` | `keys:read` (admin role) |
+| data sources `nanoflags_project`, `nanoflags_environment`, `nanoflags_environments` | any valid token |
+
+Pass the token through the `NANOFLAGS_API_TOKEN` environment variable rather than in configuration.
+
+## Drafts and publishing
+
+Flag and segment changes edit each environment's **draft**, exactly like the dashboard; SDKs only receive published
+revisions. Publish with `nanoflags_environment_publish`, or through the dashboard's review flow in environments that
+require approvals or scenario checks.
+
+## What the API does not manage
+
+Projects, environments and SDK keys are created in the dashboard; the provider reads them with data sources. Flags
+cannot be deleted, only archived: destroying a `nanoflags_flag` archives it.
+
+## Example Usage
+
+{{ tffile "examples/provider/provider.tf" }}
+
+{{ .SchemaMarkdown | trimspace }}

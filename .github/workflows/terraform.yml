@@ -1,0 +1,162 @@
+name: Terraform provider
+
+# Builds and tests terraform/ (terraform-provider-nanoflags) on pull requests and pushes. It publishes only on a tag
+# terraform-v<version> (e.g. terraform-v0.1.0), never on a branch:
+#   1. tests again, then checks that terraform/CHANGELOG.md has a "## <version>" entry;
+#   2. splits terraform/ into the mirror repository (default motazalmaroai/terraform-provider-nanoflags; repository
+#      variable TERRAFORM_PROVIDER_REPO overrides it) and tags it v<version>, because the Terraform Registry only reads
+#      repositories named terraform-provider-<name> with v<semver> tags;
+#   3. runs GoReleaser in that mirror checkout: signed SHA256SUMS + manifest on a GitHub release of the mirror, which the
+#      Registry picks up through its webhook.
+# Secrets (environment `terraform-registry`): TERRAFORM_MIRROR_TOKEN (fine-grained token limited to the mirror,
+# Contents: read and write), GPG_PRIVATE_KEY (ASCII-armored) and GPG_PASSPHRASE. The release is skipped with a notice
+# while any of them is missing. See terraform/PUBLISHING.md.
+
+on:
+  push:
+    branches: [main]
+    tags: ["terraform-v*"]
+    paths: ["terraform/**", ".github/workflows/terraform.yml"]
+  pull_request:
+    paths: ["terraform/**", ".github/workflows/terraform.yml"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: terraform-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  test:
+    name: Test (Terraform ${{ matrix.terraform }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        terraform: ["1.5.7", "latest"]
+    defaults:
+      run:
+        working-directory: terraform
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: terraform/go.mod
+          cache-dependency-path: terraform/go.sum
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ matrix.terraform }}
+          terraform_wrapper: false
+      - name: Format
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; echo "::error::run gofmt -w ."; exit 1; }
+      - name: Vet
+        run: go vet ./...
+      - name: Unit tests (fake API, no credentials)
+        run: go test -count=1 ./...
+      - name: Docs are up to date
+        if: matrix.terraform == 'latest'
+        run: |
+          go generate ./...
+          git diff --exit-code -- docs || { echo "::error::docs/ is stale: run go generate ./... in terraform/"; exit 1; }
+      - name: Examples are formatted
+        if: matrix.terraform == 'latest'
+        run: terraform fmt -check -recursive examples
+
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: terraform/go.mod
+          cache-dependency-path: terraform/go.sum
+      - name: GoReleaser check and snapshot build (unsigned, not published)
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          workdir: terraform
+          args: release --snapshot --clean --skip=sign,publish
+      - uses: actions/upload-artifact@v4
+        with:
+          name: terraform-provider-nanoflags-snapshot
+          path: terraform/dist/*.zip
+          retention-days: 7
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/terraform-v')
+    needs: [test, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: terraform-registry
+    env:
+      MIRROR: ${{ vars.TERRAFORM_PROVIDER_REPO || 'motazalmaroai/terraform-provider-nanoflags' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # Pushes to the mirror use TERRAFORM_MIRROR_TOKEN; a persisted GITHUB_TOKEN header would override it.
+          persist-credentials: false
+      - id: plan
+        env:
+          HAS_SECRETS: ${{ secrets.TERRAFORM_MIRROR_TOKEN != '' && secrets.GPG_PRIVATE_KEY != '' && secrets.GPG_PASSPHRASE != '' }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#terraform-v}"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then echo "::error::$GITHUB_REF_NAME is not terraform-v<semver>"; exit 1; fi
+          if ! grep -q "^## $version\b" terraform/CHANGELOG.md; then echo "::error::terraform/CHANGELOG.md has no '## $version' entry"; exit 1; fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ "$HAS_SECRETS" != true ]; then
+            echo "::notice title=Terraform Registry not set up::Add TERRAFORM_MIRROR_TOKEN, GPG_PRIVATE_KEY and GPG_PASSPHRASE to the terraform-registry environment to publish (terraform/PUBLISHING.md)."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Split terraform/ into the mirror and tag it
+        if: steps.plan.outputs.ready == 'true'
+        env:
+          TOKEN: ${{ secrets.TERRAFORM_MIRROR_TOKEN }}
+          VERSION: ${{ steps.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name "nanoflags-release"
+          git config user.email "support@nanoflags.io"
+          sha=$(git subtree split --prefix terraform)
+          remote="https://x-access-token:${TOKEN}@github.com/${MIRROR}.git"
+          # The mirror is generated from this repository; its history is replaced by the split.
+          git push --force "$remote" "$sha:refs/heads/main"
+          if git ls-remote --tags "$remote" "refs/tags/v$VERSION" | grep -q .; then
+            echo "::error::$MIRROR already has v$VERSION"; exit 1
+          fi
+          git push "$remote" "$sha:refs/tags/v$VERSION"
+      - uses: actions/checkout@v4
+        if: steps.plan.outputs.ready == 'true'
+        with:
+          repository: ${{ env.MIRROR }}
+          ref: v${{ steps.plan.outputs.version }}
+          token: ${{ secrets.TERRAFORM_MIRROR_TOKEN }}
+          path: mirror
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        if: steps.plan.outputs.ready == 'true'
+        with:
+          go-version-file: mirror/go.mod
+          cache-dependency-path: mirror/go.sum
+      - id: gpg
+        if: steps.plan.outputs.ready == 'true'
+        uses: crazy-max/ghaction-import-gpg@v6
+        with:
+          gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
+          passphrase: ${{ secrets.GPG_PASSPHRASE }}
+      - name: Release to the mirror with GoReleaser
+        if: steps.plan.outputs.ready == 'true'
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          workdir: mirror
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.TERRAFORM_MIRROR_TOKEN }}
+          GPG_FINGERPRINT: ${{ steps.gpg.outputs.fingerprint }}

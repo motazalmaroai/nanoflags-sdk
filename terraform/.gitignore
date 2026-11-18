@@ -1,0 +1,6 @@
+/terraform-provider-nanoflags
+/dist/
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl

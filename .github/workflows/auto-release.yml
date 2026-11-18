@@ -16,7 +16,14 @@ name: Auto release
 #            accepts OIDC publishing from a tag push, and tags pushed with the workflow token start no workflow.
 #            Skipped with a notice while the package is not on pub.dev yet (the first upload of each package is
 #            manual, a pub.dev rule) or the secret is missing.
-# PyPI (release-python.yml) and Go (go/v* tags) are released by tag as before.
+#   Maven    io.nanoflags:nanoflags-java{,-openfeature} (java/gradle.properties nanoflags.version), same secrets and
+#            environment as Kotlin. Tagged java-v<version> afterwards.
+#   NuGet    NanoFlags, NanoFlags.OpenFeature (dotnet/Directory.Build.props VersionPrefix)
+#            -> pushes the tag dotnet-v<version> with RELEASE_TAG_TOKEN, which starts release-dotnet.yml (Trusted
+#            Publishing: nuget.org only trusts that workflow file). Skipped with a notice until the repository variable
+#            NUGET_USER (the nuget.org profile name) exists.
+# PyPI (release-python.yml) and Go (go/v* tags) are released by tag as before. PHP is published from the mirrors
+# (php-mirror.yml) and Ruby by hand (ruby/PUBLISHING.md).
 
 on:
   push:
@@ -38,12 +45,16 @@ jobs:
       maven: ${{ steps.plan.outputs.maven }}
       maven_version: ${{ steps.plan.outputs.maven_version }}
       dart: ${{ steps.plan.outputs.dart }}
+      java: ${{ steps.plan.outputs.java }}
+      java_version: ${{ steps.plan.outputs.java_version }}
+      dotnet_tag: ${{ steps.plan.outputs.dotnet_tag }}
     steps:
       - uses: actions/checkout@v4
       - id: plan
         env:
           HAS_MAVEN_SECRETS: ${{ secrets.CENTRAL_TOKEN_USERNAME != '' && secrets.GPG_SIGNING_KEY != '' }}
           HAS_TAG_TOKEN: ${{ secrets.RELEASE_TAG_TOKEN != '' }}
+          NUGET_USER: ${{ vars.NUGET_USER }}
         run: |
           set -euo pipefail
           npm_list=()
@@ -77,6 +88,22 @@ jobs:
             else echo "pub.dev $pkg $v: to release"; dart_list+=("\"dart-$pkg-v$v\""); fi
           done
           echo "dart=[$(IFS=,; echo "${dart_list[*]}")]" >> "$GITHUB_OUTPUT"
+
+          jv=$(sed -n 's/^nanoflags.version=//p' java/gradle.properties)
+          echo "java_version=$jv" >> "$GITHUB_OUTPUT"
+          code=$(curl -s -o /dev/null -w '%{http_code}' "https://repo1.maven.org/maven2/io/nanoflags/nanoflags-java/$jv/nanoflags-java-$jv.pom")
+          if [ "$code" = 200 ]; then echo "maven java $jv: published"; echo "java=false" >> "$GITHUB_OUTPUT"
+          elif [ "$HAS_MAVEN_SECRETS" != true ]; then echo "::notice title=Maven Central not set up::io.nanoflags:nanoflags-java $jv is not on Maven Central."; echo "java=false" >> "$GITHUB_OUTPUT"
+          else echo "maven java $jv: to release"; echo "java=true" >> "$GITHUB_OUTPUT"; fi
+
+          dv=$(sed -n 's:.*<VersionPrefix>\(.*\)</VersionPrefix>.*:\1:p' dotnet/Directory.Build.props)
+          code=$(curl -s -o /dev/null -w '%{http_code}' "https://api.nuget.org/v3-flatcontainer/nanoflags/$dv/nanoflags.$dv.nupkg")
+          tag_exists=$(git ls-remote --tags origin "refs/tags/dotnet-v$dv" | wc -l)
+          if [ "$code" = 200 ]; then echo "nuget NanoFlags $dv: published"
+          elif [ "$tag_exists" != 0 ]; then echo "nuget NanoFlags $dv: tag dotnet-v$dv exists (release-dotnet.yml handles it)"
+          elif [ -z "$NUGET_USER" ]; then echo "::notice title=NUGET_USER missing::NanoFlags $dv needs the repository variable NUGET_USER (nuget.org profile name) for Trusted Publishing."
+          elif [ "$HAS_TAG_TOKEN" != true ]; then echo "::notice title=RELEASE_TAG_TOKEN missing::NanoFlags $dv needs RELEASE_TAG_TOKEN to start release-dotnet.yml."
+          else echo "nuget NanoFlags $dv: to release"; echo "dotnet_tag=dotnet-v$dv" >> "$GITHUB_OUTPUT"; fi
 
   npm:
     needs: plan
@@ -182,3 +209,68 @@ jobs:
           for tag in $(jq -r '.[]' <<<"$LIST"); do
             git tag "$tag" "$GITHUB_SHA" && git push origin "refs/tags/$tag" && echo "pushed $tag"
           done
+
+  java:
+    needs: plan
+    if: needs.plan.outputs.java == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    environment: maven-central
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: java
+    env:
+      VERSION: ${{ needs.plan.outputs.java_version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Test
+        run: ./gradlew --no-daemon test
+      - name: Build and sign
+        env:
+          ORG_GRADLE_PROJECT_signingKey: ${{ secrets.GPG_SIGNING_KEY }}
+          ORG_GRADLE_PROJECT_signingPassword: ${{ secrets.GPG_SIGNING_PASSWORD }}
+        run: |
+          ./gradlew --no-daemon publishAllPublicationsToStagingRepository
+          missing=$(find build/staging-deploy -type f \( -name '*.jar' -o -name '*.pom' -o -name '*.module' \) ! -exec test -e '{}.asc' \; -print)
+          if [ -n "$missing" ]; then echo "::error::unsigned files: $missing"; exit 1; fi
+          (cd build/staging-deploy && zip -qr ../central-bundle.zip io)
+      - name: Upload to the Central Portal and publish
+        env:
+          CENTRAL_USER: ${{ secrets.CENTRAL_TOKEN_USERNAME }}
+          CENTRAL_PASS: ${{ secrets.CENTRAL_TOKEN_PASSWORD }}
+        run: |
+          token=$(printf '%s:%s' "$CENTRAL_USER" "$CENTRAL_PASS" | base64 -w0)
+          id=$(curl -sSf -X POST -H "Authorization: Bearer $token" -F "bundle=@build/central-bundle.zip" \
+            "https://central.sonatype.com/api/v1/publisher/upload?name=nanoflags-java-$VERSION&publishingType=AUTOMATIC")
+          echo "deployment id: $id"
+          for i in $(seq 1 120); do
+            state=$(curl -sSf -X POST -H "Authorization: Bearer $token" "https://central.sonatype.com/api/v1/publisher/status?id=$id" | jq -r .deploymentState)
+            echo "state: $state"
+            case "$state" in PUBLISHING|PUBLISHED) exit 0;; FAILED) exit 1;; esac
+            sleep 15
+          done
+          echo "::error::deployment $id did not validate in time"; exit 1
+      - name: Tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api "repos/$GITHUB_REPOSITORY/git/refs" -f "ref=refs/tags/java-v$VERSION" -f "sha=$GITHUB_SHA" >/dev/null || echo "::warning::could not create java-v$VERSION"
+
+  dotnet:
+    needs: plan
+    if: needs.plan.outputs.dotnet_tag != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.RELEASE_TAG_TOKEN }}
+      - env:
+          TAG: ${{ needs.plan.outputs.dotnet_tag }}
+        run: git tag "$TAG" "$GITHUB_SHA" && git push origin "refs/tags/$TAG" && echo "pushed $TAG"

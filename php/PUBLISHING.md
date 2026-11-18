@@ -1,6 +1,6 @@
 # Publishing the PHP packages
 
-Nothing has been published. Two Composer packages live here:
+Published from the mirrors kept by `.github/workflows/php-mirror.yml`. Two Composer packages live here:
 
 | Package | Directory |
 | --- | --- |
@@ -32,4 +32,5 @@ Composer versions come from Git tags of the mirrors (`composer.json` carries no 
 3. Packagist updates within a minute through the hook. Verify with `composer require nanoflags/nanoflags:^0.1` in an
    empty project.
 
-No workflow in this repository publishes PHP packages; `auto-release.yml` does not look at `php/`.
+`php-mirror.yml` does steps 2 automatically: on every push to main touching `php/` it splits both packages into
+their mirrors (secret `PHP_MIRROR_TOKEN`) and tags `v<version>` there when the latest CHANGELOG heading is dated.

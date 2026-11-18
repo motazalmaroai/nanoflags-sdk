@@ -1,0 +1,56 @@
+name: PHP mirrors
+
+# Packagist only reads a package from the root of a repository, so php/nanoflags and php/openfeature-provider are
+# split into the read-only mirrors motazalmaroai/nanoflags-php and motazalmaroai/nanoflags-php-openfeature on every
+# push to main that touches php/. A version is released by dating its CHANGELOG heading ("## 0.1.0 (2026-11-18)"):
+# when that tag (v0.1.0) is missing on the mirror it is created there, and Packagist picks it up through its hook.
+# The SDK mirror is synced and tagged before the provider, whose constraint needs the SDK on Packagist.
+# Secret PHP_MIRROR_TOKEN: a fine-grained token limited to the two mirrors, Contents: read and write.
+
+on:
+  push:
+    branches: [main]
+    paths: ["php/**", ".github/workflows/php-mirror.yml"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: php-mirror
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      max-parallel: 1
+      matrix:
+        include:
+          - prefix: php/nanoflags
+            repo: motazalmaroai/nanoflags-php
+          - prefix: php/openfeature-provider
+            repo: motazalmaroai/nanoflags-php-openfeature
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Split and push
+        env:
+          TOKEN: ${{ secrets.PHP_MIRROR_TOKEN }}
+          PREFIX: ${{ matrix.prefix }}
+          REPO: ${{ matrix.repo }}
+        run: |
+          set -euo pipefail
+          if [ -z "$TOKEN" ]; then echo "::notice title=PHP_MIRROR_TOKEN missing::$REPO is not synced."; exit 0; fi
+          git config user.name "nanoflags-release"
+          git config user.email "support@nanoflags.io"
+          sha=$(git subtree split --prefix "$PREFIX")
+          remote="https://x-access-token:${TOKEN}@github.com/${REPO}.git"
+          # The mirror is generated from this repository; its history is replaced by the split.
+          git push --force "$remote" "$sha:refs/heads/main"
+          version=$(sed -n 's/^## \([0-9][0-9.]*\) (\([0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}\)).*/\1/p' "$PREFIX/CHANGELOG.md" | head -1)
+          if [ -z "$version" ]; then echo "$REPO: latest CHANGELOG entry is not dated, no tag"; exit 0; fi
+          if git ls-remote --tags "$remote" "refs/tags/v$version" | grep -q .; then echo "$REPO: v$version exists"; exit 0; fi
+          git push "$remote" "$sha:refs/tags/v$version"
+          echo "$REPO: tagged v$version"

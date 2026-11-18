@@ -1,6 +1,6 @@
 # Publishing the Java SDK to Maven Central
 
-Nothing has been published. Two artifacts go to Maven Central under the namespace **`io.nanoflags`** (the same
+Released by `.github/workflows/auto-release.yml` (job `java`). Two artifacts go to Maven Central under the namespace **`io.nanoflags`** (the same
 namespace as the Kotlin SDK, see [`kotlin/PUBLISHING.md`](../kotlin/PUBLISHING.md)):
 
 | Coordinates | Packaging |
@@ -24,7 +24,11 @@ Kotlin SDK: follow section 1 of [`kotlin/PUBLISHING.md`](../kotlin/PUBLISHING.md
 (`CENTRAL_TOKEN_USERNAME`, `CENTRAL_TOKEN_PASSWORD`, `GPG_SIGNING_KEY`, `GPG_SIGNING_PASSWORD`) and the protected
 environment `maven-central` serve both.
 
-## 2. Release workflow (proposed, not added)
+## 2. Release workflow
+
+**Current:** `auto-release.yml` releases the Java artifacts on a push to main when `java/gradle.properties` carries a
+version that is not on Maven Central (AUTOMATIC publishing after the `maven-central` approval), then tags
+`java-v<version>`. The tag-based variant below is kept for reference.
 
 Tag `java-v<version>`. Same flow as the Kotlin release: check the tag against `java/gradle.properties`, refuse a
 version that is already on Central, test, build and sign into the staging directory, upload a **user-managed**

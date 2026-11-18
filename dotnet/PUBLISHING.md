@@ -1,6 +1,6 @@
 # Publishing the .NET SDK to NuGet
 
-Nothing has been published. Two packages go to [nuget.org](https://www.nuget.org):
+Released by `.github/workflows/release-dotnet.yml`, started by `auto-release.yml`. Two packages go to [nuget.org](https://www.nuget.org):
 
 | Package | Targets |
 | --- | --- |
@@ -27,7 +27,11 @@ embedded in CI builds).
    pattern `NanoFlags*`, 365 days) stored as the repository secret `NUGET_API_KEY`.
 4. Protect the publishing job with a GitHub environment `nuget` (required reviewer: the founder).
 
-## 2. Release workflow (proposed, not added)
+## 2. Release workflow
+
+**Current:** on a push to main, `auto-release.yml` pushes the tag `dotnet-v<version>` (with `RELEASE_TAG_TOKEN`) when
+`VersionPrefix` is not on nuget.org and the repository variable `NUGET_USER` exists; that tag starts
+`release-dotnet.yml`, which is the file below.
 
 Tag `dotnet-v<version>`. It checks the tag against `VersionPrefix` in `dotnet/Directory.Build.props`, refuses a
 version that is already on nuget.org, runs the tests, packs and pushes both packages.

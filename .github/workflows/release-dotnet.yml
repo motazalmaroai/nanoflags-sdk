@@ -1,0 +1,52 @@
+name: Release .NET SDK
+
+# Tag dotnet-v<version>, pushed by auto-release.yml when dotnet/Directory.Build.props carries a version that is not on
+# nuget.org yet. Publishes NanoFlags and NanoFlags.OpenFeature with nuget.org Trusted Publishing (no stored API key):
+# the nuget.org policy trusts this workflow file and the environment `nuget` (required reviewer: the founder).
+# Repository variable NUGET_USER: the nuget.org profile name that owns the policy (not a secret).
+
+on:
+  push:
+    tags: ["dotnet-v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-dotnet
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: nuget
+    permissions:
+      contents: read
+      id-token: write # Trusted Publishing
+    defaults:
+      run:
+        working-directory: dotnet
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: Check the tag matches Directory.Build.props
+        run: |
+          version=$(sed -n 's:.*<VersionPrefix>\(.*\)</VersionPrefix>.*:\1:p' Directory.Build.props)
+          if [ "${GITHUB_REF_NAME#dotnet-v}" != "$version" ]; then echo "::error::tag $GITHUB_REF_NAME does not match $version"; exit 1; fi
+          if curl -sf "https://api.nuget.org/v3-flatcontainer/nanoflags/$version/nanoflags.$version.nupkg" -o /dev/null; then
+            echo "::error::NanoFlags $version is already on nuget.org"; exit 1; fi
+      - name: Test
+        run: dotnet test -c Release
+      - name: Pack
+        run: dotnet pack -c Release -o artifacts
+      - uses: NuGet/login@v1
+        id: login
+        with:
+          user: ${{ vars.NUGET_USER }}
+      - name: Push to nuget.org
+        env:
+          NUGET_API_KEY: ${{ steps.login.outputs.NUGET_API_KEY }}
+        run: dotnet nuget push "artifacts/*.nupkg" --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate

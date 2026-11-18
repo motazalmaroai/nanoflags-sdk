@@ -71,7 +71,7 @@ jobs:
           mv=$(sed -n 's/^nanoflags.version=//p' kotlin/gradle.properties)
           echo "maven_version=$mv" >> "$GITHUB_OUTPUT"
           code=$(curl -s -o /dev/null -w '%{http_code}' "https://repo1.maven.org/maven2/io/nanoflags/nanoflags-core/$mv/nanoflags-core-$mv.pom")
-          if [ "$code" = 200 ]; then echo "maven $mv: published"; echo "maven=false" >> "$GITHUB_OUTPUT"
+          if [ "$code" = 200 ] || git ls-remote --tags origin "refs/tags/kotlin-v$mv" | grep -q .; then echo "maven $mv: published or released"; echo "maven=false" >> "$GITHUB_OUTPUT"
           elif [ "$HAS_MAVEN_SECRETS" != true ]; then
             echo "::notice title=Maven Central not set up::io.nanoflags $mv is not on Maven Central; add the Central and GPG secrets to release it (kotlin/PUBLISHING.md)."
             echo "maven=false" >> "$GITHUB_OUTPUT"
@@ -92,7 +92,9 @@ jobs:
           jv=$(sed -n 's/^nanoflags.version=//p' java/gradle.properties)
           echo "java_version=$jv" >> "$GITHUB_OUTPUT"
           code=$(curl -s -o /dev/null -w '%{http_code}' "https://repo1.maven.org/maven2/io/nanoflags/nanoflags-java/$jv/nanoflags-java-$jv.pom")
+          java_tag=$(git ls-remote --tags origin "refs/tags/java-v$jv" | wc -l)
           if [ "$code" = 200 ]; then echo "maven java $jv: published"; echo "java=false" >> "$GITHUB_OUTPUT"
+          elif [ "$java_tag" != 0 ]; then echo "maven java $jv: released (java-v$jv exists; Central can take ~30 min to sync)"; echo "java=false" >> "$GITHUB_OUTPUT"
           elif [ "$HAS_MAVEN_SECRETS" != true ]; then echo "::notice title=Maven Central not set up::io.nanoflags:nanoflags-java $jv is not on Maven Central."; echo "java=false" >> "$GITHUB_OUTPUT"
           else echo "maven java $jv: to release"; echo "java=true" >> "$GITHUB_OUTPUT"; fi
 

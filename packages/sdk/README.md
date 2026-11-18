@@ -114,6 +114,7 @@ createClient({
   bootstrap?: Bundle,
   store?: { get(): Promise<string | null>; set(v: string): Promise<void> } | false,
   events?: { enabled?: boolean /* true */, sampleRate?: number /* 0.1 */, flushIntervalMs?: number /* 10000 */, reportIntervalMs?: number /* 60000 */, redact?: (ctx) => object } | false,
+  experiments?: { enabled?: boolean /* true */, flushIntervalMs?: number /* 5000 */ } | false, // see Experiments
   verify?: { publicKeys?: JsonWebKey[] | "fetch", require?: boolean } | false, // default: see Signature verification
   fetch?: typeof fetch,
   // Platform integration (used by @nanoflags/react-native; most apps never set these):
@@ -136,7 +137,8 @@ createClient({
 | `session(token, { service? })` | `Promise<SessionEvaluator>` for a test session. Never rejects. See [Test sessions](#test-sessions). |
 | `useSession(token \| null)` / `sessionHeaders()` | Browser only: join or leave a test session for this page session; headers for downstream calls. |
 | `on("update" \| "error", cb)` | Returns an unsubscribe function. `update` receives `{ revision, previousRevision, checksum, source, transport, latencyMs }` (see [Updates](#updates)). `error` receives a `NanoFlagsError` with `code`: `network`, `unauthorized`, `http`, `invalid_bundle`, `store`, `config`, `signature`, `session`, `engine` (bundle for a newer engine, refused), `environment_deleted`. With no `error` listener attached, the SDK logs each error code once with `console.warn`. |
-| `refresh()` / `flush()` / `close()` | Revalidate now / send queued telemetry now / stop all background work. |
+| `track(eventName, value?, ctx?)` | Record a metric event for experiments (`track("checkout_completed", 42.5, { key: user.id })`). Sends the event name, the optional number and the hashed unit only. Never throws. See [Experiments](#experiments). |
+| `refresh()` / `flush()` / `close()` | Revalidate now / send queued telemetry, exposures and track events now / stop all background work. |
 
 ## Fallbacks and staleness
 
@@ -373,6 +375,37 @@ then dropped). Batches that fail to send are dropped, never retried. Disable wit
   default 10 % sampling, rarely evaluated flags can go unseen for a long time.
 - Counts are estimates. Sampling is per evaluation, events are dropped under back-pressure or network
   failure, and React components may evaluate once per relevant change rather than once per user action.
+
+## Experiments
+
+Experiments run on a flag's percentage rollout rule (see [/docs/experiments](https://nanoflags.io/docs/experiments)).
+While one runs, the published bundle carries its metadata on that flag, and the SDK does two things:
+
+- **Exposures, automatically.** The first time a unit evaluates the flag through the experiment's rule (and falls
+  inside the experiment's traffic), the SDK queues `{ experiment, variant, unit }`. Exposures are **never sampled**
+  (the `events.sampleRate` does not apply) and are de-duplicated per unit in the process (20,000 most recent units);
+  the database de-duplicates across processes. `allFlags()` and test sessions never log exposures.
+- **Metric events, with `track()`.**
+
+```ts
+client.track("signup_completed", { key: user.id });            // conversion / count metrics
+client.track("checkout_completed", order.total, { key: user.id }); // value metrics (sum, mean per unit)
+```
+
+The unit is the context's `key` (and the unit attribute of every experiment in the bundle, e.g. `accountId`). An
+event counts for an experiment when the unit was exposed to it (up to 10 minutes later is fine: exposure and event may
+come from different processes). Name your events like the metrics in the dashboard's catalog; events no metric uses
+are dropped by NanoFlags.
+
+**What is sent.** Only `sha256("nanoflags-unit-v1\n" + project + "\n" + environment + "\n" + attribute + "\n" + identity)`
+as the unit — never the identity, the context, other attributes or flag values. NanoFlags stores a keyed HMAC of that
+hash. Queued items go to `POST /v1/exposures` (first) and `POST /v1/track` every `experiments.flushIntervalMs` (5 s),
+sooner when 100 are queued, and on `flush()` / `close()`. Queues are bounded (5,000 each). Exposures are retried after
+a network error, 429 or 5xx; track events are sent at most once. In serverless functions, `await client.flush()`
+before returning. Turn both off with `experiments: false`.
+
+Experiments start and stop with a publish: the SDK starts logging when it loads a revision with the metadata. Other
+SDKs implement the same protocol (documented at [/docs/experiments/track](https://nanoflags.io/docs/experiments/track)).
 
 ## Development
 

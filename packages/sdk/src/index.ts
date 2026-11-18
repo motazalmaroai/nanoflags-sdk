@@ -2,20 +2,23 @@
  * @nanoflags/sdk — isomorphic core.
  *
  * Flags are evaluated locally and synchronously against an in-memory bundle. The network is only
- * used in the background: to load the bundle, to learn about new revisions, and to send sampled
- * telemetry. A flag accessor never performs I/O and never throws.
+ * used in the background: to load the bundle, to learn about new revisions, to send sampled
+ * telemetry, and — for flags with a running experiment — exposures and `track()` events (hashed units only).
+ * A flag accessor never performs I/O and never throws.
  *
  * New revisions arrive over one of three transports, best first: the live WebSocket (`/v1/live`,
  * the edge pushes the signed bundle itself — no request follows), the SSE stream (`/v1/stream`,
  * a notification followed by a conditional fetch), and polling (`/v1/bundle`).
  */
-import { ENGINE_VERSION, evaluate as engineEvaluate, murmur3, supportsEngine, type Bundle, type Condition, type Context, type Evaluation, type JsonValue } from "@nanoflags/engine";
+import { ENGINE_VERSION, evaluate as engineEvaluate, exposureOf, murmur3, supportsEngine, type Bundle, type Condition, type Context, type Evaluation, type JsonValue } from "@nanoflags/engine";
+import { unitHash } from "./sha256.js";
 import { OFFICIAL_EDGE_URL, OFFICIAL_SIGNING_KEYS } from "./keys.js";
 import { defaultStore, type Store } from "./store.js";
 import { readSse } from "./sse.js";
 import { importPublicKeys, isPublicEd25519Jwk, rawMember, verifyBundleText, type ImportedKey, type SignatureCrypto, type SignatureInfo, type VerifyOptions } from "./verify.js";
 
-export type { Bundle, Context, Evaluation, JsonValue, Reason } from "@nanoflags/engine";
+export type { Bundle, Context, Evaluation, ExperimentMeta, JsonValue, Reason } from "@nanoflags/engine";
+export { sha256Hex, unitHash } from "./sha256.js";
 export type { Store } from "./store.js";
 export type { SignatureCrypto, VerifyOptions } from "./verify.js";
 export { OFFICIAL_EDGE_URL, OFFICIAL_SIGNING_KEYS } from "./keys.js";
@@ -99,6 +102,16 @@ export interface EventsOptions {
   random?: () => number;
 }
 
+export interface ExperimentsOptions {
+  /**
+   * Default true. Log an exposure the first time a unit evaluates a flag that carries a running experiment (published
+   * bundles include its metadata), and send `track()` events. Exposures are never sampled. `false` turns both off.
+   */
+  enabled?: boolean;
+  /** Default 5000. How often queued exposures and track events are sent (sooner when 100 are queued). */
+  flushIntervalMs?: number;
+}
+
 export interface ClientOptions {
   /** `nf_srv_…` on servers, `nf_pub_…` in browsers. Never ship a server key to a browser. */
   sdkKey: string;
@@ -124,6 +137,8 @@ export interface ClientOptions {
   /** Persistence. Default: IndexedDB in browsers, none elsewhere. `false` disables it. */
   store?: Store | false;
   events?: EventsOptions | false;
+  /** Experiments: exposure logging and `track()`. See `ExperimentsOptions`. */
+  experiments?: ExperimentsOptions | false;
   /**
    * Verify bundle signatures before a new bundle replaces the current one. A bundle whose signature
    * does not verify is rejected: the previous bundle stays in use and an `error` (`code: "signature"`)
@@ -229,7 +244,15 @@ export interface NanoFlagsClient {
   on(event: "error", cb: (e: Error) => void): () => void;
   /** Force a revalidation now. Resolves when it finished (successfully or not). */
   refresh(): Promise<void>;
-  /** Send queued telemetry now. */
+  /**
+   * Record a metric event for experiments, e.g. `track("checkout_completed", 42.5, { key: user.id })`. The unit is taken
+   * from the context (`key`, and the unit attribute of every experiment in the bundle); only its SHA-256 hash, scoped to
+   * the project and environment, is sent — never the context. Events whose name no metric uses are dropped by NanoFlags.
+   * `value` is optional (needed for value metrics). Synchronous, never throws, never performs I/O itself.
+   */
+  track(eventName: string, ctx?: Context): void;
+  track(eventName: string, value: number | null | undefined, ctx?: Context): void;
+  /** Send queued telemetry, exposures and track events now. */
   flush(): Promise<void>;
   /** Stops timers, the stream and telemetry. Evaluations keep working on the last bundle. */
   close(): void;
@@ -263,6 +286,23 @@ interface QueuedEvent {
   sampleRate: number;
 }
 
+interface QueuedExposure {
+  experiment: string;
+  variant: string;
+  /** Scope of the unit hash, computed when the batch is sent. */
+  project: string;
+  environment: string;
+  attribute: string;
+  identity: string;
+}
+
+interface QueuedTrack {
+  event: string;
+  value?: number;
+  /** [attribute, identity] pairs; hashed with the bundle in use when the batch is sent. */
+  units: [string, string][];
+}
+
 interface SessionState {
   id: string;
   bundle: Bundle;
@@ -285,6 +325,13 @@ interface Persisted {
 }
 
 const MAX_QUEUE = 500;
+/** Experiments: queued exposures / track events (each), items per request, units remembered for de-duplication. */
+const MAX_EXPERIMENT_QUEUE = 5000;
+const EXPERIMENT_BATCH = 100;
+const MAX_EXPERIMENT_BATCHES_PER_FLUSH = 20;
+const MAX_SEEN_EXPOSURES = 20_000;
+/** Same rule as the edge and `metrics.event_name`. */
+const EVENT_NAME = /^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,63}$/;
 const MAX_BATCH = 50;
 const MAX_EVENT_VALUE_CHARS = 1024;
 const REQUEST_TIMEOUT_MS = 10_000;
@@ -426,6 +473,17 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
   let pageResolved = false;
   let pageTimer: Timer | null = null;
   const queue: QueuedEvent[] = [];
+  const xo = options.experiments === false ? { enabled: false } : (options.experiments ?? {});
+  const experimentsEnabled = xo.enabled ?? true;
+  const experimentFlushMs = xo.flushIntervalMs ?? 5_000;
+  const exposureQueue: QueuedExposure[] = [];
+  const trackQueue: QueuedTrack[] = [];
+  /** Exposures already queued in this process (experiment, unit, variant), oldest first: repeats are not sent again. */
+  const seenExposures = new Set<string>();
+  const unitAttrs = new WeakMap<Bundle, string[]>();
+  let experimentTimer: Timer | null = null;
+  let experimentDue = 0;
+  let experimentFlushing: Promise<void> | null = null;
   const listeners = { update: new Set<(e: UpdateEvent) => void>(), error: new Set<(e: Error) => void>() };
   const subscribers = new Set<() => void>();
 
@@ -1055,8 +1113,11 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
       pollTimer = null;
       if (flushTimer) clearTimeout(flushTimer);
       flushTimer = null;
+      if (experimentTimer) clearTimeout(experimentTimer);
+      experimentTimer = null;
       stopRealtime();
       void flush(); // the app may be suspended next: send what is queued now
+      void flushExperiments();
     },
     resume() {
       if (closed || !paused) return;
@@ -1064,6 +1125,7 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
       liveAttempt = 0;
       void sync().then(schedulePoll);
       scheduleFlush();
+      scheduleExperiments();
       startRealtime();
     },
     setRealtime(enabled) {
@@ -1175,6 +1237,149 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
     );
   }
 
+  // ---- experiments: exposures and track() (never on the evaluation path beyond a Set lookup)
+  function recordExposure(e: Evaluation, ctx: Context, b: Bundle | null) {
+    if (!experimentsEnabled || closed || !b) return;
+    try {
+      const flag = Object.prototype.hasOwnProperty.call(b.flags, e.flagKey) ? b.flags[e.flagKey] : undefined;
+      if (!flag || !flag.experiment) return;
+      const x = exposureOf(flag, e, ctx);
+      if (!x) return;
+      const attribute = flag.experiment.unit ?? "key";
+      const seen = `${x.experiment}\n${attribute}\n${x.variant}\n${x.unit}`;
+      if (seenExposures.has(seen)) return;
+      if (exposureQueue.length >= MAX_EXPERIMENT_QUEUE) return; // bounded: drop instead of growing
+      seenExposures.add(seen);
+      if (seenExposures.size > MAX_SEEN_EXPOSURES) seenExposures.delete(seenExposures.values().next().value as string);
+      exposureQueue.push({ experiment: x.experiment, variant: x.variant, project: b.project, environment: b.environment, attribute, identity: x.unit });
+      if (exposureQueue.length >= EXPERIMENT_BATCH) kickExperiments();
+    } catch {
+      /* experiments must never affect evaluation */
+    }
+  }
+
+  /** Unit attributes a track event is reported under: `key` plus the unit attribute of every experiment in the bundle. */
+  function trackAttributes(b: Bundle | null): string[] {
+    if (!b) return ["key"];
+    const hit = unitAttrs.get(b);
+    if (hit) return hit;
+    const names = new Set<string>(["key"]);
+    try {
+      for (const f of Object.values(b.flags)) if (f && f.experiment && typeof f.experiment.unit === "string") names.add(f.experiment.unit);
+    } catch {
+      /* malformed bundle: key only */
+    }
+    const list = [...names];
+    unitAttrs.set(b, list);
+    return list;
+  }
+
+  function track(eventName: string, value?: number | Context | null, ctx?: Context): void {
+    if (!experimentsEnabled || closed) return;
+    try {
+      let v: number | undefined;
+      let c: Context | undefined;
+      if (typeof value === "number") {
+        v = value;
+        c = ctx;
+      } else if (value === null || value === undefined) c = ctx;
+      else c = value;
+      if (typeof eventName !== "string" || !EVENT_NAME.test(eventName)) {
+        emitError(new NanoFlagsError(`track(): ${JSON.stringify(eventName)} is not a valid event name (1–64 letters, digits, _ . : / -, starting with a letter or digit). The event was dropped.`, "config"));
+        return;
+      }
+      if (v !== undefined && !(Number.isFinite(v) && Math.abs(v) < 1e15)) {
+        emitError(new NanoFlagsError(`track("${eventName}"): the value must be a finite number. The event was dropped.`, "config"));
+        return;
+      }
+      // A browser page inside a test session is QA traffic.
+      if (live(pageSession)) return;
+      const context: Context = c ?? {};
+      const units: [string, string][] = [];
+      for (const attribute of trackAttributes(bundle)) {
+        const id = Object.prototype.hasOwnProperty.call(context, attribute) ? context[attribute] : undefined;
+        if ((typeof id === "string" && id !== "") || (typeof id === "number" && Number.isFinite(id))) units.push([attribute, String(id)]);
+      }
+      if (units.length === 0 || trackQueue.length >= MAX_EXPERIMENT_QUEUE) return;
+      trackQueue.push(v === undefined ? { event: eventName, units } : { event: eventName, value: v, units });
+      if (trackQueue.length >= EXPERIMENT_BATCH) kickExperiments();
+    } catch {
+      /* track() never throws */
+    }
+  }
+
+  /**
+   * Sends queued exposures first (so a conversion rarely arrives before its exposure; the database also waits up to
+   * 10 minutes for it), then track events. Exposures are re-queued after a network error, 429 or 5xx (the database
+   * de-duplicates them); track events are sent at most once.
+   */
+  async function sendExperiments(): Promise<void> {
+    if (!doFetch || baseUrl === "") return;
+    for (let i = 0; i < MAX_EXPERIMENT_BATCHES_PER_FLUSH && exposureQueue.length > 0; i++) {
+      const batch = exposureQueue.splice(0, EXPERIMENT_BATCH);
+      let retry = false;
+      try {
+        const exposures = batch.map((e) => ({ experiment: e.experiment, variant: e.variant, unit: unitHash(e.project, e.environment, e.attribute, e.identity) }));
+        const res = await request("/v1/exposures", { method: "POST", keepalive: true, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sdk: sdkLabel, exposures }) });
+        retry = res.status === 429 || res.status >= 500;
+      } catch {
+        retry = true;
+      }
+      if (retry) {
+        exposureQueue.unshift(...batch.slice(0, Math.max(0, MAX_EXPERIMENT_QUEUE - exposureQueue.length)));
+        break;
+      }
+    }
+    for (let i = 0; i < MAX_EXPERIMENT_BATCHES_PER_FLUSH && trackQueue.length > 0; i++) {
+      const b = bundle;
+      if (!b) break; // the unit hash needs the project and environment: wait for a bundle
+      const items: { event: string; unit: string; value?: number }[] = [];
+      while (trackQueue.length > 0 && items.length < EXPERIMENT_BATCH) {
+        const t = trackQueue.shift()!;
+        for (const [attribute, identity] of t.units) {
+          const unit = unitHash(b.project, b.environment, attribute, identity);
+          items.push(t.value === undefined ? { event: t.event, unit } : { event: t.event, unit, value: t.value });
+        }
+      }
+      try {
+        await request("/v1/track", { method: "POST", keepalive: true, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sdk: sdkLabel, events: items }) });
+      } catch {
+        /* at most once, by design */
+      }
+    }
+  }
+
+  function flushExperiments(): Promise<void> {
+    if (!experimentsEnabled) return Promise.resolve();
+    if (experimentFlushing) return experimentFlushing.then(() => (exposureQueue.length || trackQueue.length ? flushExperiments() : undefined));
+    experimentFlushing = sendExperiments().finally(() => {
+      experimentFlushing = null;
+    });
+    return experimentFlushing;
+  }
+
+  function scheduleExperiments(delay = experimentFlushMs) {
+    if (closed || paused || !experimentsEnabled || experimentFlushMs <= 0) return;
+    // Never postpone a flush that is already due sooner (a full batch kicked one).
+    const due = Date.now() + delay;
+    if (experimentTimer && experimentDue <= due) return;
+    if (experimentTimer) clearTimeout(experimentTimer);
+    experimentDue = due;
+    experimentTimer = unref(
+      setTimeout(() => {
+        experimentTimer = null;
+        if (exposureQueue.length === 0 && trackQueue.length === 0) return scheduleExperiments();
+        void flushExperiments().then(() => scheduleExperiments());
+      }, delay),
+    );
+  }
+
+  /** A full batch is waiting: send soon instead of at the end of the interval. */
+  function kickExperiments() {
+    if (closed || paused || experimentFlushing) return;
+    scheduleExperiments(0);
+  }
+
   // ---- evaluation
   const live = (s: SessionState | null): SessionState | null => (s !== null && Date.now() < s.expiresAtMs ? s : null);
 
@@ -1189,6 +1394,8 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
       result = { flagKey: key, value: fallback, reason: "error", revision: result.revision, trace: [...result.trace, { kind: "result", title: "Returned the fallback", detail: error }], error };
     }
     record(result as Evaluation, context, b, s?.id);
+    // Test sessions evaluate a pinned bundle for QA: synthetic traffic is never an exposure.
+    if (!s) recordExposure(result as Evaluation, context, b);
     return result;
   }
 
@@ -1359,13 +1566,18 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
       if (inFlight) await inFlight;
       return sync();
     },
-    flush,
+    track: track as NanoFlagsClient["track"],
+    async flush() {
+      await Promise.all([flush(), flushExperiments()]);
+    },
     close() {
       if (closed) return;
       void flush(); // best effort
+      void flushExperiments();
       closed = true;
       if (pollTimer) clearTimeout(pollTimer);
       if (flushTimer) clearTimeout(flushTimer);
+      if (experimentTimer) clearTimeout(experimentTimer);
       if (pageTimer) clearTimeout(pageTimer);
       sessions.clear();
       if (liveTimer) clearTimeout(liveTimer);
@@ -1412,6 +1624,7 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
     if (!started) return;
     schedulePoll();
     scheduleFlush();
+    scheduleExperiments();
     startRealtime();
   });
   // A page reload stays in the test session it was opened with.

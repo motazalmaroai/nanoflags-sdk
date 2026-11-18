@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+Additive, no breaking changes.
+
+- Experiments: the SDK logs an **exposure** the first time a unit evaluates a flag through the rule of a running
+  experiment (bundles carry the experiment's metadata on the flag). Exposures are never sampled, de-duplicated per unit
+  in the process and sent to `POST /v1/exposures`; failed batches (network, 429, 5xx) are retried.
+- `track(eventName, value?, ctx?)`: records a metric event for experiments (`POST /v1/track`, at most once).
+- Only a SHA-256 unit hash scoped to project, environment and unit attribute leaves the process
+  (`unitHash()`, `sha256Hex()` are exported); never the context, other attributes or values.
+- `experiments` option: `{ enabled?: boolean, flushIntervalMs?: number }` or `false` (both features off).
+- `flush()` also sends queued exposures and track events; `close()` sends them best effort.
+- `ExperimentMeta` type re-exported from the engine (`FlagConfig.experiment`).
+
 ## 0.5.1 (2026-11-14)
 
 - An `error` emitted while no `error` listener is attached is logged with `console.warn` (prefixed `[nanoflags]`), once per error code per client, instead of being dropped silently. Attaching a listener with `on("error", …)` turns this off.

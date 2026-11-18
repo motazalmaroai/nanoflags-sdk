@@ -245,6 +245,9 @@ export function createClient(options: ReactNativeClientOptions): ReactNativeClie
       return () => void subscribers.delete(listener);
     },
     refresh: () => core.refresh(),
+    // The identified context (identify()) supplies the unit, like it does for flag evaluations.
+    track: ((eventName: string, value?: number | Context | null, ctx?: Context) =>
+      typeof value === "object" && value !== null ? core.track(eventName, merged(value)) : core.track(eventName, value, merged(ctx))) as NanoFlagsClient["track"],
     flush: () => core.flush(),
     close: () => core.close(),
   };

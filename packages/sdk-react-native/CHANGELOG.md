@@ -8,6 +8,9 @@ First release of `@nanoflags/react-native`.
   verification and transports; compiled into this package): local, synchronous evaluation; `boolean` / `string` /
   `number` / `json`, `detail()` (value + reason + matched rule), `allFlags()`; a current context that `identify()`
   replaces without any request.
+- Experiments (from the core): exposures of flags with a running experiment are logged automatically, and
+  `track(eventName, value?, ctx?)` records metric events; the identified context supplies the unit. Only SHA-256 unit
+  hashes leave the device.
 - Client (`nf_pub_`) keys only; server keys are refused before any request.
 - Signed bundles verified by default against the embedded production keys of `https://edge.nanoflags.io`, with pure-JS
   SHA-256 / Ed25519 (`@noble/hashes` 2.4.0, `@noble/ed25519` 3.2.0, bundled) since Hermes has no WebCrypto; unknown

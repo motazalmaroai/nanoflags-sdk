@@ -360,7 +360,7 @@ anything you return leaves the process. Flag *values* are sent (truncated above 
 in flag values.
 
 Telemetry is off the evaluation path: an evaluation appends to a bounded in-memory queue (500 entries,
-then dropped). Batches that fail to send are dropped, never retried. Disable with `events: false`.
+then dropped). Batches that fail to send are dropped, never retried. Disable with `events: false` (this also turns experiment exposures and `track()` off unless `experiments: { enabled: true }` is set).
 
 ### What a reported signal does and does not prove
 

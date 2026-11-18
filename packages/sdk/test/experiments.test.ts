@@ -44,7 +44,7 @@ function edge(status: Record<string, number | Error> = {}) {
 
 const clients: NanoFlagsClient[] = [];
 function client(fetch: typeof globalThis.fetch, opts: Partial<Parameters<typeof createClient>[0]> = {}) {
-  const c = createClient({ sdkKey: SERVER_KEY, baseUrl: BASE, streaming: false, pollIntervalMs: 0, events: false, store: false, bootstrap: experimentBundle(), experiments: { flushIntervalMs: 0 }, fetch, ...opts });
+  const c = createClient({ sdkKey: SERVER_KEY, baseUrl: BASE, streaming: false, pollIntervalMs: 0, events: false, store: false, bootstrap: experimentBundle(), experiments: { enabled: true, flushIntervalMs: 0 }, fetch, ...opts });
   clients.push(c);
   return c;
 }
@@ -71,6 +71,22 @@ describe("sha256Hex / unitHash", () => {
     expect(unitHash("commerce", "production", "key", "user-1")).toBe(createHash("sha256").update("nanoflags-unit-v1\ncommerce\nproduction\nkey\nuser-1").digest("hex"));
     expect(unitHash("commerce", "staging", "key", "user-1")).not.toBe(unitHash("commerce", "production", "key", "user-1"));
     expect(unitHash("commerce", "production", "accountId", "user-1")).not.toBe(unitHash("commerce", "production", "key", "user-1"));
+  });
+});
+
+describe("experiments and telemetry opt-out", () => {
+  it("events: false turns exposures and track() off unless experiments are enabled explicitly", async () => {
+    const e = edge();
+    const off = client(e.fetch, { events: false, experiments: { flushIntervalMs: 0 } });
+    off.boolean("checkout-v2", false, { key: "user-1" });
+    off.track("purchase", 10, { key: "user-1" });
+    await off.flush();
+    expect(e.of("/v1/exposures")).toHaveLength(0);
+    expect(e.of("/v1/track")).toHaveLength(0);
+    const on = client(e.fetch, { events: false, experiments: { enabled: true, flushIntervalMs: 0 } });
+    on.boolean("checkout-v2", false, { key: "user-2" });
+    await on.flush();
+    expect(e.of("/v1/exposures")).toHaveLength(1);
   });
 });
 
@@ -151,7 +167,7 @@ describe("exposures", () => {
   it("are sent in the background at the flush interval", async () => {
     vi.useFakeTimers();
     const e = edge();
-    const c = client(e.fetch, { experiments: { flushIntervalMs: 1000 } });
+    const c = client(e.fetch, { experiments: { enabled: true, flushIntervalMs: 1000 } });
     await c.ready();
     c.boolean("checkout-v2", false, { key: "user-1" });
     expect(e.of("/v1/exposures")).toHaveLength(0);
@@ -162,7 +178,7 @@ describe("exposures", () => {
   it("a full batch is sent without waiting for the interval", async () => {
     vi.useFakeTimers();
     const e = edge();
-    const c = client(e.fetch, { experiments: { flushIntervalMs: 60_000 } });
+    const c = client(e.fetch, { experiments: { enabled: true, flushIntervalMs: 60_000 } });
     await c.ready();
     for (let i = 0; i < 100; i++) c.boolean("checkout-v2", false, { key: `user-${i}` });
     await vi.advanceTimersByTimeAsync(10);

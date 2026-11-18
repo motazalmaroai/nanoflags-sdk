@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `events: false` (telemetry off) also turns experiment exposures and `track()` off, unless `experiments: { enabled: true }` is set explicitly.
+
 Additive, no breaking changes.
 
 - Experiments: the SDK logs an **exposure** the first time a unit evaluates a flag through the rule of a running

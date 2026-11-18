@@ -104,8 +104,9 @@ export interface EventsOptions {
 
 export interface ExperimentsOptions {
   /**
-   * Default true. Log an exposure the first time a unit evaluates a flag that carries a running experiment (published
-   * bundles include its metadata), and send `track()` events. Exposures are never sampled. `false` turns both off.
+   * Default true, or false when telemetry is turned off (`events: false`). Log an exposure the first time a unit
+   * evaluates a flag that carries a running experiment (published bundles include its metadata), and send `track()`
+   * events. Exposures are never sampled. `false` turns both off; `true` keeps them on even with `events: false`.
    */
   enabled?: boolean;
   /** Default 5000. How often queued exposures and track events are sent (sooner when 100 are queued). */
@@ -474,7 +475,10 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
   let pageTimer: Timer | null = null;
   const queue: QueuedEvent[] = [];
   const xo = options.experiments === false ? { enabled: false } : (options.experiments ?? {});
-  const experimentsEnabled = xo.enabled ?? true;
+  // Turning telemetry off (`events: false` or `events: { enabled: false }`) also turns experiments off, unless the
+  // application opts back in explicitly with `experiments: { enabled: true }`.
+  const telemetryOff = options.events === false || (typeof options.events === "object" && options.events?.enabled === false);
+  const experimentsEnabled = xo.enabled ?? !telemetryOff;
   const experimentFlushMs = xo.flushIntervalMs ?? 5_000;
   const exposureQueue: QueuedExposure[] = [];
   const trackQueue: QueuedTrack[] = [];

@@ -28,7 +28,7 @@ import { attachLifecycle, type AppStateLike, type LifecycleState, type NetInfoLi
 import { memoryStorage, storageKey, toStore, type StorageAdapter } from "./storage.js";
 import { fetchWithHeaders, webSocketWithHeaders, xhrStreamOpener, type ReactNativeWebSocketConstructor, type XhrConstructor } from "./transport.js";
 
-export const SDK_VERSION = "0.1.0";
+export const SDK_VERSION = "0.2.0";
 /** Sent as `User-Agent` on every request and socket (Cloudflare refuses default library agents with 403 / 1010). */
 export const DEFAULT_USER_AGENT = `nanoflags-react-native/${SDK_VERSION}`;
 

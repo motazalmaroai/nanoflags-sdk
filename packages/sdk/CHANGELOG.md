@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.0 (2026-11-18)
 
 - `events: false` (telemetry off) also turns experiment exposures and `track()` off, unless `experiments: { enabled: true }` is set explicitly.
 

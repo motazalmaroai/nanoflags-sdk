@@ -102,7 +102,7 @@ createClient({
   events?: EventsOptions | false,  // telemetry, see below; false opts out
   verify?: VerifyOptions | false,  // default: embedded keys + required for the official edge
   crypto?: SignatureCrypto,        // default: bundled pure-JS SHA-256 / Ed25519
-  userAgent?: string,              // default "nanoflags-react-native/0.1.0"
+  userAgent?: string,              // default "nanoflags-react-native/0.2.0"
   fetch?, webSocket?, xmlHttpRequest?, // default: the React Native globals
 })
 ```
@@ -198,7 +198,7 @@ createClient({ sdkKey, storage: { getItem: (k) => mmkv.getString(k) ?? null, set
 
 ## Telemetry
 
-As in every NanoFlags SDK: a service report (`sdk: "react-native/0.1.0"`, the revision in use) and a sample (default
+As in every NanoFlags SDK: a service report (`sdk: "react-native/0.2.0"`, the revision in use) and a sample (default
 10 %) of evaluations with the flag, value, reason and revision. **Context values are never sent** — only the names
 of the attributes the flag's rules use and their types (e.g. `{ "plan": "string" }`). `events: { sampleRate }` tunes
 it, `events: false` turns it off. Telemetry is flushed when the app goes to the background.

@@ -23,7 +23,7 @@ export type { Store } from "./store.js";
 export type { SignatureCrypto, VerifyOptions } from "./verify.js";
 export { OFFICIAL_EDGE_URL, OFFICIAL_SIGNING_KEYS } from "./keys.js";
 
-export const SDK_VERSION = "0.5.1";
+export const SDK_VERSION = "0.6.0";
 
 /** Newest bundle format (`bundle.engine`) this SDK can evaluate. Newer bundles are refused; the previous one stays in use. */
 export const SUPPORTED_ENGINE_VERSION = ENGINE_VERSION;

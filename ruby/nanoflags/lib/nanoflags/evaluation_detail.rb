@@ -4,7 +4,9 @@ module NanoFlags
   # An error of the client. It is reported to +on_error+ listeners and {Client#last_error}; a variation call never
   # raises it. A failed update never changes the configuration in use.
   #
-  # Codes (+code+): :network, :unauthorized, :http, :invalid_bundle, :store, :config, :signature, :engine.
+  # Codes (+code+): :network, :unauthorized, :http, :invalid_bundle, :store, :config, :signature, :engine, :session
+  # (a test session could not be loaded), :environment_deleted (the live socket closed with 4004: the last
+  # configuration stays in use and is no longer updated).
   class Error < StandardError
     attr_reader :code, :http_status
 
@@ -17,9 +19,11 @@ module NanoFlags
     def inspect = "#<NanoFlags::Error #{code}: #{message}>"
   end
 
-  # A new configuration is in use. +source+ is :network, :store or :bootstrap; +transport+ is :stream (fetched after
-  # an event-stream notification) or :poll; +previous_revision+ is nil when nothing was loaded before.
-  UpdateEvent = Struct.new(:revision, :previous_revision, :checksum, :source, :transport, keyword_init: true)
+  # A new configuration is in use. +source+ is :network, :store or :bootstrap; +transport+ is :live (pushed over the
+  # live socket), :stream (fetched after an event-stream notification) or :poll; +previous_revision+ is nil when
+  # nothing was loaded before; +latency_ms+ is the time from the database commit to this event, for pushed revisions
+  # that carry their commit time (nil otherwise).
+  UpdateEvent = Struct.new(:revision, :previous_revision, :checksum, :source, :transport, :latency_ms, keyword_init: true)
 
   # The full result of an evaluation: value, reason, matched rule, rollout bucket and a human-readable trace.
   #

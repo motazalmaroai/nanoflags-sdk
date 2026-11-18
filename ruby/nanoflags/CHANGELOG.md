@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+- Live updates over the edge's WebSocket (`/v1/live`, subprotocol `nanoflags.v1`, the key in the `Authorization`
+  header): the same protocol as the JavaScript, Python, Go and Java SDKs. `hello` / `rev` pushes are verified like
+  fetched bundles before use, never move the client backwards, and set the ETag so the safety poll gets a 304. Text
+  ping every ~30 s with a 10 s pong timeout, socket rotation after ~50 min, reconnects with jittered backoff up to
+  5 min. Close code 4004 (environment deleted) keeps the last bundle, sets `stale`, reports
+  `:environment_deleted` and stops reconnecting. While no socket can be opened the event stream and polling take
+  over; while it is healthy the safety poll runs every `live_poll_interval` (300 s). New options `live:`,
+  `live_poll_interval:`, `live_url:`; `transport` can be `:live`; `UpdateEvent#latency_ms` for pushes that carry their
+  commit time. The WebSocket client is built in (`NanoFlags::WebSocket`, RFC 6455 over the standard library, HTTP
+  proxies via CONNECT): still no runtime dependencies. Fork-safe: a child opens its own socket and never writes to
+  the parent's.
+- Test sessions: `Client#session(token, service:)` resolves `x-nanoflags-session` tokens (`GET /v1/session`, cached
+  until expiry; unknown tokens 15 s, failures 3 s) and returns a `NanoFlags::SessionEvaluator` that evaluates against
+  the session's pinned bundle with `session.context.merge(context)`; sampled events carry `sessionId`. Request-scoped
+  helpers `NanoFlags.with_session`, `.flags_for`, `.current_session`, `.session_headers` and the Rack middleware
+  `NanoFlags::SessionMiddleware` (sets `env["nanoflags.flags"]`). New error codes `:session` and
+  `:environment_deleted`.
+
 ## 0.1.0 (2026-11-18)
 
 First release of the NanoFlags server SDK for Ruby (gem `nanoflags`).

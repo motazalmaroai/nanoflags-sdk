@@ -33,6 +33,18 @@ client.fetch_string_details(flag_key: "accent", default_value: "blue", evaluatio
 could be loaded; the client keeps trying in the background. `close_client: true` closes the NanoFlags client on
 `shutdown`.
 
+### Test sessions
+
+Pass `evaluator:` to evaluate through the request's test session (`x-nanoflags-session`, resolved by
+`NanoFlags::SessionMiddleware` or `NanoFlags.with_session`; needs a `nanoflags` release with test sessions, see its
+CHANGELOG):
+
+```ruby
+provider = NanoFlags::OpenFeature::Provider.new(nanoflags, evaluator: -> { NanoFlags.flags_for(nanoflags) })
+```
+
+Outside a session the evaluator behaves exactly like the client.
+
 ## Mapping
 
 | NanoFlags | OpenFeature |

@@ -54,19 +54,20 @@ module NanoFlags
       tls = uri.scheme == "wss"
       port = uri.port || (tls ? 443 : 80)
       deadline = monotonic + open_timeout
-      io = open_tcp(uri.host, port, tls, deadline)
+      hostname = uri.hostname # without the brackets of an IPv6 literal
+      io = open_tcp(hostname, port, tls, deadline)
       begin
         if tls
           ctx = ssl_context || default_ssl_context
           ssl = OpenSSL::SSL::SSLSocket.new(io, ctx)
           ssl.sync_close = true
-          ssl.hostname = uri.host
+          ssl.hostname = hostname
           wait_io(ssl, deadline) { ssl.connect_nonblock(exception: false) }
-          ssl.post_connection_check(uri.host) if ctx.verify_mode != OpenSSL::SSL::VERIFY_NONE
+          ssl.post_connection_check(hostname) if ctx.verify_mode != OpenSSL::SSL::VERIFY_NONE
           io = ssl
         end
         key = [SecureRandom.random_bytes(16)].pack("m0")
-        host = uri.host.include?(":") ? "[#{uri.host}]" : uri.host
+        host = uri.host # bracketed for IPv6
         lines = ["GET #{uri.request_uri} HTTP/1.1", "Host: #{port == (tls ? 443 : 80) ? host : "#{host}:#{port}"}",
                  "Upgrade: websocket", "Connection: Upgrade", "Sec-WebSocket-Key: #{key}", "Sec-WebSocket-Version: 13"]
         lines << "Sec-WebSocket-Protocol: #{protocols.join(", ")}" unless protocols.empty?
@@ -116,11 +117,11 @@ module NanoFlags
 
     # A TCP connection to host:port, through the environment's HTTP proxy when one applies (a CONNECT tunnel).
     def open_tcp(host, port, tls, deadline)
-      proxy = URI::Generic.build(scheme: tls ? "https" : "http", host: host, port: port).find_proxy
+      proxy = URI("#{tls ? "https" : "http"}://#{host.include?(":") ? "[#{host}]" : host}:#{port}").find_proxy
       left = [deadline - monotonic, 0.001].max
       return Socket.tcp(host, port, connect_timeout: left) unless proxy
 
-      io = Socket.tcp(proxy.host, proxy.port, connect_timeout: left)
+      io = Socket.tcp(proxy.hostname, proxy.port, connect_timeout: left)
       begin
         target = host.include?(":") ? "[#{host}]:#{port}" : "#{host}:#{port}"
         req = +"CONNECT #{target} HTTP/1.1\r\nHost: #{target}\r\n"

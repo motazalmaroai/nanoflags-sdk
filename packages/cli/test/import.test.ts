@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { apiError, cli, json } from "./helpers";
-import { parseEnvMap } from "../src/import";
+import { parseContexts, parseEnvMap } from "../src/import";
 
 const TOKEN = `nf_api_${"0".repeat(48)}`;
 const dir = mkdtempSync(join(tmpdir(), "nanoflags-import-"));
@@ -64,5 +64,67 @@ describe("nanoflags import", () => {
     expect(scope.err).toContain("INSUFFICIENT_SCOPE");
     const invalid = await cli(["import", flagd, "--project", "shop"], { env: { NANOFLAGS_API_TOKEN: TOKEN }, routes: { "POST /api/v1/projects/shop/imports": apiError(422, "INVALID", "The file is not valid JSON.") } });
     expect(invalid.code).toBe(1);
+  });
+});
+
+describe("nanoflags import verify", () => {
+  const statsig = join(dir, "statsig.json");
+  writeFileSync(statsig, JSON.stringify({ environments: ["production"], gates: [{ id: "banner", isEnabled: true, rules: [{ id: "r1", passPercentage: 100, environments: null, conditions: [{ type: "country", operator: "any", targetValue: ["SA"] }] }] }] }));
+  const jsonl = join(dir, "contexts.jsonl");
+  writeFileSync(jsonl, '{"key":"a","country":"SA"}\n\n{"key":"b","country":"sa"}\n{"userID":"c"}\n');
+  const comparison = (differs: number) => ({
+    method: "statsig-approximation",
+    contexts: 3,
+    flags: [{ flag: "banner", sourceKey: "banner", sourceEnvironment: "production", environment: "production", status: differs ? "differs" : "same", compared: 3, differs, splitDiffers: 0, sourceErrors: 0 }],
+    differences: differs ? [{ index: 1, flag: "banner", sourceKey: "banner", sourceEnvironment: "production", environment: "production", kind: "rule", source: true, nanoflags: false, context: { key: "b", country: "sa" } }] : [],
+    summary: { evaluations: 3, same: differs ? 0 : 1, differs: differs ? 1 : 0, splitOnly: 0, notCompared: 0, skipped: 0, differingContexts: differs, unchecked: 0 },
+    caveats: ["Only the given contexts are compared."],
+  });
+  const answer = (differs: number) => json({ ...result(true), source: "statsig", envMap: { production: "production" }, comparison: comparison(differs) });
+
+  it("sends a dry run with the contexts and lists the differing ones (exit 1)", async () => {
+    const r = await cli(["import", "verify", statsig, "--contexts", jsonl, "--project", "shop", "--flags", "banner"], { env: { NANOFLAGS_API_TOKEN: TOKEN }, routes: { "POST /api/v1/projects/shop/imports": answer(1) } });
+    expect(r.code, r.err).toBe(1);
+    const body = r.calls[0]!.body as { dryRun: boolean; contexts: unknown[]; compareFlags: string[]; format: string };
+    // Nothing is written, so flags that already exist are compared too (overwrite unless --conflict says otherwise).
+    expect(body).toMatchObject({ dryRun: true, format: "auto", compareFlags: ["banner"], conflict: "overwrite" });
+    expect(body.contexts).toEqual([{ key: "a", country: "SA" }, { key: "b", country: "sa" }, { userID: "c" }]);
+    expect(r.calls[0]!.headers.get("Idempotency-Key")).toBeNull();
+    expect(r.out).toContain("Side-by-side comparison (dry run, nothing written) · source statsig (statsig-approximation)");
+    expect(r.out).toContain("#2 banner (production) [rule] source true → NanoFlags false");
+    expect(r.out).not.toContain(TOKEN);
+  });
+
+  it("exit 0 when every context agrees; --json prints the comparison", async () => {
+    const ok = await cli(["import", "verify", statsig, "--contexts", jsonl, "--project", "shop"], { env: { NANOFLAGS_API_TOKEN: TOKEN }, routes: { "POST /api/v1/projects/shop/imports": answer(0) } });
+    expect(ok.code, ok.err).toBe(0);
+    expect(ok.out).toContain("Every compared context gets the same value");
+    const j = await cli(["import", "verify", statsig, "--contexts", jsonl, "--project", "shop", "--json"], { env: { NANOFLAGS_API_TOKEN: TOKEN }, routes: { "POST /api/v1/projects/shop/imports": answer(1) } });
+    expect(JSON.parse(j.out).comparison.summary.differs).toBe(1);
+  });
+
+  it("exit 1 when pairs were left unchecked by the budget; --conflict is passed through", async () => {
+    const c = comparison(0);
+    const partial = json({ ...result(true), source: "statsig", envMap: { production: "production" }, comparison: { ...c, summary: { ...c.summary, unchecked: 3 } } });
+    const r = await cli(["import", "verify", statsig, "--contexts", jsonl, "--project", "shop", "--conflict", "skip"], { env: { NANOFLAGS_API_TOKEN: TOKEN }, routes: { "POST /api/v1/projects/shop/imports": partial } });
+    expect(r.code, r.err).toBe(1);
+    expect(r.out).toContain("Failed: 3 flag/environment pair(s) were not compared (evaluation budget)");
+    expect((r.calls[0]!.body as { conflict: string }).conflict).toBe("skip");
+  });
+
+  it("refuses bad context files before calling the API", async () => {
+    const bad = join(dir, "bad.jsonl");
+    writeFileSync(bad, '{"key":"a"}\nnope\n');
+    const arr = join(dir, "arr.json");
+    writeFileSync(arr, JSON.stringify([{ key: "a" }, [1]]));
+    for (const args of [["--contexts", bad], ["--contexts", arr], ["--contexts", join(dir, "missing.jsonl")], []]) {
+      const r = await cli(["import", "verify", statsig, "--project", "shop", ...args], { env: { NANOFLAGS_API_TOKEN: TOKEN } });
+      expect(r.code).toBe(2);
+      expect(r.calls).toHaveLength(0);
+    }
+    const r = await cli(["import", "verify", statsig, "--project", "shop", "--contexts", bad], { env: { NANOFLAGS_API_TOKEN: TOKEN } });
+    expect(r.err).toContain("bad.jsonl:2");
+    expect(parseContexts('[{"a":1}]')).toEqual([{ a: 1 }]);
+    expect(() => parseContexts(Array.from({ length: 1001 }, () => "{}").join("\n"))).toThrow(/at most 1000/);
   });
 });

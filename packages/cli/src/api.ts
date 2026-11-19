@@ -126,7 +126,7 @@ export class Api {
   runScenarios(body: { source: "draft" | "revision"; commit?: string; runUrl?: string }): Promise<ScenarioRun> {
     return this.call<ScenarioRun>("POST", "/v1/ci/scenarios/run", body);
   }
-  publish(body: { expectedRevision: number; note?: string }): Promise<{ revision: number; checksum: string }> {
+  publish(body: { expectedRevision: number; note?: string; cosignature?: { kid: string; revision: number; checksum: string; server: string; client: string }; change?: string }): Promise<{ revision: number; checksum: string }> {
     return this.call("POST", "/v1/admin/publish", body);
   }
   /** Creates a flag in the key's project (admin key). Every environment's draft starts with `default`. */

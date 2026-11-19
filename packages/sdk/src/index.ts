@@ -15,15 +15,19 @@ import { unitHash } from "./sha256.js";
 import { OFFICIAL_EDGE_URL, OFFICIAL_SIGNING_KEYS } from "./keys.js";
 import { defaultStore, type Store } from "./store.js";
 import { readSse } from "./sse.js";
-import { importPublicKeys, isPublicEd25519Jwk, rawMember, verifyBundleText, type ImportedKey, type SignatureCrypto, type SignatureInfo, type VerifyOptions } from "./verify.js";
+import { importPublicKeys, isPublicEd25519Jwk, rawMember, verifyBundleText, verifyShadowText, type ImportedKey, type SignatureCrypto, type SignatureInfo, type VerifyOptions } from "./verify.js";
+import { changedFlags, isShadowMarker, parseShadowHeader, ShadowCounters, SHADOW_FLUSH_MS, SHADOW_RETRY_MS, type ShadowBundle, type ShadowOptions } from "./shadow.js";
+import { checkEvidence, decodeEvidence, isLogEvidence, isTreeHead, onlyTurnsFlagsOff, verifyConsistency, verifyHead, type LogEvidence, type TreeHead } from "./log.js";
 
 export type { Bundle, Context, Evaluation, ExperimentMeta, JsonValue, Reason } from "@nanoflags/engine";
 export { sha256Hex, unitHash } from "./sha256.js";
 export type { Store } from "./store.js";
 export type { SignatureCrypto, VerifyOptions } from "./verify.js";
+export type { ShadowOptions, ShadowReport } from "./shadow.js";
+export { headText, leafHash, onlyTurnsFlagsOff, parseLeaf, verifyConsistency, verifyInclusion, type LogEvidence, type LogLeaf, type TreeHead } from "./log.js";
 export { OFFICIAL_EDGE_URL, OFFICIAL_SIGNING_KEYS } from "./keys.js";
 
-export const SDK_VERSION = "0.6.0";
+export const SDK_VERSION = "0.7.0";
 
 /** Newest bundle format (`bundle.engine`) this SDK can evaluate. Newer bundles are refused; the previous one stays in use. */
 export const SUPPORTED_ENGINE_VERSION = ENGINE_VERSION;
@@ -150,6 +154,28 @@ export interface ClientOptions {
    * with any other `baseUrl` nothing is verified unless configured. `false` turns verification off explicitly.
    */
   verify?: VerifyOptions | false;
+  /**
+   * Verify every new configuration against the environment's transparency log (verifiable publish history): the
+   * revision must be recorded in the log, exactly with the bytes received, under a tree head signed by NanoFlags, and
+   * every new tree head must extend the previous one (consistency proof). A configuration that cannot be verified is
+   * not applied: the configuration in use stays, an `error` with code `log` is emitted and the SDK tries again.
+   * Implies signature verification with `require: true` (`verify: false` makes every update fail). Default false.
+   */
+  verifyLog?: boolean;
+  /**
+   * Customer co-signing keys (public Ed25519 JWKs with `kid`) registered for this environment in the dashboard. With
+   * keys set, a configuration must also carry a valid signature by one of them (made in your CI with
+   * `nanoflags sign`); otherwise it is rejected (`error` code `cosign`) and the configuration in use stays. Implies
+   * signature verification with `require: true`.
+   */
+  coSignerKeys?: readonly JsonWebKey[];
+  /**
+   * With `coSignerKeys`: accept a configuration without the customer signature when it is an emergency (kill-switch)
+   * revision — it differs from the configuration in use only by flags turned off. Default true, so the kill switch keeps
+   * working when your CI key is unavailable. With `verifyLog` the log must also record it as an emergency. Without a
+   * configuration in use to compare with (first start), such a revision is not accepted.
+   */
+  allowEmergencyWithoutCosign?: boolean;
   fetch?: typeof fetch;
   /** Platform integration: SHA-256 + Ed25519 for signature verification where WebCrypto lacks them (React Native). Default: WebCrypto. */
   crypto?: SignatureCrypto;
@@ -159,6 +185,20 @@ export interface ClientOptions {
   lifecycle?: (control: LifecycleControl) => (() => void) | void;
   /** Platform integration: the `sdk` label of telemetry reports. Default `js/<version>`. At most 40 characters. */
   sdkLabel?: string;
+  /**
+   * Your service's own version (e.g. `"3.1.0"`), at most 40 characters. Shown next to `service` on the change page's
+   * "Production impact (shadow)" panel, so a difference that only one release has stands out.
+   */
+  serviceVersion?: string;
+  /**
+   * Shadow evaluation of drafts. When an admin turned it on for the environment and a change waits for approval, the
+   * edge offers the change's draft as a signed shadow bundle. For a sample of the evaluations of the flags the draft
+   * changes, the SDK also evaluates the draft and reports only aggregate counters (how often the value would change,
+   * per flag, value pair and draft rule) with the telemetry report — never a context, attribute or identifier. The app
+   * always gets the live value; a shadow bundle is never applied, and one whose signature does not verify is ignored.
+   * Default on (sample rate 0.1) when `events` are enabled; `false` turns it off.
+   */
+  shadow?: ShadowOptions | false;
 }
 
 /** The flag accessors shared by the client and by session-scoped evaluators. */
@@ -266,7 +306,7 @@ export interface NanoFlagsClient {
 export class NanoFlagsError extends Error {
   constructor(
     message: string,
-    readonly code: "network" | "unauthorized" | "http" | "invalid_bundle" | "store" | "config" | "signature" | "session" | "engine" | "environment_deleted",
+    readonly code: "network" | "unauthorized" | "http" | "invalid_bundle" | "store" | "config" | "signature" | "session" | "engine" | "environment_deleted" | "log" | "cosign" | "shadow",
     readonly httpStatus?: number,
   ) {
     super(message);
@@ -323,6 +363,10 @@ interface Persisted {
   sig?: SignatureInfo;
   /** Signed bundle text, kept only when it differs from `JSON.stringify(bundle)`. */
   raw?: string;
+  /** The customer co-signature the bundle was accepted with (`coSignerKeys`). */
+  cosign?: { kid: string; signature: string } | null;
+  /** The newest transparency-log head this client has verified (`verifyLog`): the next one must extend it. */
+  logHead?: TreeHead | null;
 }
 
 const MAX_QUEUE = 500;
@@ -363,7 +407,15 @@ function unref(t: Timer): Timer {
 function isBundle(v: unknown): v is Bundle {
   if (typeof v !== "object" || v === null) return false;
   const b = v as Record<string, unknown>;
-  return b.schema === 1 && typeof b.revision === "number" && typeof b.flags === "object" && b.flags !== null && !Array.isArray(b.flags) && typeof b.segments === "object" && b.segments !== null;
+  // A shadow bundle (migration 0179) is never configuration, whatever path it arrives on.
+  return b.schema === 1 && typeof b.revision === "number" && typeof b.flags === "object" && b.flags !== null && !Array.isArray(b.flags) && typeof b.segments === "object" && b.segments !== null && b.shadow === undefined;
+}
+
+/** A shadow bundle: the bundle shape plus its `shadow` marker (inside the signed bytes). */
+function isShadowBundle(v: unknown): v is ShadowBundle {
+  if (typeof v !== "object" || v === null) return false;
+  const b = v as Record<string, unknown>;
+  return b.schema === 1 && typeof b.revision === "number" && typeof b.flags === "object" && b.flags !== null && !Array.isArray(b.flags) && typeof b.segments === "object" && b.segments !== null && !Array.isArray(b.segments) && isShadowMarker(b.shadow);
 }
 
 function engineError(b: { revision?: unknown; engine?: unknown }): NanoFlagsError {
@@ -449,13 +501,25 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
    * `refetch` = an unknown key id loads `/v1/keys` once (official edge with the embedded keys, or `"fetch"`).
    */
   const official = baseUrl === OFFICIAL_EDGE_URL;
+  const verifyLog = options.verifyLog === true;
+  const coSignerJwks = Array.isArray(options.coSignerKeys) ? options.coSignerKeys : [];
+  const cosignWanted = Array.isArray(options.coSignerKeys);
+  const allowEmergency = options.allowEmergencyWithoutCosign !== false;
+  /** `verifyLog` / `coSignerKeys` need verified signatures: they imply `require: true`, and cannot work with `verify: false`. */
+  const strict = verifyLog || cosignWanted;
+  const strictBroken = strict && options.verify === false;
   const verifyOpt: { keys: readonly unknown[] | "fetch"; require: boolean; refetch: boolean } | null = (() => {
     const v = options.verify;
     if (v === false) return null;
-    if (v === undefined || v === null) return official ? { keys: OFFICIAL_SIGNING_KEYS, require: true, refetch: true } : null;
+    if (v === undefined || v === null) return official ? { keys: OFFICIAL_SIGNING_KEYS, require: true, refetch: true } : strict ? { keys: "fetch", require: true, refetch: true } : null;
     const keys = v.publicKeys === "fetch" ? "fetch" : Array.isArray(v.publicKeys) ? v.publicKeys : official ? OFFICIAL_SIGNING_KEYS : "fetch";
-    return { keys, require: v.require ?? official, refetch: keys === "fetch" || (official && v.publicKeys === undefined) };
+    return { keys, require: strict || (v.require ?? official), refetch: keys === "fetch" || (official && v.publicKeys === undefined) };
   })();
+  let coSignerKeys: Promise<ImportedKey[]> | null = null;
+  /** Newest verified transparency-log head (`verifyLog`). */
+  let logHead: TreeHead | null = null;
+  /** Co-signature of the bundle in use (persisted with it). */
+  let cosignInUse: { kid: string; signature: string } | null = null;
   const isBrowser = typeof window !== "undefined" && typeof document !== "undefined";
   if (isBrowser && typeof sdkKey === "string" && sdkKey.startsWith("nf_srv_") && !warnedServerKeyInBrowser) {
     warnedServerKeyInBrowser = true;
@@ -549,7 +613,7 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
 
   function persist() {
     if (!store || !bundle) return;
-    const payload: Persisted = { v: 1, id, etag, checksum, savedAt: new Date().toISOString(), bundle, ...(sig ? { sig } : {}), ...(sig && rawText !== null ? { raw: rawText } : {}) };
+    const payload: Persisted = { v: 1, id, etag, checksum, savedAt: new Date().toISOString(), bundle, ...(sig ? { sig } : {}), ...(sig && rawText !== null ? { raw: rawText } : {}), ...(cosignInUse ? { cosign: cosignInUse } : {}), ...(logHead ? { logHead } : {}) };
     void Promise.resolve()
       .then(() => store.set(JSON.stringify(payload)))
       .catch(() => emitError(new NanoFlagsError("Could not persist the bundle.", "store")));
@@ -588,6 +652,20 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
           if (!ok) return void emitError(new NanoFlagsError("The persisted bundle failed signature verification and was ignored.", "signature"));
           restoredSig = { signature: s.signature, kid: s.kid ?? null, environmentId: s.environmentId, revision: s.revision, checksum: s.checksum };
           restoredRaw = typeof p.raw === "string" ? p.raw : null;
+          // With co-signer keys a persisted copy must carry a valid customer signature too (emergency copies are not kept).
+          if (cosignWanted) {
+            const c = p.cosign;
+            const text = typeof p.raw === "string" ? p.raw : JSON.stringify(p.bundle);
+            if (!c || typeof c.kid !== "string" || typeof c.signature !== "string" || !(await verifyCosign(restoredSig, text, c))) return;
+            cosignInUse = { kid: c.kid, signature: c.signature };
+          }
+          if (verifyLog && isTreeHead(p.logHead) && logHead === null) {
+            try {
+              if (await verifyHead(await loadKeys(p.logHead.kid), s.environmentId, p.logHead)) logHead = p.logHead;
+            } catch {
+              /* no baseline: the next head starts one */
+            }
+          }
         } else if (verifyOpt.require) return;
         if (closed || (bundle && bundle.revision >= restored.revision)) return;
       }
@@ -711,6 +789,96 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
     throw reject("its signature does not verify.");
   }
 
+  // ---- co-signatures and the transparency log (migration 0174)
+  async function verifyCosign(info: SignatureInfo, text: string, c: { kid: string; signature: string }): Promise<boolean> {
+    coSignerKeys ??= importPublicKeys(coSignerJwks, cryptoImpl);
+    const keys = await coSignerKeys;
+    // A co-signature names its key: only that key is tried (`kid` must match).
+    const named = keys.filter((k) => k.kid === c.kid);
+    if (named.length === 0) return false;
+    return verifyBundleText(named, { ...info, signature: c.signature, kid: c.kid }, text, cryptoImpl);
+  }
+
+  /** `/v1/log/proof` for a revision, retried briefly: the entry is written right after a revision is distributed. */
+  async function fetchEvidence(revision: number): Promise<LogEvidence | null> {
+    for (const wait of [0, 300, 700, 1500]) {
+      if (wait) await new Promise<void>((r) => unref(setTimeout(r, wait)));
+      if (closed) return null;
+      try {
+        const res = await request(`/v1/log/proof?revision=${revision}`, { method: "GET" });
+        if (res.status === 404) {
+          void res.body?.cancel().catch(() => undefined);
+          continue;
+        }
+        if (!res.ok) return null;
+        const v: unknown = await res.json();
+        return isLogEvidence(v) ? v : null;
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * The checks `coSignerKeys` and `verifyLog` add on top of the NanoFlags signature (already verified for `text`).
+   * Throws a NanoFlagsError (`cosign` / `log`) when the configuration must not be applied. Commits the new log head only
+   * when everything passed; returns the co-signature to keep with the bundle.
+   */
+  async function checkTrust(t: { info: SignatureInfo; text: string; next: Bundle; cosign: { kid: string; signature: string } | null; evidence: LogEvidence | null }): Promise<{ cosign: { kid: string; signature: string } | null; commit: () => void }> {
+    const rev = t.info.revision;
+    if (strictBroken) throw new NanoFlagsError(`Bundle r${rev} was rejected: \`verifyLog\` / \`coSignerKeys\` need signature verification, but \`verify\` is false. The configuration in use is unchanged.`, "config");
+    let emergency = false;
+    let cosign: { kid: string; signature: string } | null = null;
+    if (cosignWanted) {
+      if (t.cosign) {
+        if (!(await verifyCosign(t.info, t.text, t.cosign))) throw new NanoFlagsError(`Bundle r${rev} was rejected: its co-signature does not verify with your co-signer keys. The configuration in use is unchanged.`, "cosign");
+        cosign = t.cosign;
+      } else if (allowEmergency && bundle && onlyTurnsFlagsOff(bundle as unknown as Record<string, unknown>, t.next as unknown as Record<string, unknown>)) {
+        emergency = true;
+      } else {
+        throw new NanoFlagsError(`Bundle r${rev} was rejected: it carries no co-signature${allowEmergency ? " and is not an emergency revision that only turns flags off" : ""}. The configuration in use is unchanged.`, "cosign");
+      }
+    }
+    if (!verifyLog) return { cosign, commit: () => undefined };
+    const reject = (why: string) => new NanoFlagsError(`Bundle r${rev} was rejected: ${why} The configuration in use is unchanged; checking again shortly.`, "log");
+    const evidence = t.evidence ?? (await fetchEvidence(rev));
+    if (!evidence) throw reject("it is not in the transparency log (yet).");
+    const checked = await checkEvidence(evidence, { environmentId: t.info.environmentId, revision: rev, checksum: t.info.checksum, text: t.text, browser: isBrowserKey }, cryptoImpl);
+    if ("problem" in checked) throw reject(checked.problem);
+    if (cosign && (checked.leaf.mode !== "cosigned" || checked.leaf.cosignerKid !== cosign.kid)) throw reject("the log does not record its co-signature.");
+    if (emergency && checked.leaf.mode !== "emergency") throw reject("it has no co-signature and the log does not record it as an emergency revision.");
+    const head = evidence.head;
+    let keys: ImportedKey[];
+    try {
+      keys = await loadKeys(head.kid);
+    } catch (e) {
+      throw reject(`the signing keys could not be loaded (${e instanceof Error ? e.message : String(e)}).`);
+    }
+    if (!(await verifyHead(keys, t.info.environmentId, head))) throw reject("its tree head is not signed by NanoFlags.");
+    let next: TreeHead = head;
+    const prev = logHead;
+    if (prev) {
+      if (prev.size === head.size) {
+        if (prev.root !== head.root) throw reject("the log forked: two different trees of the same size.");
+      } else {
+        const [a, b] = prev.size < head.size ? [prev, head] : [head, prev];
+        let proof: unknown = null;
+        try {
+          const res = await request(`/v1/log/consistency?first=${a.size}&second=${b.size}`, { method: "GET" });
+          if (res.ok) proof = ((await res.json()) as { proof?: unknown }).proof;
+          else void res.body?.cancel().catch(() => undefined);
+        } catch {
+          proof = null;
+        }
+        if (!Array.isArray(proof) || !proof.every((x) => typeof x === "string")) throw reject("the log's consistency proof could not be loaded.");
+        if (!(await verifyConsistency(a.size, b.size, a.root, b.root, proof as string[], cryptoImpl))) throw reject("the log is not consistent with the history this client has seen (fork or rewrite).");
+        next = b;
+      }
+    }
+    return { cosign, commit: () => (logHead = next) };
+  }
+
   async function syncOnce(): Promise<void> {
     lastSyncAt = Date.now();
     const transport: Transport = streamTriggered ? "stream" : "poll";
@@ -719,6 +887,8 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
       const res = await request("/v1/bundle", { method: "GET", headers: etag ? { "If-None-Match": etag } : {} });
       if (closed) return;
       const servedStale = res.headers.get("X-NanoFlags-Stale") === "true";
+      // Migration 0179: a change is being shadow-evaluated (fresh answers only; a stale answer says nothing about it).
+      if ((res.status === 304 || res.ok) && !servedStale) noteShadow(res.headers.get("X-NanoFlags-Shadow"));
       if (res.status === 304) {
         failures = 0;
         if (bundle) setStatus(servedStale ? "stale" : "ready");
@@ -740,6 +910,16 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
       if (closed) return;
       const next = verified.bundle;
       if (!supportsEngine(next)) throw engineError(next);
+      let trusted: Awaited<ReturnType<typeof checkTrust>> | null = null;
+      if (strict && verified.sig) {
+        // Same revision as the one in use: nothing new to trust.
+        if (!(bundle && bundle.revision === next.revision && checksum === (body.checksum ?? null))) {
+          const cs = res.headers.get("X-NanoFlags-Cosignature");
+          const ck = res.headers.get("X-NanoFlags-Cosigner-Key-Id");
+          trusted = await checkTrust({ info: verified.sig, text: verified.raw ?? JSON.stringify(next), next, cosign: cs && ck ? { kid: ck, signature: cs } : null, evidence: decodeEvidence(res.headers.get("X-NanoFlags-Log")) });
+          if (closed) return;
+        }
+      } else if (strict) throw new NanoFlagsError(`Bundle r${next.revision} was rejected: it is not signed. The configuration in use is unchanged.`, "signature");
       failures = 0;
       // The edge is serving its last-known-good copy: never go backwards because of it.
       if (servedStale && bundle && bundle.revision >= next.revision) {
@@ -750,6 +930,10 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
       if (bundle && next.revision < liveRevision && bundle.revision >= liveRevision) return;
       sig = verified.sig;
       rawText = verified.raw;
+      if (trusted) {
+        trusted.commit();
+        cosignInUse = trusted.cosign;
+      }
       adopt(next, { etag: res.headers.get("ETag"), checksum: body.checksum ?? null, status: servedStale ? "stale" : "ready", source: "network", transport });
       persist();
     } catch (e) {
@@ -758,7 +942,7 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
       if (e instanceof NanoFlagsError && e.code === "engine") return void emitError(e);
       failures++;
       // A rejected update changes nothing: same bundle, same status. Polling retries with backoff.
-      if (e instanceof NanoFlagsError && e.code === "signature") return void emitError(e);
+      if (e instanceof NanoFlagsError && (e.code === "signature" || e.code === "log" || e.code === "cosign" || e.code === "config")) return void emitError(e);
       // A rejected key must not keep a socket: drop it (reconnects are refused by the edge and back off).
       if (e instanceof NanoFlagsError && e.code === "unauthorized") dropLive();
       // Keep evaluating with what we have; it is just no longer known to be current.
@@ -935,12 +1119,31 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
     if (!isBundle(parsed) || parsed.revision !== revision) return void emitError(new NanoFlagsError("The edge pushed an invalid bundle; it was ignored.", "invalid_bundle"));
     if (!supportsEngine(parsed)) return void emitError(engineError(parsed));
     if (bundle && revision < bundle.revision) return;
-    failures = 0;
     if (bundle && revision === bundle.revision) {
+      failures = 0;
       // Already in use: the push only confirms that it is current.
       if (checksum === null || checksum === pushedChecksum) setStatus("ready");
       return;
     }
+    let trusted: Awaited<ReturnType<typeof checkTrust>> | null = null;
+    if (strict) {
+      try {
+        if (!info) throw new NanoFlagsError(`Pushed bundle r${revision} was rejected: it is not signed. The configuration in use is unchanged.`, "signature");
+        const cs = typeof m.cosignature === "string" && typeof m.cosignerKid === "string" ? { kid: m.cosignerKid, signature: m.cosignature } : null;
+        trusted = await checkTrust({ info, text, next: parsed, cosign: cs, evidence: isLogEvidence(m.log) ? m.log : null });
+      } catch (e) {
+        if (closed) return;
+        emitError(e instanceof NanoFlagsError ? e : new NanoFlagsError(`Pushed bundle r${revision} could not be checked.`, "log"));
+        // The regular request path tries again (with backoff) and may find the log entry by then.
+        failures++;
+        unref(setTimeout(() => void sync(), 3000));
+        return;
+      }
+      if (closed || (bundle && revision <= bundle.revision)) return;
+      trusted.commit();
+      cosignInUse = trusted.cosign;
+    }
+    failures = 0;
     if (info) pinnedEnvironment = info.environmentId;
     sig = info;
     rawText = info && JSON.stringify(parsed) !== text ? text : null;
@@ -1120,7 +1323,7 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
       if (experimentTimer) clearTimeout(experimentTimer);
       experimentTimer = null;
       stopRealtime();
-      void flush(); // the app may be suspended next: send what is queued now
+      void flush(true); // the app may be suspended next: send what is queued now
       void flushExperiments();
     },
     resume() {
@@ -1202,8 +1405,15 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
     }
   }
 
-  async function flush(): Promise<void> {
+  async function flush(force = false): Promise<void> {
     if (!eventsEnabled || !doFetch) return;
+    // Shadow counters ride along at most once a minute (or now: flush(), pause, close, a new shadow session).
+    let shadowReport: ReturnType<ShadowCounters["report"]> | null = null;
+    if (shadowCounters && shadowCounters.size > 0 && (force || Date.now() - shadowFlushedAt >= SHADOW_FLUSH_MS)) {
+      shadowReport = shadowCounters.report(serviceVersion);
+      shadowCounters = new ShadowCounters(shadowCounters.sessionId, shadowCounters.checksum);
+      shadowFlushedAt = Date.now();
+    }
     // One request per interval: the service report plus up to one batch. Anything beyond that waits.
     const batch = queue.splice(0, MAX_BATCH).map((e) => {
       let value: JsonValue = e.value;
@@ -1221,7 +1431,7 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
         method: "POST",
         keepalive: true,
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ service, sdk: sdkLabel, revision: bundle?.revision ?? 0, events: batch }),
+        body: JSON.stringify({ service, sdk: sdkLabel, revision: bundle?.revision ?? 0, events: batch, ...(shadowReport ? { shadow: shadowReport } : {}) }),
       });
     } catch {
       /* dropped on failure, by design: telemetry is never retried */
@@ -1384,6 +1594,114 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
     scheduleExperiments(0);
   }
 
+  // ---- shadow evaluation of drafts (migration 0179; src/shadow.ts). Never changes what the app gets.
+  const shadowOpt: ShadowOptions = options.shadow === false ? { enabled: false } : (options.shadow ?? {});
+  const shadowEnabled = (shadowOpt.enabled ?? true) && eventsEnabled;
+  const shadowRate = Math.min(1, Math.max(0, typeof shadowOpt.sampleRate === "number" && Number.isFinite(shadowOpt.sampleRate) ? shadowOpt.sampleRate : 0.1));
+  const shadowRandom = shadowOpt.random ?? Math.random;
+  const serviceVersion = typeof options.serviceVersion === "string" && options.serviceVersion.trim() !== "" ? options.serviceVersion.trim().slice(0, 40) : undefined;
+  /** The verified shadow bundle in use, and the flags it changes compared with the live bundle (recomputed per live bundle). */
+  let shadowState: { bundle: ShadowBundle; live: Bundle | null; changed: Set<string> } | null = null;
+  let shadowCounters: ShadowCounters | null = null;
+  let shadowFlushedAt = Date.now();
+  let shadowFetch: { id: string; at: number; running: boolean } | null = null;
+  let shadowKeys: Promise<ImportedKey[]> | null = null;
+
+  function dropShadow() {
+    if (shadowCounters && shadowCounters.size > 0) void flush(true);
+    shadowState = null;
+    shadowCounters = null;
+  }
+
+  /** `X-NanoFlags-Shadow` of a fresh `/v1/bundle` answer: fetch the announced shadow bundle, or drop the one in use. */
+  function noteShadow(header: string | null) {
+    if (!shadowEnabled || closed) return;
+    const want = parseShadowHeader(header);
+    if (!want) return dropShadow();
+    const m = shadowState?.bundle.shadow;
+    if (m && m.sessionId === want.sessionId && m.checksum === want.checksum) return;
+    const id = `${want.sessionId}.${want.checksum}`;
+    if (shadowFetch && shadowFetch.id === id && (shadowFetch.running || Date.now() - shadowFetch.at < SHADOW_RETRY_MS)) return;
+    const entry = { id, at: Date.now(), running: true };
+    shadowFetch = entry;
+    void fetchShadow(want).finally(() => {
+      entry.running = false;
+      entry.at = Date.now();
+    });
+  }
+
+  /** Keys a shadow bundle is checked with: the configured ones, or (verification off for this edge) `/v1/keys`. */
+  async function shadowVerifyKeys(kid: string | null): Promise<ImportedKey[]> {
+    if (verifyOpt) return loadKeys(kid);
+    const p = (shadowKeys ??= fetchKeys());
+    p.catch(() => {
+      if (shadowKeys === p) shadowKeys = null;
+    });
+    return p;
+  }
+
+  /** Loads and verifies a shadow bundle. Only a bundle signed for this session, with a matching marker inside, is used. */
+  async function fetchShadow(want: { sessionId: string; checksum: string }): Promise<void> {
+    const reject = (why: string) =>
+      emitError(new NanoFlagsError(`The shadow bundle of session ${want.sessionId} was ignored: ${why} Nothing changes for the app (shadow bundles are never applied).`, "shadow"));
+    try {
+      const res = await request("/v1/shadow", { method: "GET", cache: "no-store" });
+      if (closed) return;
+      if (res.status === 404) return dropShadow();
+      if (!res.ok) return;
+      const text = await res.text();
+      const body = JSON.parse(text) as { sessionId?: unknown; checksum?: unknown } | null;
+      // Already replaced by a newer session: the next bundle answer announces that one.
+      if (!body || body.sessionId !== want.sessionId || body.checksum !== want.checksum) return;
+      const raw = rawMember(text, "bundle");
+      const signature = res.headers.get("X-NanoFlags-Signature");
+      const kid = res.headers.get("X-NanoFlags-Key-Id");
+      const environmentId = res.headers.get("X-NanoFlags-Environment-Id");
+      if (!signature || !environmentId || raw === null) return reject("it is not signed.");
+      if (pinnedEnvironment !== null && pinnedEnvironment !== environmentId) return reject("it was signed for a different environment.");
+      let ok = false;
+      try {
+        ok = await verifyShadowText(await shadowVerifyKeys(kid), { signature, kid, environmentId, sessionId: want.sessionId, checksum: want.checksum }, raw, cryptoImpl);
+      } catch {
+        ok = false;
+      }
+      if (closed) return;
+      if (!ok) return reject("its signature does not verify.");
+      const parsed: unknown = JSON.parse(raw);
+      if (!isShadowBundle(parsed)) return reject("it is not a shadow bundle.");
+      const m = parsed.shadow;
+      if (m.sessionId !== want.sessionId || m.checksum !== want.checksum || m.environmentId !== environmentId) return reject("its shadow marker does not match.");
+      if (!supportsEngine(parsed)) return;
+      if (shadowCounters && shadowCounters.size > 0) void flush(true);
+      shadowState = { bundle: parsed, live: null, changed: new Set() };
+      shadowCounters = new ShadowCounters(want.sessionId, want.checksum);
+    } catch {
+      /* shadow evaluation never affects the app */
+    }
+  }
+
+  /** After a live evaluation: for a sample of the flags the draft changes, evaluate the draft too and count. */
+  function shadowEvaluate<T extends JsonValue>(key: string, fallback: T, context: Context, accepts: ((v: unknown) => boolean) | null, live: Evaluation<T>, b: Bundle) {
+    const st = shadowState;
+    const counters = shadowCounters;
+    if (!st || !counters || shadowRate <= 0) return;
+    try {
+      if (st.live !== b) {
+        st.live = b;
+        st.changed = changedFlags(b, st.bundle);
+      }
+      if (!st.changed.has(key) || shadowRandom() >= shadowRate) return;
+      const r = engineEvaluate<T>(st.bundle, key, context, fallback);
+      // A side that used the app's own fallback is reported as "<fallback>": that value is the app's, not a bundle's (flag
+      // missing on that side, evaluation error, or a value of the wrong type, which run() already turned into "error").
+      const liveFallback = live.reason === "flag_not_found" || live.reason === "error";
+      const shadowFallback = r.reason === "flag_not_found" || r.reason === "error" || (accepts !== null && !accepts(r.value));
+      counters.add(key, live.value, shadowFallback ? fallback : r.value, r.reason === "rule_match" ? r.ruleIndex : undefined, liveFallback, shadowFallback);
+    } catch {
+      /* shadow evaluation never affects the app */
+    }
+  }
+
   // ---- evaluation
   const live = (s: SessionState | null): SessionState | null => (s !== null && Date.now() < s.expiresAtMs ? s : null);
 
@@ -1400,6 +1718,8 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
     record(result as Evaluation, context, b, s?.id);
     // Test sessions evaluate a pinned bundle for QA: synthetic traffic is never an exposure.
     if (!s) recordExposure(result as Evaluation, context, b);
+    // Test sessions evaluate their own snapshot: never shadowed.
+    if (shadowState && !s && b) shadowEvaluate(key, fallback, context, accepts, result, b);
     return result;
   }
 
@@ -1572,11 +1892,11 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
     },
     track: track as NanoFlagsClient["track"],
     async flush() {
-      await Promise.all([flush(), flushExperiments()]);
+      await Promise.all([flush(true), flushExperiments()]);
     },
     close() {
       if (closed) return;
-      void flush(); // best effort
+      void flush(true); // best effort
       void flushExperiments();
       closed = true;
       if (pollTimer) clearTimeout(pollTimer);
@@ -1605,6 +1925,12 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
   }
   if (verifyOpt && Array.isArray(verifyOpt.keys) && verifyOpt.keys.some((k) => !isPublicEd25519Jwk(k))) {
     queueMicrotask(() => emitError(new NanoFlagsError("`verify.publicKeys` must contain public Ed25519 JWKs only. Other entries (including private keys) were ignored.", "config")));
+  }
+  if (strictBroken) {
+    queueMicrotask(() => emitError(new NanoFlagsError("`verifyLog` and `coSignerKeys` need signature verification, but `verify` is false: no update will be applied.", "config")));
+  }
+  if (cosignWanted && (coSignerJwks.length === 0 || coSignerJwks.some((k) => !isPublicEd25519Jwk(k) || typeof (k as { kid?: unknown }).kid !== "string"))) {
+    queueMicrotask(() => emitError(new NanoFlagsError("`coSignerKeys` must contain public Ed25519 JWKs with a `kid`. Other entries were ignored; without a usable key every update is rejected.", "config")));
   }
   if (typeof sdkKey !== "string" || sdkKey === "" || baseUrl === "") {
     queueMicrotask(() => emitError(new NanoFlagsError("`sdkKey` and `baseUrl` are required.", "config")));

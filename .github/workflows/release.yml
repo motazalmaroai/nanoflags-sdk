@@ -5,8 +5,9 @@ name: Release
 #   tag openfeature-v<version>  -> @nanoflags/openfeature-provider (packages/openfeature)
 #   tag cli-v<version>          -> @nanoflags/cli                  (packages/cli)
 #   tag react-native-v<version> -> @nanoflags/react-native         (packages/sdk-react-native)
+#   tag mcp-v<version>          -> @nanoflags/mcp                  (packages/mcp)
 #   workflow_call (input `package`) from auto-release.yml, which runs on every push to main
-#   workflow_dispatch (input `package`: sdk | openfeature | cli) -> the version currently in that package.json
+#   workflow_dispatch (input `package`: sdk | openfeature | cli | react-native | mcp) -> the version currently in that package.json
 # A tag's version must equal the package.json version. A version that is already on npm is skipped with a notice.
 # Publish the SDK before a provider release that needs a new SDK version (the provider's peer range on
 # @nanoflags/sdk is written from the workspace version by `pnpm pack`).
@@ -20,6 +21,7 @@ on:
       - "openfeature-v*"
       - "cli-v*"
       - "react-native-v*"
+      - "mcp-v*"
   workflow_dispatch:
     inputs:
       package:
@@ -31,6 +33,7 @@ on:
           - openfeature
           - cli
           - react-native
+          - mcp
   workflow_call:
     inputs:
       package:
@@ -71,6 +74,7 @@ jobs:
               openfeature-v*) short=openfeature; tag_version="${REF_NAME#openfeature-v}" ;;
               cli-v*)         short=cli;         tag_version="${REF_NAME#cli-v}" ;;
               react-native-v*) short=react-native; tag_version="${REF_NAME#react-native-v}" ;;
+              mcp-v*)         short=mcp;         tag_version="${REF_NAME#mcp-v}" ;;
               *) echo "::error::Unknown tag $REF_NAME"; exit 1 ;;
             esac
           fi
@@ -79,7 +83,8 @@ jobs:
             openfeature) dir=packages/openfeature; name=@nanoflags/openfeature-provider ;;
             cli)         dir=packages/cli;         name=@nanoflags/cli ;;
             react-native) dir=packages/sdk-react-native; name=@nanoflags/react-native ;;
-            *) echo "::error::Unknown package '$short' (expected sdk, openfeature, cli or react-native)"; exit 1 ;;
+            mcp)         dir=packages/mcp;         name=@nanoflags/mcp ;;
+            *) echo "::error::Unknown package '$short' (expected sdk, openfeature, cli, react-native or mcp)"; exit 1 ;;
           esac
           version=$(node -p "require('./$dir/package.json').version")
           actual_name=$(node -p "require('./$dir/package.json').name")

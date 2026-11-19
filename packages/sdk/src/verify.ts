@@ -152,6 +152,45 @@ export async function importPublicKeys(jwks: readonly unknown[], crypto?: Signat
   return out;
 }
 
+/**
+ * Shadow bundles (the draft of a change waiting for approval, never applied): signed over their own canonical string,
+ * so a shadow signature never verifies as a bundle signature and the other way round.
+ *
+ * shadow canonical = "nanoflags-shadow-v1\n<environment_id>\n<session_id>\n<draft checksum>\n<sha256 hex of the bundle JSON text>"
+ */
+export function shadowCanonicalString(environmentId: string, sessionId: string, checksum: string, bundleSha256Hex: string): string {
+  return `nanoflags-shadow-v1\n${environmentId}\n${sessionId}\n${checksum}\n${bundleSha256Hex}`;
+}
+
+export interface ShadowSignatureInfo {
+  signature: string;
+  kid: string | null;
+  environmentId: string;
+  sessionId: string;
+  checksum: string;
+}
+
+/** True when `info.signature` is a valid shadow-bundle signature by one of `keys` over `bundleText`. */
+export async function verifyShadowText(keys: readonly ImportedKey[], info: ShadowSignatureInfo, bundleText: string, crypto?: SignatureCrypto): Promise<boolean> {
+  let signature: Uint8Array<ArrayBuffer>;
+  try {
+    signature = base64UrlDecode(info.signature);
+  } catch {
+    return false;
+  }
+  if (signature.length !== 64) return false;
+  const data = utf8(shadowCanonicalString(info.environmentId, info.sessionId, info.checksum, await sha256Hex(bundleText, crypto)));
+  const candidates = info.kid === null ? keys : keys.filter((k) => k.kid === info.kid || k.kid === null);
+  for (const k of candidates) {
+    try {
+      if (await k.verify(signature, data)) return true;
+    } catch {
+      /* try the next key */
+    }
+  }
+  return false;
+}
+
 /** True when `info.signature` is a valid signature by one of `keys` over the canonical string for `bundleText`. */
 export async function verifyBundleText(keys: readonly ImportedKey[], info: SignatureInfo, bundleText: string, crypto?: SignatureCrypto): Promise<boolean> {
   let signature: Uint8Array<ArrayBuffer>;

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.7.0 (2026-11-19)
+
+Additive, no breaking changes; nothing changes unless the new options are set (shadow evaluation only acts when an admin turned it on for the environment).
+
+- Shadow evaluation of drafts (migration 0179): when the edge announces a shadow bundle (`X-NanoFlags-Shadow` on `/v1/bundle`), the client loads it from `/v1/shadow`, checks its signature (shadow domain `nanoflags-shadow-v1`, marker inside the signed bytes) and, for a sample of evaluations of the flags the draft changes (`shadow.sampleRate`, default 0.1), evaluates the draft too. Only aggregate counters are sent, with the telemetry report at most once a minute (`shadow` member of `POST /v1/events`). The app always gets the live value; a shadow bundle is never applied (any bundle with a `shadow` member is refused as configuration). `shadow: false` turns it off; it is off when `events` is off. New `serviceVersion` option labels the reports. A shadow bundle that does not verify emits `error` with code `shadow`. The app's own fallback value is never reported (a side that used it is sent as `"<fallback>"`); flags affected through segments inside segments are shadowed too; value changes are compared independently of object key order.
+
+- `verifyLog` option: every update is checked against the environment's transparency log (RFC 9162 inclusion proof, tree head signed by NanoFlags, consistency with the last head seen). Failures emit `error` with code `log` and keep the configuration in use.
+- `coSignerKeys` option: updates must carry a valid customer co-signature (`X-NanoFlags-Cosignature`, or `cosignature` on live messages); failures emit `error` with code `cosign`.
+- `allowEmergencyWithoutCosign` option (default `true`): kill-switch revisions that only turn flags off are accepted without the co-signature.
+- Exports the log verifiers (`verifyInclusion`, `verifyConsistency`, `leafHash`, `parseLeaf`, `headText`, `onlyTurnsFlagsOff`).
+
 ## 0.6.0 (2026-11-18)
 
 - `events: false` (telemetry off) also turns experiment exposures and `track()` off, unless `experiments: { enabled: true }` is set explicitly.

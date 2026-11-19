@@ -6,8 +6,10 @@ import { Api, ApiError, DEFAULT_BASE_URL, ManagementApi, explain, isExport, keyK
 import type { Json, SiteReport } from "./cleanup.js";
 import type { CodeRef } from "./refs.js";
 import { CliError, DEFAULT_MAX_FILE_BYTES, EXIT, clip, show, table, unifiedDiff, walk } from "./util.js";
+import { checkHistory, isMonitorState, isTreeHead, leafHash, rootOf, verifyConsistency, verifyHead, type MonitorState, type PublicJwk, type TreeHead } from "./log.js";
+import { generateKey, isCosignature, isCosignPreview, privateKeyFrom, publicX, signPreview, signingTexts, verifyCosignature, type Cosignature } from "./cosign.js";
 
-export const VERSION = "0.3.0";
+export const VERSION = "0.4.0";
 
 export interface Io {
   env: Record<string, string | undefined>;
@@ -35,14 +37,33 @@ Commands
                                                 Evaluate one flag locally and print value, reason and trace
   scenarios run [--source draft|revision] [--commit <sha>] [--run-url <url>] [--json]
                                                 Run the saved scenarios; exit 1 when one fails
-  publish --expected-revision <n> [--note <text>]
-                                                Publish the draft of the key's environment (admin key)
+  publish --expected-revision <n> [--note <text>] [--cosign <file> [--change <id>]]
+                                                Publish the draft of the key's environment (admin key); --cosign adds
+                                                the co-signature written by \`nanoflags sign\` (co-signed environments);
+                                                --change publishes through that approved change (work that needs an
+                                                approval, e.g. proposed by an AI agent)
+  sign --key <private key file> [--kid <id>] [--expect <bundle.json>] [--expect-checksum <md5>]
+       [--out <file>] [--bundle-out <file>] [--json]
+                                                Co-sign the revision the next publish would create, with your own
+                                                Ed25519 key (JWK or PEM); NANOFLAGS_KEY holds the admin key.
+                                                --expect / --expect-checksum: refuse unless the draft is exactly
+                                                the content your CI expects (prints a per-flag diff)
+  keygen --out <file> [--kid <id>]              Create an Ed25519 co-signing key (private JWK, mode 600) and print
+                                                the public key to register in the dashboard
+  log verify [--env <id>] [--state <file>] [--public-keys <file>] [--json]
+                                                Download the environment's transparency log and verify the whole
+                                                history locally (signed head, every entry, root, consistency)
+  log monitor --state <file> [--env <id>] [--public-keys <file>] [--json]
+                                                One-shot CI check: the signed head extends the one saved in --state
   refs scan [dir] --repo <owner/name> [--commit <sha>] [--dry-run] [--json]
                                                 Find flag references in source files and upload them
   cleanup <flag> --value <json> [dir] [--write] Propose (or apply) the removal of a resolved flag from code
-  import <file> --project <key> [--env-map src=target,…] [--format auto|flagd|nanoflags|csv|launchdarkly|unleash|flagsmith|growthbook]
+  import <file> --project <key> [--env-map src=target,…] [--format auto|flagd|nanoflags|csv|launchdarkly|unleash|flagsmith|growthbook|statsig]
          [--conflict skip|rename|overwrite] [--rename-suffix <s>] [--label <text>] [--dry-run] [--json]
                                                 Import flags into drafts (never publishes); needs NANOFLAGS_API_TOKEN
+  import verify <file> --contexts <file.jsonl> --project <key> [--env-map …] [--format …] [--flags a,b] [--json]
+                                                Compare sample contexts side by side: the source's value vs. the
+                                                imported drafts' value (dry run); exit 1 when one differs
 
 Global options
   --key <key>          CI or admin key. Default: $NANOFLAGS_KEY. Prefer the environment variable:
@@ -53,6 +74,8 @@ Global options
   --base-url <url>     Default: $NANOFLAGS_BASE_URL or ${DEFAULT_BASE_URL}
   --token <token>      Management API token for \`import\` (nf_api_…). Default: $NANOFLAGS_API_TOKEN
   --export <file>      Read a saved \`nanoflags export\` instead of calling the API (eval, flags list, refs scan, cleanup)
+  --public-keys <file> NanoFlags' public signing keys (JWK array or { keys }) for \`log\`; default: the keys
+                       built in for the hosted edge, else GET /v1/keys
   -h, --help           -v, --version
 
 Exit codes: 0 ok · 1 a check failed (failing scenario, publish refused) · 2 usage, configuration or key problem · 3 NanoFlags unreachable
@@ -93,6 +116,17 @@ const OPTIONS = {
   conflict: { type: "string" },
   "rename-suffix": { type: "string" },
   label: { type: "string" },
+  state: { type: "string" },
+  "public-keys": { type: "string" },
+  "signing-key": { type: "string" },
+  kid: { type: "string" },
+  cosign: { type: "string" },
+  change: { type: "string" },
+  "bundle-out": { type: "string" },
+  expect: { type: "string" },
+  "expect-checksum": { type: "string" },
+  contexts: { type: "string" },
+  flags: { type: "string" },
   help: { type: "boolean", short: "h" },
   version: { type: "boolean", short: "v" },
 } as const;
@@ -471,9 +505,12 @@ async function cmdScenariosRun(r: Run): Promise<number> {
 
 const PUBLISH_HELP: Record<string, string> = {
   DESTINATION_CHANGED: "Someone published in the meantime. Review the new revision, then run again with its number as --expected-revision.",
-  CHANGE_REQUIRED: "This environment only accepts reviewed changes. Publish it from the dashboard; an admin key cannot bypass review.",
+  CHANGE_REQUIRED: "This draft needs a reviewed change; an admin key cannot bypass review. Publish it from the dashboard, or on a co-signed environment get the change approved and run `nanoflags publish --cosign <file> --change <change id>`.",
+  APPROVAL_REQUIRED: "The change needs an independent approval of the current draft (by an owner or admin who did not author or edit it). Approve it in the dashboard, sign again if the draft changed, then publish.",
   SCENARIOS_REQUIRED: "Run `nanoflags scenarios run --source draft` and fix the failing scenarios (or the draft), then publish again.",
   NO_CHANGES: "There is nothing to publish.",
+  COSIGN_REQUIRED: "This environment requires your co-signature: run `nanoflags sign --key <your key>` and publish with `--cosign <file>`.",
+  COSIGN_INVALID: "The co-signature does not match the draft (it changed, or another key signed it). Run `nanoflags sign` again.",
 };
 
 async function cmdPublish(r: Run): Promise<number> {
@@ -483,9 +520,23 @@ async function cmdPublish(r: Run): Promise<number> {
   const kind = keyKind(k);
   if (kind !== "admin" && kind !== "unknown") throw usage(`publish needs an admin key; this is a ${kind} key. ${kind === "ci" ? "CI keys can run scenarios and upload references, never publish." : ""}`.trim());
   try {
-    const res = await api(r).publish({ expectedRevision: Number(raw), ...(r.values.note ? { note: r.values.note } : {}) });
+    let cosignature: Cosignature | undefined;
+    if (r.values.cosign) {
+      const file = path(r, r.values.cosign);
+      if (!existsSync(file)) throw usage(`--cosign: no such file: ${r.values.cosign}`);
+      const v = parseJson(readFileSync(file, "utf8"), "--cosign");
+      if (!isCosignature(v)) throw usage("--cosign must be the JSON file written by `nanoflags sign`.");
+      if (v.revision !== Number(raw) + 1) throw usage(`The co-signature is for r${v.revision}; --expected-revision ${raw} would publish r${Number(raw) + 1}. Sign again.`);
+      cosignature = v;
+    }
+    const change = r.values.change;
+    if (change !== undefined) {
+      if (!cosignature) throw usage("--change needs --cosign: it publishes an approved change on a co-signed environment. Without co-signing, publish the change from the dashboard.");
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(change)) throw usage("--change must be the change id (a UUID, shown on the change page).");
+    }
+    const res = await api(r).publish({ expectedRevision: Number(raw), ...(r.values.note ? { note: r.values.note } : {}), ...(cosignature ? { cosignature: { kid: cosignature.kid, revision: cosignature.revision, checksum: cosignature.checksum, server: cosignature.server, client: cosignature.client } } : {}), ...(change ? { change } : {}) });
     if (r.values.json) r.io.out(`${JSON.stringify(res, null, 2)}\n`);
-    else r.io.out(`Published r${res.revision} (checksum ${res.checksum}).\n`);
+    else r.io.out(`Published r${res.revision} (checksum ${res.checksum})${change ? ` through change ${change}` : ""}.\n`);
     return EXIT.ok;
   } catch (e) {
     const err = e as { code?: string; message?: string; status?: number };
@@ -496,6 +547,235 @@ async function cmdPublish(r: Run): Promise<number> {
     }
     throw explain(e, k, "publish");
   }
+}
+
+/* ---------------- co-signing ---------------- */
+
+async function cmdSign(r: Run): Promise<number> {
+  // `--key <path>` names the private key file here; the admin key comes from NANOFLAGS_KEY (or `--key nf_adm_…` with --signing-key).
+  const keyArg = r.values.key;
+  const signingPath = r.values["signing-key"] ?? (keyArg && !/^nf_[a-z]{2,8}_/.test(keyArg) ? keyArg : undefined);
+  if (!signingPath) throw usage("sign needs --key <file>: your Ed25519 private key (JWK or PEM). The NanoFlags admin key is read from NANOFLAGS_KEY.");
+  const admin = (keyArg && /^nf_[a-z]{2,8}_/.test(keyArg) ? keyArg : r.io.env.NANOFLAGS_KEY ?? "").trim();
+  if (admin === "") throw usage("No NanoFlags key. Set NANOFLAGS_KEY to an admin key of the environment.");
+  if (keyKind(admin) !== "admin" && keyKind(admin) !== "unknown") throw usage("sign needs an admin key of the environment in NANOFLAGS_KEY.");
+  const file = path(r, signingPath);
+  if (!existsSync(file)) throw usage(`No such key file: ${signingPath}`);
+  let key: ReturnType<typeof privateKeyFrom>;
+  try {
+    key = privateKeyFrom(readFileSync(file, "utf8"));
+  } catch (e) {
+    throw usage(`Could not read the signing key: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  const kid = r.values.kid ?? key.kid;
+  if (!kid) throw usage("The key has no `kid`: pass --kid <the key id you registered in the dashboard>.");
+  const client = new Api({ baseUrl: baseUrl(r), key: admin, fetch: r.io.fetch, userAgent: `nanoflags-cli/${VERSION}` });
+  let preview: unknown;
+  try {
+    preview = await client.call("GET", "/v1/admin/cosign/preview");
+  } catch (e) {
+    const err = e as { code?: string; message?: string };
+    if (err.code === "NO_CHANGES") {
+      r.io.err("Nothing to sign: the draft is identical to the published configuration.\n");
+      return EXIT.failed;
+    }
+    throw explain(e, admin, "sign");
+  }
+  if (!isCosignPreview(preview)) throw new CliError("The edge returned an unexpected preview.", EXIT.unavailable);
+  // Co-signing protects against a compromised NanoFlags: the signer must check what it signs, not trust the preview.
+  const pinned = r.values["expect-checksum"]?.trim();
+  if (pinned !== undefined && pinned !== preview.checksum) {
+    r.io.err(`Refusing to sign: the draft has checksum ${preview.checksum}, --expect-checksum is ${pinned}.\n`);
+    return EXIT.failed;
+  }
+  if (r.values.expect) {
+    const file = path(r, r.values.expect);
+    if (!existsSync(file)) throw usage(`--expect: no such file: ${r.values.expect}`);
+    const expected = parseJson(readFileSync(file, "utf8"), "--expect");
+    if (typeof expected !== "object" || expected === null || Array.isArray(expected) || typeof (expected as { flags?: unknown }).flags !== "object") throw usage("--expect must be a bundle JSON object with `flags` (and optionally `segments`), e.g. the file `--bundle-out` wrote for a reviewed draft.");
+    const diff = contentDiff(expected as Record<string, unknown>, preview.bundle);
+    if (diff.length > 0) {
+      r.io.err(`Refusing to sign: the draft differs from ${r.values.expect}:\n${diff.map((l) => `  ${l}`).join("\n")}\n`);
+      return EXIT.failed;
+    }
+  }
+  const registered = preview.keys.find((k) => k.kid === kid);
+  if (!registered) throw new CliError(`Key id ${kid} is not an active co-signing key of this environment (registered: ${preview.keys.map((k) => k.kid).join(", ") || "none"}).`, EXIT.failed);
+  if (registered.publicKey !== publicX(key.key)) throw new CliError(`The key file is not the key registered as ${kid}.`, EXIT.failed);
+  const sig = signPreview(preview, key.key, kid);
+  if (!verifyCosignature(preview, sig, registered.publicKey)) throw new CliError("The signature could not be verified locally.", EXIT.failed);
+  if (r.values["bundle-out"]) writeFileSync(path(r, r.values["bundle-out"]), signingTexts(preview.bundle).server);
+  const text = `${JSON.stringify(sig, null, 2)}\n`;
+  if (r.values.out) writeFileSync(path(r, r.values.out), text);
+  if (r.values.json || !r.values.out) r.io.out(text);
+  const flags = Object.keys((preview.bundle.flags ?? {}) as Record<string, unknown>).length;
+  r.io.err(`Signed r${preview.revision} of ${preview.environmentId} (checksum ${preview.checksum}, ${flags} flag${flags === 1 ? "" : "s"}) with ${kid}.${r.values.out ? ` Wrote ${r.values.out}.` : ""}\nPublish with: nanoflags publish --expected-revision ${preview.expectedRevision} --cosign ${r.values.out ?? "<file>"}\n`);
+  return EXIT.ok;
+}
+
+/** JSON with object keys sorted, for comparing content regardless of key order. */
+function canonicalJson(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(canonicalJson).join(",")}]`;
+  if (typeof v === "object" && v !== null) return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonicalJson((v as Record<string, unknown>)[k])}`).join(",")}}`;
+  return JSON.stringify(v);
+}
+
+/**
+ * Per-flag (and per-segment) differences between the content CI expects and the draft NanoFlags returned; empty when
+ * they are the same. Segments are compared only when the expected file has `segments`.
+ */
+export function contentDiff(expected: Record<string, unknown>, actual: Record<string, unknown>): string[] {
+  const out: string[] = [];
+  const obj = (v: unknown) => (typeof v === "object" && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>) : {});
+  const compare = (what: string, a: Record<string, unknown>, b: Record<string, unknown>) => {
+    for (const k of [...new Set([...Object.keys(a), ...Object.keys(b)])].sort()) {
+      if (!(k in b)) out.push(`- ${what} ${k}: expected, missing from the draft`);
+      else if (!(k in a)) out.push(`+ ${what} ${k}: in the draft, not expected`);
+      else if (canonicalJson(a[k]) !== canonicalJson(b[k])) out.push(`~ ${what} ${k}: expected ${clip(canonicalJson(a[k]), 200)}, draft ${clip(canonicalJson(b[k]), 200)}`);
+    }
+  };
+  compare("flag", obj(expected.flags), obj(actual.flags));
+  if ("segments" in expected) compare("segment", obj(expected.segments), obj(actual.segments));
+  return out;
+}
+
+function cmdKeygen(r: Run): number {
+  const out = r.values.out;
+  if (!out) throw usage("keygen needs --out <file> for the private key.");
+  const file = path(r, out);
+  if (existsSync(file)) throw usage(`${out} exists; refusing to overwrite a key.`);
+  const kid = r.values.kid ?? `ci-${new Date().toISOString().slice(0, 10)}`;
+  if (!/^[A-Za-z0-9._-]{1,64}$/.test(kid)) throw usage("--kid must be 1–64 letters, digits, dots, dashes or underscores.");
+  const { privateJwk, publicJwk } = generateKey(kid);
+  writeFileSync(file, `${JSON.stringify(privateJwk)}\n`, { mode: 0o600 });
+  r.io.out(`${JSON.stringify(publicJwk)}\n`);
+  r.io.err(`Wrote the private key to ${out} (keep it in your CI's secret store; never commit it).\nRegister the public key in the dashboard: environment → Security → Co-signing, key id ${kid}, public key ${publicJwk.x}.\nGive SDKs the same public key in \`coSignerKeys\`.\n`);
+  return EXIT.ok;
+}
+
+/* ---------------- transparency log ---------------- */
+
+/** NanoFlags' public bundle-signing keys, built in for the hosted edge (same as the SDK's OFFICIAL_SIGNING_KEYS). */
+const OFFICIAL_KEYS: PublicJwk[] = [{ kty: "OKP", crv: "Ed25519", x: "wQu1EsaE-yTjqpUbibGyBrajy3IiRb7LyaiqeYRxG4U", kid: "k1" }];
+
+function logApi(r: Run): { client: Api; key: string } {
+  const k = (r.values["sdk-key"] ?? r.io.env.NANOFLAGS_SDK_KEY ?? r.values.key ?? r.io.env.NANOFLAGS_KEY ?? "").trim();
+  if (k === "") throw usage("No key. Set NANOFLAGS_KEY or NANOFLAGS_SDK_KEY (any key of the environment) to read its log.");
+  return { client: new Api({ baseUrl: baseUrl(r), key: k, fetch: r.io.fetch, userAgent: `nanoflags-cli/${VERSION}` }), key: k };
+}
+
+async function signingKeys(r: Run, client: Api, kid: string): Promise<PublicJwk[]> {
+  if (r.values["public-keys"]) {
+    const v = parseJson(readFileSync(path(r, r.values["public-keys"]), "utf8"), "--public-keys");
+    const list = Array.isArray(v) ? v : (v as { keys?: unknown }).keys;
+    if (!Array.isArray(list)) throw usage("--public-keys must be a JSON array of JWKs or { keys: [...] }.");
+    return (list as PublicJwk[]).map((k) => ({ kty: k.kty, crv: k.crv, x: k.x, kid: k.kid }));
+  }
+  if (baseUrl(r) === DEFAULT_BASE_URL && OFFICIAL_KEYS.some((k) => k.kid === kid)) return OFFICIAL_KEYS;
+  const res = await client.call<{ keys?: PublicJwk[] }>("GET", "/v1/keys");
+  return Array.isArray(res.keys) ? res.keys.map((k) => ({ kty: k.kty, crv: k.crv, x: k.x, kid: k.kid })) : [];
+}
+
+function readState(r: Run): MonitorState {
+  const f = r.values.state ? path(r, r.values.state) : null;
+  if (!f || !existsSync(f)) return { version: 1, heads: {} };
+  const v = parseJson(readFileSync(f, "utf8"), "--state");
+  if (!isMonitorState(v)) throw usage(`${r.values.state} is not a \`nanoflags log\` state file.`);
+  return v;
+}
+
+/** The latest signed head (verified), and the previous head from --state checked for consistency (proof from the edge). */
+async function verifiedHead(r: Run, client: Api, key: string): Promise<{ environmentId: string; head: TreeHead | null; previous: TreeHead | null; state: MonitorState; problems: string[] }> {
+  let res: { environmentId?: unknown; head?: unknown };
+  try {
+    res = await client.call("GET", "/v1/log/head");
+  } catch (e) {
+    throw explain(e, key, "read the transparency log");
+  }
+  const environmentId = typeof res.environmentId === "string" ? res.environmentId : "";
+  if (r.values.env && r.values.env.toLowerCase() !== environmentId.toLowerCase()) throw usage(`The key belongs to environment ${environmentId}, not ${r.values.env}.`);
+  const state = readState(r);
+  const previous = state.heads[environmentId] ?? null;
+  const problems: string[] = [];
+  if (!isTreeHead(res.head)) return { environmentId, head: null, previous, state, problems: previous ? ["the log is empty, but a head was verified before (the log was reset)"] : [] };
+  const head = res.head;
+  if (!verifyHead(await signingKeys(r, client, head.kid), environmentId, head)) problems.push(`the tree head (size ${head.size}) is not signed by a NanoFlags key (kid ${head.kid})`);
+  if (previous) {
+    if (previous.size > head.size) problems.push(`the log shrank: ${previous.size} entries were verified before, the head now says ${head.size}`);
+    else if (previous.size === head.size) {
+      if (previous.root !== head.root) problems.push(`two different trees of size ${head.size}: the log forked`);
+    } else {
+      let proof: unknown = null;
+      try {
+        proof = (await client.call<{ proof?: unknown }>("GET", `/v1/log/consistency?first=${previous.size}&second=${head.size}`)).proof;
+      } catch (e) {
+        throw explain(e, key, "read the consistency proof");
+      }
+      if (!Array.isArray(proof) || !verifyConsistency(previous.size, head.size, previous.root, head.root, proof as string[])) problems.push(`the head (size ${head.size}) does not extend the head saved in the state file (size ${previous.size}): the log was rewritten or forked`);
+    }
+  }
+  return { environmentId, head, previous, state, problems };
+}
+
+function saveState(r: Run, state: MonitorState, environmentId: string, head: TreeHead): void {
+  if (!r.values.state) return;
+  state.heads[environmentId] = { ...head, checkedAt: new Date().toISOString() };
+  writeFileSync(path(r, r.values.state), `${JSON.stringify(state, null, 2)}\n`);
+}
+
+async function cmdLogVerify(r: Run): Promise<number> {
+  const { client, key: k } = logApi(r);
+  const v = await verifiedHead(r, client, k);
+  if (!v.head) {
+    if (r.values.json) r.io.out(`${JSON.stringify({ environmentId: v.environmentId, size: 0, ok: v.problems.length === 0, problems: v.problems }, null, 2)}\n`);
+    else r.io.out(v.problems.length ? `FAILED: ${v.problems.join("; ")}\n` : `The transparency log of ${v.environmentId} is empty (nothing published since it was enabled).\n`);
+    return v.problems.length ? EXIT.failed : EXIT.ok;
+  }
+  const texts: string[] = [];
+  while (texts.length < v.head.size) {
+    let page: { entries?: { index: number; leaf: string }[] };
+    try {
+      page = await client.call("GET", `/v1/log/entries?start=${texts.length}&limit=1000`);
+    } catch (e) {
+      throw explain(e, k, "download the log");
+    }
+    const entries = Array.isArray(page.entries) ? page.entries : [];
+    if (entries.length === 0) break;
+    for (const e of entries) {
+      if (e.index !== texts.length) throw new CliError(`The edge returned entry ${e.index} where ${texts.length} was expected.`, EXIT.failed);
+      texts.push(e.leaf);
+    }
+  }
+  const report = checkHistory(v.environmentId, texts.slice(0, v.head.size), v.head);
+  const problems = [...v.problems, ...report.problems];
+  // With every leaf at hand, the saved head is also checked directly: its root must be the root of the first entries.
+  if (v.previous && v.previous.size <= texts.length && rootOf(texts.slice(0, v.previous.size).map(leafHash)) !== v.previous.root) problems.push(`the first ${v.previous.size} entries no longer hash to the head saved in the state file`);
+  if (problems.length === 0) saveState(r, v.state, v.environmentId, v.head);
+  if (r.values.json) {
+    r.io.out(`${JSON.stringify({ environmentId: v.environmentId, ok: problems.length === 0, head: v.head, ...report, problems }, null, 2)}\n`);
+  } else {
+    r.io.out(`Transparency log of ${v.environmentId}\n`);
+    r.io.out(`  head: ${v.head.size} entries, root ${v.head.root.slice(0, 16)}…, signed ${new Date(v.head.timestamp).toISOString()} (key ${v.head.kid})\n`);
+    r.io.out(`  revisions r${report.revisions.first ?? "-"}–r${report.revisions.last ?? "-"}, ${report.cosigned} co-signed, ${report.emergencies.length} emergency (kill switch without co-signature)\n`);
+    for (const e of report.emergencies) r.io.out(`    emergency: r${e.revision} at ${new Date(e.publishedAt).toISOString()}\n`);
+    if (report.resigned.length) r.io.out(`  re-signed (logged again with new bytes): ${[...new Set(report.resigned)].map((n) => `r${n}`).join(", ")}\n`);
+    if (report.missing.length) r.io.out(`  not in the log: ${report.missing.length} revision(s) between r${report.revisions.first} and r${report.revisions.last} (published before the log was enabled, or not logged)\n`);
+    r.io.out(problems.length ? `FAILED:\n${problems.map((p) => `  - ${p}`).join("\n")}\n` : `OK: the signed head covers every entry, and ${v.previous ? `it extends the head saved in ${r.values.state}` : "no earlier head was saved (pass --state to check the next run against this one)"}.\n`);
+  }
+  return problems.length ? EXIT.failed : EXIT.ok;
+}
+
+async function cmdLogMonitor(r: Run): Promise<number> {
+  if (!r.values.state) throw usage("log monitor needs --state <file>: where the last verified head is kept between runs (cache it in CI).");
+  const { client, key: k } = logApi(r);
+  const v = await verifiedHead(r, client, k);
+  if (v.head && v.problems.length === 0) saveState(r, v.state, v.environmentId, v.head);
+  const ok = v.problems.length === 0;
+  if (r.values.json) r.io.out(`${JSON.stringify({ environmentId: v.environmentId, ok, head: v.head, previous: v.previous, problems: v.problems }, null, 2)}\n`);
+  else if (!ok) r.io.out(`FAILED: ${v.problems.join("; ")}\n`);
+  else if (!v.head) r.io.out(`The transparency log of ${v.environmentId} is empty.\n`);
+  else r.io.out(`OK: ${v.environmentId} head ${v.head.size} entries${v.previous ? ` extends the saved head (${v.previous.size} entries)` : " saved as the first baseline"}.\n`);
+  return ok ? EXIT.ok : EXIT.failed;
 }
 
 /* ---------------- refs scan ---------------- */
@@ -636,6 +916,28 @@ async function cmdCleanup(r: Run): Promise<number> {
 
 /* ---------------- import ---------------- */
 
+async function cmdImportVerify(r: Run): Promise<number> {
+  const file = r.args[0];
+  if (!file) throw usage("`import verify` needs a file: nanoflags import verify <file> --contexts <file.jsonl> --project <key>.");
+  const { runVerifyCommand } = await import("./import.js");
+  return runVerifyCommand({
+    file: path(r, file),
+    contexts: r.values.contexts ? path(r, r.values.contexts) : "",
+    flags: r.values.flags,
+    project: r.values.project ?? "",
+    token: (r.values.token ?? r.io.env.NANOFLAGS_API_TOKEN ?? "").trim(),
+    baseUrl: baseUrl(r),
+    envMap: r.values["env-map"],
+    format: r.values.format,
+    conflict: r.values.conflict,
+    json: r.values.json === true,
+    fetch: r.io.fetch,
+    userAgent: `nanoflags-cli/${VERSION}`,
+    out: r.io.out,
+    err: r.io.err,
+  });
+}
+
 async function cmdImport(r: Run): Promise<number> {
   const file = r.args[0];
   if (!file) throw usage("`import` needs a file: nanoflags import <file> --project <key>.");
@@ -691,8 +993,14 @@ export async function main(argv: string[], io: Io): Promise<number> {
     if (command === "eval") return await cmdEval(run(1));
     if (command === "scenarios" && sub === "run") return await cmdScenariosRun(run(2));
     if (command === "publish") return await cmdPublish(run(1));
+    if (command === "sign") return await cmdSign(run(1));
+    if (command === "keygen") return cmdKeygen(run(1));
+    if (command === "log" && sub === "verify") return await cmdLogVerify(run(2));
+    if (command === "log" && sub === "monitor") return await cmdLogMonitor(run(2));
     if (command === "refs" && sub === "scan") return await cmdRefsScan(run(2));
     if (command === "cleanup") return await cmdCleanup(run(1));
+    // `import verify <file>`; a file literally named "verify" is still imported (`import verify` with no second argument).
+    if (command === "import" && sub === "verify" && positionals.length > 2) return await cmdImportVerify(run(2));
     if (command === "import") return await cmdImport(run(1));
     throw usage(`Unknown command: ${positionals.slice(0, 2).join(" ")}`);
   } catch (e) {

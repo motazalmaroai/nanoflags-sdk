@@ -116,6 +116,9 @@ createClient({
   events?: { enabled?: boolean /* true */, sampleRate?: number /* 0.1 */, flushIntervalMs?: number /* 10000 */, reportIntervalMs?: number /* 60000 */, redact?: (ctx) => object } | false,
   experiments?: { enabled?: boolean /* true */, flushIntervalMs?: number /* 5000 */ } | false, // see Experiments
   verify?: { publicKeys?: JsonWebKey[] | "fetch", require?: boolean } | false, // default: see Signature verification
+  verifyLog?: boolean,              // false; true = check every update against the transparency log (see Verifiable history)
+  coSignerKeys?: JsonWebKey[],      // your own co-signing public keys: updates must carry your signature too
+  allowEmergencyWithoutCosign?: boolean, // true; accept kill-switch revisions (flags turned off only) without your signature
   fetch?: typeof fetch,
   // Platform integration (used by @nanoflags/react-native; most apps never set these):
   crypto?: SignatureCrypto,         // SHA-256 + Ed25519 where WebCrypto lacks them; default WebCrypto
@@ -266,6 +269,37 @@ const flags = createClient({
 
 Not covered: test-session bundles (`GET /v1/session`) are not signed, and verification says nothing
 about *freshness* — it does not stop an attacker from withholding updates.
+
+## Verifiable history (transparency log) and co-signing
+
+Signatures prove a bundle came from NanoFlags. Two optional checks go further (https://nanoflags.io/docs/verifiable-history):
+
+```ts
+createClient({
+  sdkKey, baseUrl: "https://edge.nanoflags.io",
+  verifyLog: true,                                   // every update must be in the environment's public, append-only log
+  coSignerKeys: [{ kty: "OKP", crv: "Ed25519", x: "…", kid: "ci-2026" }], // and signed by your CI's key
+});
+```
+
+- `verifyLog`: before an update is applied, the SDK checks that the environment's transparency log records exactly the
+  bytes it received (inclusion proof), that the tree head is signed by NanoFlags, and that each new tree head extends
+  the last one it saw (consistency proof — a log that was rewritten or forked is detected). The evidence comes with the
+  bundle (`X-NanoFlags-Log`); pushed revisions fetch it from `GET /v1/log/proof` (a few short retries: the entry is
+  written right after distribution). One extra request per new tree head (`GET /v1/log/consistency`).
+- `coSignerKeys`: the public halves of the keys you registered for the environment (dashboard → environment →
+  Security). An update must carry a valid signature by one of them, made in your CI with `nanoflags sign`.
+- `allowEmergencyWithoutCosign` (default `true`): a kill-switch revision is published without your signature (so the
+  kill switch works when your CI key is not at hand). It is accepted only when it differs from the configuration in use
+  by flags turned off and nothing else (with `verifyLog`, the log must also record it as an emergency). `false` refuses
+  it too. Known gaps: a client starting with no configuration in use cannot compare and does not accept such a
+  revision, and neither does a client that missed the co-signed revision just before it (`/v1/bundle` serves only the
+  latest revision). Either one keeps what it has (or stays without configuration) until the next co-signed publish.
+- A failed check never changes the configuration in use: the SDK emits `error` with code `log` or `cosign` and tries
+  again (polling backoff). Both options imply `verify` with `require: true`; with `verify: false` no update is applied.
+- Persisted copies (`store`) are checked for the signature and, with `coSignerKeys`, the co-signature; the last
+  verified tree head is persisted too, so consistency is checked across restarts.
+- Not covered: other language SDKs do not implement these options yet.
 
 ## Engine version
 

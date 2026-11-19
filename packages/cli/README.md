@@ -128,7 +128,7 @@ a table and exits **1 when any scenario fails**.
 In GitHub Actions, `--commit` and `--run-url` default from `GITHUB_SHA` and the run's URL, and a Markdown
 summary is appended to `GITHUB_STEP_SUMMARY`. See [`integrations/github-action`](../../integrations/github-action).
 
-### `nanoflags publish --expected-revision <n> [--note <text>]`
+### `nanoflags publish --expected-revision <n> [--note <text>] [--cosign <file> [--change <id>]]`
 
 `POST /v1/admin/publish` — publishes the draft of the key's environment. Admin key only.
 `--expected-revision` is the revision you believe is published now; if someone else published in the
@@ -138,8 +138,66 @@ meantime nothing happens.
 | --- | --- |
 | `DESTINATION_CHANGED` | The environment is at another revision than expected. Review, then retry with the new number. |
 | `NO_CHANGES` | The draft equals the published configuration. |
-| `CHANGE_REQUIRED` | The environment requires a reviewed change. Publish from the dashboard; keys cannot bypass review. |
+| `CHANGE_REQUIRED` | The draft needs a reviewed change (required approval, or work proposed by an AI agent). Publish from the dashboard; keys cannot bypass review. On a co-signed environment, publish the approved change with `--change`. |
+| `APPROVAL_REQUIRED` | `--change`: the change has no independent approval of the current draft yet (or the draft changed since). |
 | `SCENARIOS_REQUIRED` | The environment requires passing scenarios on the current draft: run `nanoflags scenarios run --source draft` first. |
+| `COSIGN_REQUIRED` | The environment requires your co-signature: `nanoflags sign`, then `publish --cosign <file>`. |
+| `COSIGN_INVALID` | The co-signature does not match the current draft or a registered key. Sign again. |
+
+`--cosign <file>` sends the co-signature written by `nanoflags sign` (co-signed environments, Scale and Enterprise).
+
+`--change <id>` (with `--cosign` only) publishes through that change, as the dashboard's publish button does: the
+change must be open and meet the environment's publish requirements (independent approval of the current draft,
+scenarios). Co-signed environments cannot be published from the dashboard, so this is how they publish work that needs
+an approval, such as a draft with edits proposed by an AI agent: approve the change in the dashboard, then sign and
+publish from CI. The change is marked published with the new revision.
+
+### `nanoflags keygen --out <file> [--kid <id>]`
+
+Creates an Ed25519 co-signing key: the private JWK goes to `--out` (mode 600, never overwritten; keep it in your CI's
+secret store), the public JWK is printed. Register the public key (`x`) for the environment in the dashboard
+(environment → Security → Co-signing) and give the same public JWK to SDKs as `coSignerKeys`.
+
+### `nanoflags sign --key <private key file> [--kid <id>] [--expect <bundle.json>] [--expect-checksum <md5>] [--out <file>] [--bundle-out <file>] [--json]`
+
+Co-signs the revision the next publish would create. Here `--key` is the path of **your** private key (JWK or
+PKCS#8 PEM; `--signing-key` is an alias); the NanoFlags admin key is read from `NANOFLAGS_KEY`. The CLI downloads the
+draft (`GET /v1/admin/cosign/preview`), computes the exact bundle texts the publisher will sign (server and browser
+view) on this machine, checks that the key matches the one registered under its `kid`, and signs both canonical
+strings. `--bundle-out` saves the server bundle text for review or a diff against your configuration as code.
+
+**Check what you sign.** The draft comes from NanoFlags, and co-signing exists for the case where NanoFlags cannot be
+trusted, so the signer must pin the content it expects:
+
+- `--expect <bundle.json>`: a JSON object with the `flags` (and optionally `segments`) your pipeline reviewed — from
+  your configuration as code, or a `--bundle-out` file of a reviewed run. Compared flag by flag (key order does not
+  matter; segments only when the file has `segments`).
+- `--expect-checksum <md5>`: the checksum of the draft your pipeline reviewed.
+
+When the draft differs, `sign` refuses (exit 1), writes nothing and prints a per-flag diff (`-` expected but missing,
+`+` not expected, `~` different).
+
+```sh
+NANOFLAGS_KEY=$ADMIN_KEY nanoflags sign --key ci-cosign.jwk --expect reviewed-bundle.json --out cosign.json
+NANOFLAGS_KEY=$ADMIN_KEY nanoflags publish --expected-revision 41 --cosign cosign.json
+# work that needs an approval (e.g. proposed by an AI agent): publish the approved change
+NANOFLAGS_KEY=$ADMIN_KEY nanoflags publish --expected-revision 41 --cosign cosign.json --change 0b6f0c4e-9a43-4a0e-8f43-3f0d3c1b2a10
+```
+
+### `nanoflags log verify [--env <id>] [--state <file>] [--public-keys <file>] [--json]`
+
+Downloads the environment's transparency log (`/v1/log/head`, `/v1/log/entries`) with any key of the environment
+(`NANOFLAGS_SDK_KEY` or `NANOFLAGS_KEY`) and verifies the whole history locally: the tree head is signed by NanoFlags
+(built-in keys for the hosted edge, `--public-keys` to pin your own copy, else `GET /v1/keys`), every entry is
+well-formed and belongs to the environment, and the entries hash to the signed root. With `--state`, the head saved by
+the previous run must be a prefix of the current one (checked from the entries and with `/v1/log/consistency`); the new
+head is saved. Lists co-signed and emergency (kill switch without co-signature) revisions. Exit 1 on any mismatch.
+
+### `nanoflags log monitor --state <file> [--env <id>] [--public-keys <file>] [--json]`
+
+The light, one-shot check for a scheduled CI job: verifies the signed head and that it extends the head in `--state`
+(consistency proof), then saves it. Cache the state file between runs. Exit 1 when the log forked, shrank or was
+rewritten.
 
 ### `nanoflags refs scan [dir] --repo <owner/name> [--commit <sha>] [--dry-run] [--json] [--max-file-size <bytes>]`
 
@@ -222,6 +280,20 @@ OpenFeature flagd definition, the NanoFlags import format (JSON or CSV), a NanoF
 Nothing is published. Applying sends an `Idempotency-Key` derived from the file and options, so re-running the same
 command answers with the first import instead of importing twice. Exit code 1 when some items failed. Format reference:
 https://nanoflags.io/docs/import
+
+### `nanoflags import verify <file> --contexts <file.jsonl> --project <key> [--env-map …] [--format …] [--flags a,b] [--json]`
+
+Side-by-side comparison before you switch: a dry run (nothing is written) that also sends your sample contexts (JSON
+Lines, one context object per line, or a JSON array; at most 1000). Each context is evaluated for every imported flag
+and mapped environment with the source's semantics and with the NanoFlags engine on the drafts that importing this
+file would produce, and every context whose value would differ is listed. The comparison is against this file's
+conversion, not against drafts already stored in the project; because nothing is written, `--conflict` defaults to
+`overwrite` here, so flags that already exist (for example after an earlier import) are compared too. Differences
+decided by a percentage on both sides are counted separately (the bucketing hash differs, the shares do not).
+`--flags` limits the comparison to some flags. Contexts in the shape `{ "userID", "custom", "customIDs" }` are
+flattened (`userID` becomes `key`). Exit code 1 when a context differs, when nothing could be compared (formats whose
+semantics are not re-implemented), or when some flag/environment pairs were not compared because of the evaluation
+budget (narrow `--flags` or use fewer contexts); 0 otherwise.
 
 ## Development
 

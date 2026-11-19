@@ -4,7 +4,7 @@ name: Auto release
 # bumping the version (and its CHANGELOG) is the release decision. Each publish job builds and tests the package
 # first; nothing is published if a test fails. Versions already published are skipped, so re-runs are harmless.
 #
-#   npm      @nanoflags/sdk, @nanoflags/openfeature-provider, @nanoflags/cli, @nanoflags/react-native
+#   npm      @nanoflags/sdk, @nanoflags/openfeature-provider, @nanoflags/cli, @nanoflags/react-native, @nanoflags/mcp
 #            -> release.yml (workflow_call), secret NPM_TOKEN, npm provenance. Tagged <short>-v<version> afterwards.
 #   Maven    io.nanoflags:nanoflags-{core,android,openfeature} (kotlin/gradle.properties nanoflags.version)
 #            -> signed bundle to the Central Portal (AUTOMATIC). Secrets CENTRAL_TOKEN_USERNAME,
@@ -67,7 +67,7 @@ jobs:
         run: |
           set -euo pipefail
           npm_list=()
-          for entry in sdk:packages/sdk openfeature:packages/openfeature cli:packages/cli react-native:packages/sdk-react-native; do
+          for entry in sdk:packages/sdk openfeature:packages/openfeature cli:packages/cli react-native:packages/sdk-react-native mcp:packages/mcp; do
             short="${entry%%:*}"; dir="${entry#*:}"
             name=$(node -p "require('./$dir/package.json').name"); version=$(node -p "require('./$dir/package.json').version")
             code=$(curl -s -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/$name/$version")
@@ -168,7 +168,7 @@ jobs:
           LIST: ${{ needs.plan.outputs.npm }}
         run: |
           for short in $(jq -r '.[]' <<<"$LIST"); do
-            case "$short" in sdk) dir=packages/sdk;; openfeature) dir=packages/openfeature;; cli) dir=packages/cli;; react-native) dir=packages/sdk-react-native;; esac
+            case "$short" in sdk) dir=packages/sdk;; openfeature) dir=packages/openfeature;; cli) dir=packages/cli;; react-native) dir=packages/sdk-react-native;; mcp) dir=packages/mcp;; esac
             tag="$short-v$(node -p "require('./$dir/package.json').version")"
             gh api "repos/$GITHUB_REPOSITORY/git/refs" -f "ref=refs/tags/$tag" -f "sha=$GITHUB_SHA" >/dev/null && echo "tagged $tag" || echo "::warning::could not create $tag (exists?)"
           done

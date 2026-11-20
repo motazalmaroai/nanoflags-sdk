@@ -333,7 +333,7 @@ func (c *Client) fetchSessionOnce(token, service string) (*sessionState, error) 
 		expiresAt, err = time.Parse(time.RFC3339Nano, strings.TrimSpace(exp))
 		okExp = err == nil
 	}
-	if !okID || !okExp || !engine.IsBundle(body.Field("bundle")) {
+	if !okID || !okExp || !isConfig(body.Field("bundle")) {
 		return nil, invalid
 	}
 	bundle, _ := engine.NewBundle(body.Field("bundle"))

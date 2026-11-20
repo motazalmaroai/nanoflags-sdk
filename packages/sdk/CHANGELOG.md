@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.1 (2026-11-20)
+
+Bug fix, no API changes.
+
+- Shadow reports always pass the edge's validation of the `shadow` member of `POST /v1/events`: flag keys over 63 characters (UTF-16 code units) are no longer counted, and a flag's counters stop at 10^7 samples until the next report. Before, one such flag made the edge refuse the whole events request with 400, dropping that report's telemetry and shadow counters. Same rules as Python 0.2.0, Go 0.3.0, Kotlin/Android 0.2.0, Swift 0.2.0 and Dart 0.2.0.
+
 ## 0.7.0 (2026-11-19)
 
 Additive, no breaking changes; nothing changes unless the new options are set (shadow evaluation only acts when an admin turned it on for the environment).

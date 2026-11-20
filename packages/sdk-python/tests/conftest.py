@@ -1,5 +1,5 @@
-"""A local fake edge: /v1/bundle, /v1/keys, /v1/events, /v1/session over HTTP and /v1/live over WebSocket,
-signing bundles with a throwaway Ed25519 key exactly as RUNTIME.md describes."""
+"""A local fake edge: /v1/bundle, /v1/keys, /v1/events, /v1/session, /v1/shadow over HTTP and /v1/live over WebSocket,
+signing bundles (and shadow bundles) with a throwaway Ed25519 key exactly as RUNTIME.md describes."""
 
 from __future__ import annotations
 
@@ -53,6 +53,10 @@ class FakeEdge:
         self.ws_connects = 0
         self.ws_accept = True
         self.sessions: Dict[str, Dict[str, Any]] = {}
+        #: X-NanoFlags-Shadow on /v1/bundle answers (None: no session announced).
+        self.shadow_header: Optional[str] = None
+        #: The /v1/shadow answer: (status, body, headers), or None for 404.
+        self.shadow_answer: Optional[Any] = None
         self.set_bundle(make_bundle(1))
         self._http = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
         self._http.daemon_threads = True
@@ -69,6 +73,40 @@ class FakeEdge:
         digest = hashlib.sha256(text.encode()).hexdigest()
         canonical = f"nanoflags-bundle-v1\n{ENV_ID}\n{revision}\n{checksum}\n{digest}"
         return b64url((key or self.key).sign(canonical.encode()))
+
+    def set_shadow(
+        self,
+        bundle: Dict[str, Any],
+        marker: Dict[str, Any],
+        *,
+        announce: bool = True,
+        tamper: Optional[Any] = None,
+        domain: str = "shadow",
+        session_id: Optional[str] = None,
+        checksum: Optional[str] = None,
+        environment_id: str = ENV_ID,
+        key: Optional[Ed25519PrivateKey] = None,
+    ) -> None:
+        """Serve ``bundle`` + ``marker`` as the signed shadow bundle on /v1/shadow (and announce it on /v1/bundle)."""
+        sid = session_id or marker["sessionId"]
+        cs = checksum or marker["checksum"]
+        text = json.dumps({**bundle, "shadow": marker}, separators=(", ", ": "))
+        digest = hashlib.sha256(text.encode()).hexdigest()
+        if domain == "bundle":
+            canonical = f"nanoflags-bundle-v1\n{environment_id}\n{bundle['revision']}\n{cs}\n{digest}"
+        else:
+            canonical = f"nanoflags-shadow-v1\n{environment_id}\n{sid}\n{cs}\n{digest}"
+        signature = b64url((key or self.key).sign(canonical.encode()))
+        served = tamper(text) if tamper else text
+        body = f'{{"sessionId":{json.dumps(sid)},"checksum":{json.dumps(cs)},"baseRevision":3,"bundle":{served}}}'
+        headers = {"X-NanoFlags-Signed": "true", "X-NanoFlags-Signature": signature, "X-NanoFlags-Key-Id": self.kid, "X-NanoFlags-Environment-Id": environment_id, "X-NanoFlags-Shadow": f"{sid}.{cs}", "Cache-Control": "no-store"}
+        with self.lock:
+            self.shadow_answer = (200, body.encode(), headers)
+            if announce:
+                self.shadow_header = f"{sid}.{cs}"
+
+    def count(self, path: str) -> int:
+        return sum(1 for r in self.requests if r["path"] == path)
 
     def set_bundle(self, bundle: Dict[str, Any]) -> None:
         with self.lock:
@@ -149,11 +187,19 @@ class FakeEdge:
                         headers = {"ETag": etag, "X-NanoFlags-Environment-Id": ENV_ID, "X-NanoFlags-Signed": "true" if edge.signed else "false"}
                         if edge.signed:
                             headers.update({"X-NanoFlags-Signature": edge.signature, "X-NanoFlags-Key-Id": edge.kid})
+                        if edge.shadow_header:
+                            headers["X-NanoFlags-Shadow"] = edge.shadow_header
                         if self.headers.get("If-None-Match") == etag:
                             return self._send(304, b"", headers)
                         text = edge.text.replace('"default": "blue"', '"default": "red"') if edge.tamper else edge.text
                         body = f'{{"revision":{edge.revision},"checksum":"{edge.checksum}","bundle":{text}}}'.encode()
                     return self._send(200, body, headers)
+                if self.path == "/v1/shadow":
+                    with edge.lock:
+                        answer = edge.shadow_answer
+                    if answer is None:
+                        return self._send(404, b'{"error":{"code":"shadow_not_found","message":"x"}}')
+                    return self._send(answer[0], answer[1], answer[2])
                 if self.path == "/v1/session":
                     tok = self.headers.get("X-NanoFlags-Session")
                     s = edge.sessions.get(tok or "")

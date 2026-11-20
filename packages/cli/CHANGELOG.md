@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.1 (2026-11-20)
+
+- `nanoflags publish` retries a publish refused `BUSY` (HTTP 503: the project's draft is being edited right now, e.g.
+  by an import; nothing was published) after 1, 2 and 4 s, then explains it. Needs the edge and database of
+  migration 0181.
+
 ## 0.4.0 (2026-11-19)
 
 Additive, no breaking changes.

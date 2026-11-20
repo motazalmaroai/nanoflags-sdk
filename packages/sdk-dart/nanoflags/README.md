@@ -17,7 +17,7 @@ keys (`nf_srv_…`) are refused with an `ArgumentError`.
 
 ```yaml
 dependencies:
-  nanoflags: ^0.1.0
+  nanoflags: ^0.2.0
 ```
 
 ## Quickstart
@@ -96,6 +96,8 @@ attributes over the current context for that one call.
 | `bootstrap` | none | a bundle (map or JSON text) shipped with the app; used until something newer arrives |
 | `store` | none (Flutter: `SharedPreferencesStore`) | persistence of the last verified bundle |
 | `events` | sample 10 %, flush 30 s, report 5 min | `EventsOptions.off()` disables telemetry |
+| `serviceVersion` | none | your app's version (≤ 40 characters); labels shadow evaluation reports |
+| `shadow` | on, sample 10 % | shadow evaluation of drafts; `ShadowOptions.off()` disables it (so does `EventsOptions.off()`) |
 | `verify` | official edge: embedded keys, unsigned refused | see below |
 | `dataSaver` / `dataSaverPollInterval` | false / 15 min | |
 
@@ -128,14 +130,24 @@ is loaded at startup. Other edges: pass `VerifyOptions(publicKeys: […])` (pinn
   15 min, telemetry held back — Flutter has no portable "metered network" signal, so the app decides
   (Android `ConnectivityManager.isActiveNetworkMetered`, iOS `NWPath.isConstrained`/`isExpensive`
   through a platform channel, or a user setting).
-* Native requests send `User-Agent: nanoflags-dart/0.1.0 (<os>)` (the edge answers 403 to default
+* Native requests send `User-Agent: nanoflags-dart/0.2.0 (<os>)` (the edge answers 403 to default
   library agents). Proxies from `HTTPS_PROXY` are honoured on native platforms.
 
 ## Telemetry
 
-Like the other SDKs: a service report (`sdk: "dart/0.1.0"`, revision) and sampled evaluation events
+Like the other SDKs: a service report (`sdk: "dart/0.2.0"`, revision) and sampled evaluation events
 whose context carries **attribute names and types only, never values** (e.g. `{"plan": "string"}`,
 limited to attributes the flag's rules use). `EventsOptions.off()` opts out; `redact` customises it.
+
+**Shadow evaluation of drafts.** While a change waits for approval in an environment with shadow
+evaluation on, a fresh `/v1/bundle` answer carries `X-NanoFlags-Shadow`; the client loads the signed draft
+from `GET /v1/shadow` (Ed25519 over `nanoflags-shadow-v1`, marker checked; otherwise it is ignored with
+error code `shadow`), evaluates it for a sample (`ShadowOptions(sampleRate:)`, default 10 %) of the
+evaluations of the flags it changes and sends **counters only** (samples, flips, value pairs live → draft,
+draft rule hits; labelled with `service` and `serviceVersion`) with telemetry, at most once a minute and on
+`flush()`, `pause()` and `close()`. No context, attribute or identifier is sent; your fallback is sent as
+`<fallback>`. Your code always gets the live value: a bundle with a `shadow` member is never used as
+configuration. Client keys receive the client view of the draft (client-exposed flags only).
 
 ## Engine parity
 

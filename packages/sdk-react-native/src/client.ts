@@ -14,10 +14,12 @@ import {
   type Context,
   type EventsOptions,
   type Evaluation,
+  type ExperimentsOptions,
   type JsonValue,
   type NanoFlagsClient,
   type SessionEvaluator,
   type SessionOptions,
+  type ShadowOptions,
   type SignatureCrypto,
   type Transport,
   type UpdateEvent,
@@ -28,7 +30,7 @@ import { attachLifecycle, type AppStateLike, type LifecycleState, type NetInfoLi
 import { memoryStorage, storageKey, toStore, type StorageAdapter } from "./storage.js";
 import { fetchWithHeaders, webSocketWithHeaders, xhrStreamOpener, type ReactNativeWebSocketConstructor, type XhrConstructor } from "./transport.js";
 
-export const SDK_VERSION = "0.2.0";
+export const SDK_VERSION = "0.3.0";
 /** Sent as `User-Agent` on every request and socket (Cloudflare refuses default library agents with 403 / 1010). */
 export const DEFAULT_USER_AGENT = `nanoflags-react-native/${SDK_VERSION}`;
 
@@ -66,8 +68,32 @@ export interface ReactNativeClientOptions {
   live?: boolean;
   /** Telemetry (service reports + sampled evaluations with attribute names/types only). `false` opts out. */
   events?: EventsOptions | false;
+  /** Experiments: exposure logging and `track()`; see `@nanoflags/sdk`. `events: false` turns them off unless `{ enabled: true }`. */
+  experiments?: ExperimentsOptions | false;
+  /**
+   * Shadow evaluation of drafts; see `@nanoflags/sdk`. **On by default whenever `events` is on** (sample rate 0.1): while
+   * a change waits for approval in an environment whose admin turned shadow evaluation on, the app also evaluates the
+   * draft for a sample of evaluations of the flags it changes and sends aggregate counters only. The app always gets the
+   * live value. With a client key only client-exposed flags are measured, and the reports are shown apart from server
+   * reports. `shadow: false` (or `events: false`) turns it off; `{ sampleRate }` tunes it.
+   */
+  shadow?: ShadowOptions | false;
+  /** Your app's version (e.g. `"3.1.0"`, at most 40 characters), shown next to `service` in shadow-evaluation reports. */
+  serviceVersion?: string;
   /** Signature verification; see `@nanoflags/sdk`. Default: on, against the embedded keys, for the official edge. */
   verify?: VerifyOptions | false;
+  /**
+   * Check every update against the environment's transparency log (verifiable publish history); see `@nanoflags/sdk`.
+   * A configuration that cannot be verified is not applied (`error` code `log`). Needs signature verification. Default false.
+   */
+  verifyLog?: boolean;
+  /**
+   * Customer co-signing public keys (Ed25519 JWKs with `kid`) registered for this environment; see `@nanoflags/sdk`.
+   * Updates without a valid co-signature are refused (`error` code `cosign`). Needs signature verification.
+   */
+  coSignerKeys?: readonly JsonWebKey[];
+  /** With `coSignerKeys`: accept kill-switch revisions that only turn flags off without the co-signature. Default true. */
+  allowEmergencyWithoutCosign?: boolean;
   /** SHA-256 / Ed25519 implementation. Default: pure JS (`@noble/ed25519`, `@noble/hashes`, bundled). */
   crypto?: SignatureCrypto;
   /** Default `nanoflags-react-native/<version>`. */
@@ -170,7 +196,13 @@ export function createClient(options: ReactNativeClientOptions): ReactNativeClie
     ...(options.streaming !== undefined ? { streaming: options.streaming } : {}),
     ...(options.live !== undefined ? { live: options.live } : {}),
     ...(options.events !== undefined ? { events: options.events } : {}),
+    ...(options.experiments !== undefined ? { experiments: options.experiments } : {}),
+    ...(options.shadow !== undefined ? { shadow: options.shadow } : {}),
+    ...(options.serviceVersion !== undefined ? { serviceVersion: options.serviceVersion } : {}),
     ...(options.verify !== undefined ? { verify: options.verify } : {}),
+    ...(options.verifyLog !== undefined ? { verifyLog: options.verifyLog } : {}),
+    ...(options.coSignerKeys !== undefined ? { coSignerKeys: options.coSignerKeys } : {}),
+    ...(options.allowEmergencyWithoutCosign !== undefined ? { allowEmergencyWithoutCosign: options.allowEmergencyWithoutCosign } : {}),
     lifecycle: (control) => {
       const appState = options.appState === undefined ? (AppState as unknown as AppStateLike | undefined) : options.appState;
       return attachLifecycle(control, {

@@ -29,6 +29,9 @@ const (
 	ErrEnvironmentDeleted ErrorCode = "environment_deleted"
 	// ErrSession: a test-session lookup failed (the evaluator falls back to normal evaluation).
 	ErrSession ErrorCode = "session"
+	// ErrShadow: a shadow bundle (the draft of a change waiting for approval) was ignored because
+	// it did not verify or did not match its announcement. Nothing changes for the app.
+	ErrShadow ErrorCode = "shadow"
 )
 
 // Error is a client error. A failed update never changes the configuration in use.
@@ -120,6 +123,10 @@ type config struct {
 	random             func() float64
 	requestTimeout     time.Duration
 	liveConnectTimeout time.Duration
+	serviceVersion     string
+	shadowDisabled     bool
+	shadowSampleRate   float64
+	shadowRandom       func() float64
 }
 
 // Option configures a Client.

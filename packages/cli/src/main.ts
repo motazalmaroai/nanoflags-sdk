@@ -9,7 +9,7 @@ import { CliError, DEFAULT_MAX_FILE_BYTES, EXIT, clip, show, table, unifiedDiff,
 import { checkHistory, isMonitorState, isTreeHead, leafHash, rootOf, verifyConsistency, verifyHead, type MonitorState, type PublicJwk, type TreeHead } from "./log.js";
 import { generateKey, isCosignature, isCosignPreview, privateKeyFrom, publicX, signPreview, signingTexts, verifyCosignature, type Cosignature } from "./cosign.js";
 
-export const VERSION = "0.4.0";
+export const VERSION = "0.4.1";
 
 export interface Io {
   env: Record<string, string | undefined>;
@@ -17,6 +17,8 @@ export interface Io {
   fetch: typeof fetch;
   out: (text: string) => void;
   err: (text: string) => void;
+  /** Waits between retries (tests pass an instant one). */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 export const HELP = `nanoflags ${VERSION} — NanoFlags command line
@@ -511,7 +513,11 @@ const PUBLISH_HELP: Record<string, string> = {
   NO_CHANGES: "There is nothing to publish.",
   COSIGN_REQUIRED: "This environment requires your co-signature: run `nanoflags sign --key <your key>` and publish with `--cosign <file>`.",
   COSIGN_INVALID: "The co-signature does not match the draft (it changed, or another key signed it). Run `nanoflags sign` again.",
+  BUSY: "The project's draft is being edited right now (for example by an import), so nothing was published. Run the command again in a moment.",
 };
+
+/** Waits before each retry of a publish refused BUSY (HTTP 503: the project's draft is being edited right now). */
+export const PUBLISH_BUSY_RETRIES_MS = [1000, 2000, 4000];
 
 async function cmdPublish(r: Run): Promise<number> {
   const raw = r.values["expected-revision"];
@@ -534,7 +540,21 @@ async function cmdPublish(r: Run): Promise<number> {
       if (!cosignature) throw usage("--change needs --cosign: it publishes an approved change on a co-signed environment. Without co-signing, publish the change from the dashboard.");
       if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(change)) throw usage("--change must be the change id (a UUID, shown on the change page).");
     }
-    const res = await api(r).publish({ expectedRevision: Number(raw), ...(r.values.note ? { note: r.values.note } : {}), ...(cosignature ? { cosignature: { kid: cosignature.kid, revision: cosignature.revision, checksum: cosignature.checksum, server: cosignature.server, client: cosignature.client } } : {}), ...(change ? { change } : {}) });
+    const body = { expectedRevision: Number(raw), ...(r.values.note ? { note: r.values.note } : {}), ...(cosignature ? { cosignature: { kid: cosignature.kid, revision: cosignature.revision, checksum: cosignature.checksum, server: cosignature.server, client: cosignature.client } } : {}), ...(change ? { change } : {}) };
+    // BUSY: nothing was published (the draft lock was busy); safe to send the same request again.
+    const sleep = r.io.sleep ?? ((ms: number) => new Promise<void>((done) => setTimeout(done, ms)));
+    let res: { revision: number; checksum: string };
+    for (let attempt = 0; ; attempt++) {
+      try {
+        res = await api(r).publish(body);
+        break;
+      } catch (e) {
+        if (!(e instanceof ApiError && e.code === "BUSY" && attempt < PUBLISH_BUSY_RETRIES_MS.length)) throw e;
+        const ms = PUBLISH_BUSY_RETRIES_MS[attempt]!;
+        r.io.err(`The draft is being edited right now (BUSY); nothing was published. Retrying in ${ms / 1000} s…\n`);
+        await sleep(ms);
+      }
+    }
     if (r.values.json) r.io.out(`${JSON.stringify(res, null, 2)}\n`);
     else r.io.out(`Published r${res.revision} (checksum ${res.checksum})${change ? ` through change ${change}` : ""}.\n`);
     return EXIT.ok;

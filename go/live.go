@@ -252,7 +252,7 @@ func (c *Client) applyPush(data []byte) {
 		}
 	}
 	bundle, err := engine.ParseBundle([]byte(text))
-	if err != nil || bundle.Revision() != revision {
+	if err != nil || bundle.Revision() != revision || !isConfig(bundle.Value()) {
 		c.emitError(newError(ErrInvalidBundle, "the edge pushed an invalid bundle; it was ignored"))
 		return
 	}

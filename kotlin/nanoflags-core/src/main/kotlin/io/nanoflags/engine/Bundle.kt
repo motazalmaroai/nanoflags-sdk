@@ -4,7 +4,7 @@ package io.nanoflags.engine
  * A parsed, immutable configuration bundle: one revision of one environment. Safe for concurrent use.
  *
  * [parse] accepts what every NanoFlags SDK accepts (`schema` 1, a numeric `revision`, an object `flags`, an object
- * `segments`); the flags themselves are evaluated as they are, malformed or not, exactly like the TypeScript engine.
+ * `segments`, and no `shadow` member); the flags themselves are evaluated as they are, malformed or not, exactly like the TypeScript engine.
  */
 class Bundle private constructor(
     /** The bundle document. */
@@ -47,8 +47,21 @@ class Bundle private constructor(
             val schema = v.field("schema")
             val rev = v.field("revision")
             val segs = v.field("segments")
+            // A shadow bundle (the draft of a change waiting for approval, migration 0179) is never configuration.
             return schema is JsonValue.Num && schema.value == 1.0 && rev is JsonValue.Num && v.field("flags") is JsonValue.Obj &&
-                (segs is JsonValue.Obj || segs is JsonValue.Arr)
+                (segs is JsonValue.Obj || segs is JsonValue.Arr) && v.field("shadow").isUndefined
+        }
+
+        /**
+         * A shadow bundle (the bundle shape plus its `shadow` marker): evaluated next to the live bundle for shadow
+         * evaluation only, never applied. `null` when [v] is not one.
+         */
+        internal fun shadowOf(v: JsonValue): Bundle? {
+            if (v !is JsonValue.Obj) return null
+            val schema = v.field("schema")
+            return if (schema is JsonValue.Num && schema.value == 1.0 && v.field("revision") is JsonValue.Num && v.field("flags") is JsonValue.Obj &&
+                v.field("segments") is JsonValue.Obj && v.field("shadow") is JsonValue.Obj
+            ) Bundle(v) else null
         }
 
         /** Wraps a parsed bundle document; `null` when it is not a bundle. */

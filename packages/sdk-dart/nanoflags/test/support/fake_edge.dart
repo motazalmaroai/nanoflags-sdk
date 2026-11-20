@@ -1,5 +1,6 @@
 // A fake signing edge for tests: /v1/bundle (ETag, signature headers), /v1/keys, /v1/live
-// (WebSocket with hello / rev / ping-pong), /v1/stream (SSE) and /v1/events, signing with an Ed25519
+// (WebSocket with hello / rev / ping-pong), /v1/stream (SSE), /v1/events and shadow evaluation
+// (`X-NanoFlags-Shadow` on /v1/bundle, /v1/shadow), signing with an Ed25519
 // key generated at runtime (no private key material is stored anywhere).
 import 'dart:async';
 import 'dart:convert';
@@ -86,6 +87,52 @@ class FakeEdge {
   /// Every request answers 503 when true (edge unreachable).
   bool down = false;
   bool staleHeader = false;
+
+  /// `X-NanoFlags-Shadow` on /v1/bundle answers (200 and 304).
+  String? shadowHeader;
+
+  /// The /v1/shadow answer (see [serveShadow]); 404 when null.
+  ({Map<String, String> headers, String body})? shadowAnswer;
+  int shadowRequests = 0;
+
+  /// Serves [bundle] (a draft) on /v1/shadow the way the edge does: the `shadow` marker inside the signed bytes,
+  /// signed over the shadow canonical string (or, [bundleDomain], over a bundle canonical string).
+  Future<void> serveShadow(Map<String, Object?> bundle,
+      {required String sessionId,
+      required String checksum,
+      String? markerSession,
+      String? markerEnv,
+      String env = environmentId,
+      SigningKey? signWith,
+      bool bundleDomain = false,
+      String Function(String text)? tamper}) async {
+    final marker = {'sessionId': markerSession ?? sessionId, 'checksum': checksum, 'environmentId': markerEnv ?? env, 'baseRevision': bundle['revision']};
+    final text = jsonEncode({...bundle, 'shadow': marker});
+    final k = signWith ?? key;
+    final String signature;
+    if (bundleDomain) {
+      signature = await k.sign(text, bundle['revision'] as int, checksum, env: env);
+    } else {
+      final sig = await Ed25519().sign(utf8.encode(shadowCanonicalString(env, sessionId, checksum, sha256Hex(text))), keyPair: k.pair);
+      signature = b64url(sig.bytes);
+    }
+    final served = tamper == null ? text : tamper(text);
+    shadowAnswer = (
+      headers: {
+        'X-NanoFlags-Signed': 'true',
+        'X-NanoFlags-Signature': signature,
+        'X-NanoFlags-Key-Id': k.kid,
+        'X-NanoFlags-Environment-Id': env,
+        'X-NanoFlags-Shadow': '$sessionId.$checksum',
+        'Cache-Control': 'no-store',
+      },
+      body: '{"sessionId":"$sessionId","checksum":"$checksum","baseRevision":${bundle['revision']},"bundle":$served}',
+    );
+    shadowHeader = '$sessionId.$checksum';
+  }
+
+  /// The `shadow` member of the last events report, or null.
+  Map<String, Object?>? get lastShadow => events.isEmpty ? null : (events.last['shadow'] as Map?)?.cast<String, Object?>();
   final List<String> pongs = [];
 
   String get baseUrl => 'http://127.0.0.1:${server.port}';
@@ -189,6 +236,7 @@ class FakeEdge {
         res.headers.set('ETag', etag);
         res.headers.set('X-NanoFlags-Environment-Id', environmentId);
         if (staleHeader) res.headers.set('X-NanoFlags-Stale', 'true');
+        if (shadowHeader != null) res.headers.set('X-NanoFlags-Shadow', shadowHeader!);
         final signed = bundleMode != 'unsigned' && rev.signature != null;
         res.headers.set('X-NanoFlags-Signed', signed ? 'true' : 'false');
         if (signed) {
@@ -234,6 +282,18 @@ class FakeEdge {
         if (rev != null) res.write('event: revision\ndata: ${jsonEncode({'revision': rev.revision, 'checksum': rev.checksum})}\n\n');
         await res.flush();
         unawaited(res.done.catchError((_) {}).whenComplete(() => streams.remove(res)));
+      case '/v1/shadow':
+        shadowRequests++;
+        final answer = shadowAnswer;
+        if (!_authorized(req) || answer == null) {
+          res.statusCode = _authorized(req) ? 404 : 401;
+          await res.close();
+          return;
+        }
+        answer.headers.forEach(res.headers.set);
+        res.headers.contentType = ContentType.json;
+        res.write(answer.body);
+        await res.close();
       case '/v1/events':
         final body = await utf8.decoder.bind(req).join();
         events.add((jsonDecode(body) as Map).cast<String, Object?>());

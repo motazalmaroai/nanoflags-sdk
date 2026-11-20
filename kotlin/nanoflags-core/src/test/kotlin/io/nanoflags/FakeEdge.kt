@@ -18,7 +18,8 @@ import java.util.concurrent.atomic.AtomicInteger
 /**
  * A fake NanoFlags edge that signs like the real publisher (Ed25519 over the canonical string, kid in a header),
  * serves `/v1/bundle` (ETag / 304), `/v1/keys`, `/v1/live` (WebSocket: `hello`, `rev`, `ping`/`pong`, close codes)
- * and records `/v1/events`.
+ * and records `/v1/events`. Shadow evaluation (migration 0179): [shadowHeader] is announced on `/v1/bundle` and
+ * [shadowBody] answers `/v1/shadow` (404 when null).
  */
 class FakeEdge(@Volatile var environmentId: String = "env-test-1") : AutoCloseable {
     class Key(val kid: String) {
@@ -47,6 +48,11 @@ class FakeEdge(@Volatile var environmentId: String = "env-test-1") : AutoCloseab
     @Volatile var liveEnabled = true
     @Volatile var answerPings = true
     @Volatile var committedAt: Long? = null
+    /** `X-NanoFlags-Shadow` on `/v1/bundle` answers (200 and 304). */
+    @Volatile var shadowHeader: String? = null
+    /** The `/v1/shadow` answer; 404 when null. */
+    @Volatile var shadowBody: (() -> MockResponse)? = null
+    val shadowRequests = AtomicInteger()
 
     val bundleRequests = AtomicInteger()
     val notModified = AtomicInteger()
@@ -113,7 +119,9 @@ class FakeEdge(@Volatile var environmentId: String = "env-test-1") : AutoCloseab
                 if (!authed) return MockResponse().setResponseCode(401).setBody("""{"error":{"code":"unauthorized","message":"x"}}""")
                 if (bundleStatus != 200) return MockResponse().setResponseCode(bundleStatus)
                 val etag = "\"$checksum-client\""
-                val res = MockResponse().addHeader("ETag", etag).addHeader("X-NanoFlags-Environment-Id", environmentId).addHeader("X-NanoFlags-Signed", signed.toString())
+                val res = MockResponse().addHeader("ETag", etag)
+                shadowHeader?.let { res.addHeader("X-NanoFlags-Shadow", it) }
+                res.addHeader("X-NanoFlags-Environment-Id", environmentId).addHeader("X-NanoFlags-Signed", signed.toString())
                 if (signed) res.addHeader("X-NanoFlags-Signature", signature()).addHeader("X-NanoFlags-Key-Id", signingKey.kid)
                 if (r.getHeader("If-None-Match") == etag) {
                     notModified.incrementAndGet()
@@ -149,13 +157,51 @@ class FakeEdge(@Volatile var environmentId: String = "env-test-1") : AutoCloseab
                     }
                 })
             }
+            "/v1/shadow" -> {
+                shadowRequests.incrementAndGet()
+                if (!authed) return MockResponse().setResponseCode(401)
+                shadowBody?.invoke() ?: MockResponse().setResponseCode(404).setBody("""{"error":{"code":"shadow_not_found","message":"x"}}""")
+            }
             "/v1/stream" -> MockResponse().setResponseCode(503)
             "/v1/events" -> {
-                events.add(JsonValue.parse(r.body.readUtf8()))
+                // A request cut off by the shutdown at the end of a test has no body.
+                runCatching { JsonValue.parse(r.body.readUtf8()) }.onSuccess { events.add(it) }
                 MockResponse().setResponseCode(202).setBody("""{"accepted":1,"capped":false}""")
             }
             else -> MockResponse().setResponseCode(404)
         }
+    }
+
+    /** The live bundle text with [flags] (and [segments]) instead of the current ones, as a draft of this revision. */
+    fun bundleWith(flags: String, segments: String = "{}"): String =
+        """{"schema":1,"engine":1,"project":"p","environment":"production","revision":$revision,"flags":$flags,"segments":$segments}"""
+
+    /**
+     * A `/v1/shadow` answer the way the edge serves it: the draft [bundle] text plus the `shadow` marker inside the
+     * signed bytes, signed over the shadow canonical string (or, [bundleDomain], over a bundle canonical string).
+     */
+    fun shadowResponse(
+        bundle: String,
+        sessionId: String,
+        checksum: String,
+        markerSession: String = sessionId,
+        markerChecksum: String = checksum,
+        markerEnv: String = environmentId,
+        env: String = environmentId,
+        key: Key = signingKey,
+        bundleDomain: Boolean = false,
+        tamper: ((String) -> String)? = null,
+    ): MockResponse {
+        val marker = """{"sessionId":"$markerSession","checksum":"$markerChecksum","environmentId":"$markerEnv","baseRevision":$revision}"""
+        val text = bundle.removeSuffix("}") + ""","shadow":$marker}"""
+        val bytes = text.toByteArray(Charsets.UTF_8)
+        val msg = if (bundleDomain) Signatures.canonicalString(env, revision, checksum, bytes) else Signatures.shadowCanonicalString(env, sessionId, checksum, bytes)
+        val served = tamper?.invoke(text) ?: text
+        return MockResponse()
+            .addHeader("Content-Type", "application/json").addHeader("Cache-Control", "no-store")
+            .addHeader("X-NanoFlags-Signed", "true").addHeader("X-NanoFlags-Signature", key.sign(msg)).addHeader("X-NanoFlags-Key-Id", key.kid)
+            .addHeader("X-NanoFlags-Environment-Id", env).addHeader("X-NanoFlags-Shadow", "$sessionId.$checksum")
+            .setBody("""{"sessionId":"$sessionId","checksum":"$checksum","baseRevision":$revision,"bundle":$served}""")
     }
 
     override fun close() {

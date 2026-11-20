@@ -62,7 +62,7 @@ func (q *eventQueue) start() {
 				idle := len(q.queue) == 0 && time.Since(q.lastReport) < q.c.cfg.reportInterval
 				q.mu.Unlock()
 				if !idle {
-					_ = q.flush(q.c.ctx)
+					_ = q.send(q.c.ctx, false, nil)
 				}
 			}
 		}
@@ -142,10 +142,17 @@ func defaultRedact(s *snapshot, flagKey string, ctx Context) map[string]any {
 	return out
 }
 
-func (q *eventQueue) flush(ctx context.Context) error {
+// flush sends queued events, pending shadow counters and the service report now.
+func (q *eventQueue) flush(ctx context.Context) error { return q.send(ctx, true, nil) }
+
+// send posts one events request: the service report, up to one batch, and the shadow counters
+// when they are due (at most once a minute, unless forced) or given explicitly (a replaced or
+// withdrawn shadow session).
+func (q *eventQueue) send(ctx context.Context, force bool, counters *shadowCounters) error {
 	if !q.enabled() {
 		return nil
 	}
+	shadow := q.c.takeShadowReport(force, counters)
 	q.mu.Lock()
 	n := min(len(q.queue), maxBatch)
 	batch := append([]event{}, q.queue[:n]...)
@@ -161,7 +168,11 @@ func (q *eventQueue) flush(ctx context.Context) error {
 	if rev < 0 {
 		rev = 0
 	}
-	body, err := json.Marshal(map[string]any{"service": q.c.cfg.service, "sdk": "go/" + SDKVersion, "revision": rev, "events": batch})
+	payload := map[string]any{"service": q.c.cfg.service, "sdk": "go/" + SDKVersion, "revision": rev, "events": batch}
+	if shadow != nil {
+		payload["shadow"] = shadow
+	}
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}

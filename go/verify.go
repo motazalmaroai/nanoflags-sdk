@@ -89,6 +89,24 @@ func canonicalString(environmentID string, revision int64, checksum string, bund
 	return []byte("nanoflags-bundle-v1\n" + environmentID + "\n" + strconv.FormatInt(revision, 10) + "\n" + checksum + "\n" + hex.EncodeToString(sum[:]))
 }
 
+// shadowCanonicalString is what a shadow bundle's signature covers (migration 0179):
+// "nanoflags-shadow-v1\n<environment>\n<session id>\n<draft checksum>\n<sha256 hex of the bundle text>".
+// Domain-separated from "nanoflags-bundle-v1": neither ever verifies as the other.
+func shadowCanonicalString(environmentID, sessionID, checksum string, bundleText []byte) []byte {
+	sum := sha256.Sum256(bundleText)
+	return []byte("nanoflags-shadow-v1\n" + environmentID + "\n" + sessionID + "\n" + checksum + "\n" + hex.EncodeToString(sum[:]))
+}
+
+// verifyShadowText reports whether signature is a valid shadow-bundle signature by one of keys
+// over bundleText. A key id narrows the candidates; an unknown key id matches no key.
+func verifyShadowText(keys []publicKey, signature, kid, environmentID, sessionID, checksum string, bundleText []byte) bool {
+	sig, err := base64URLDecode(signature)
+	if err != nil || len(sig) != ed25519.SignatureSize {
+		return false
+	}
+	return verifyAny(keys, kid, shadowCanonicalString(environmentID, sessionID, checksum, bundleText), sig)
+}
+
 // verifyBundleText reports whether info.Signature is a valid signature by one of keys over the
 // canonical string for bundleText. A key id narrows the candidates; an unknown key id matches no key.
 func verifyBundleText(keys []publicKey, info signatureInfo, bundleText []byte) bool {
@@ -96,9 +114,12 @@ func verifyBundleText(keys []publicKey, info signatureInfo, bundleText []byte) b
 	if err != nil || len(sig) != ed25519.SignatureSize {
 		return false
 	}
-	msg := canonicalString(info.EnvironmentID, info.Revision, info.Checksum, bundleText)
+	return verifyAny(keys, info.Kid, canonicalString(info.EnvironmentID, info.Revision, info.Checksum, bundleText), sig)
+}
+
+func verifyAny(keys []publicKey, kid string, msg, sig []byte) bool {
 	for _, k := range keys {
-		if info.Kid != "" && k.kid != "" && k.kid != info.Kid {
+		if kid != "" && k.kid != "" && k.kid != kid {
 			continue
 		}
 		if ed25519.Verify(k.key, msg, sig) {

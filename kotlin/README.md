@@ -1,7 +1,7 @@
 # NanoFlags for Android and Kotlin
 
 Feature flags evaluated **on the device**, kept current by a **live WebSocket**, verified with **Ed25519 signatures**
-and stored for an **offline-first** start. Version 0.1.0, Apache-2.0.
+and stored for an **offline-first** start. Version 0.2.0, Apache-2.0.
 
 | Artifact | What it is |
 | --- | --- |
@@ -17,7 +17,7 @@ and only the segments those flags reference). Server keys (`nf_srv_…`) are ref
 ```kotlin
 // build.gradle.kts
 dependencies {
-    implementation("io.nanoflags:nanoflags-android:0.1.0")
+    implementation("io.nanoflags:nanoflags-android:0.2.0")
 }
 ```
 
@@ -72,7 +72,7 @@ lifecycleScope.launch {
 | `changes: SharedFlow<ChangeEvent>` | Every adopted configuration (`revision`, `previousRevision`, `source` network/store/bootstrap, `transport`, `latencyMs` commit → device for pushed revisions). |
 | `status: StateFlow<Status>` | `NOT_READY`, `READY` (known current), `STALE` (in use but not confirmed: offline, restored from storage, environment deleted). |
 | `transport: StateFlow<Transport>` | `LIVE`, `STREAM`, `POLL`, `PAUSED` (background, offline or the network policy). |
-| `errors: SharedFlow<NanoFlagsException>` | Background problems (`code`: network, http, unauthorized, invalid_bundle, signature, engine, store, environment_deleted). They never change the configuration in use. |
+| `errors: SharedFlow<NanoFlagsException>` | Background problems (`code`: network, http, unauthorized, invalid_bundle, signature, engine, store, environment_deleted, shadow). They never change the configuration in use. |
 | `suspend waitUntilReady(timeoutMs)`, `suspend refresh()`, `suspend flush()`, `close()` | |
 | `addChangeListener`, `addStatusListener`, `addErrorListener` | Callback alternatives for Java (background thread; close the returned handle to unregister). |
 | `setForeground(Boolean)`, `setNetworkState(NetworkState)` | Platform signals (`nanoflags-android` calls them for you). |
@@ -85,7 +85,7 @@ lifecycleScope.launch {
 `streaming` (realtime at all), `pollIntervalMs` (30 s without a socket), `livePollIntervalMs` (safety poll every
 5 min while the socket is healthy), `meteredPolicy` (default `LIVE`), `dataSaverPolicy` (default `POLL`: no socket
 while Data Saver restricts background data), `events { enabled, sampleRate, flushIntervalMs, reportIntervalMs,
-redact }`, `httpClient` (an `OkHttpClient` to build on: proxies, pinning, interceptors), `requestTimeoutMs`,
+redact }`, `serviceVersion` (Android: the app's `versionName`), `shadow { enabled, sampleRate }`, `httpClient` (an `OkHttpClient` to build on: proxies, pinning, interceptors), `requestTimeoutMs`,
 `dispatcher`, `logger`.
 
 ## How it stays current
@@ -121,14 +121,25 @@ revalidates. The bundle is persisted after every update and re-verified when loa
 ## Telemetry
 
 Like the other SDKs: a service report ("this app runs revision N") and sampled evaluation events (10 %) to
-`POST /v1/events`, reported as `android/0.1.0` (or `kotlin/0.1.0`). Events carry the **names of the attributes the
+`POST /v1/events`, reported as `android/0.2.0` (or `kotlin/0.2.0`). Events carry the **names of the attributes the
 flag's rules use and the type of their values — never values**. Sent only while the app is in the foreground and
 online, every 30 s when events are queued, otherwise one report per minute. Opt out with `events { enabled = false }`.
+
+**Shadow evaluation of drafts.** When an admin turned it on for the environment and a change waits for approval, the
+edge announces the change's draft as a signed shadow bundle (`X-NanoFlags-Shadow` on `/v1/bundle`, the bundle on
+`GET /v1/shadow`). For a sample (`shadow { sampleRate }`, default 10 %) of the evaluations of the flags the draft
+changes, the client evaluates the draft as well and reports counters only — per flag: samples, flips, value pairs
+live → draft, draft rule hits; labelled with `service` and `serviceVersion` — with its telemetry, at most once a
+minute (and when the app goes to the background, on `flush()` and on `close()`). No context, attribute or identifier
+is sent; the app's own default is sent as `<fallback>`. The app always gets the live value: a shadow bundle is never
+applied (any bundle with a `shadow` member is refused as configuration), and one whose signature does not verify is
+ignored (`ErrorCode.SHADOW`). Client keys receive the client view of the draft (client-exposed flags only). Off with
+`shadow { enabled = false }`, and whenever telemetry is off.
 
 ## OpenFeature
 
 ```kotlin
-implementation("io.nanoflags:nanoflags-openfeature:0.1.0")
+implementation("io.nanoflags:nanoflags-openfeature:0.2.0")
 
 OpenFeatureAPI.setProviderAndWait(NanoFlagsProvider(flags), initialContext = ImmutableContext("user-42"))
 val on = OpenFeatureAPI.getClient().getBooleanValue("new-checkout", false)

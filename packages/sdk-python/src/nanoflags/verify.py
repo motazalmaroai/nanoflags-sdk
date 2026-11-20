@@ -24,7 +24,9 @@ __all__ = [
     "import_public_keys",
     "is_public_ed25519_jwk",
     "raw_member",
+    "shadow_canonical_string",
     "verify_bundle_text",
+    "verify_shadow_text",
 ]
 
 
@@ -58,6 +60,12 @@ class ImportedKey:
 
 def canonical_string(environment_id: str, revision: int, checksum: str, bundle_sha256_hex: str) -> str:
     return f"nanoflags-bundle-v1\n{environment_id}\n{revision}\n{checksum}\n{bundle_sha256_hex}"
+
+
+def shadow_canonical_string(environment_id: str, session_id: str, checksum: str, bundle_sha256_hex: str) -> str:
+    """What a shadow bundle's signature covers (migration 0179). Domain-separated from ``nanoflags-bundle-v1``: a shadow
+    signature never verifies as a bundle signature, and the other way round."""
+    return f"nanoflags-shadow-v1\n{environment_id}\n{session_id}\n{checksum}\n{bundle_sha256_hex}"
 
 
 _B64URL = re.compile(r"^[A-Za-z0-9+/]*$")
@@ -106,7 +114,24 @@ def verify_bundle_text(keys: Sequence[ImportedKey], info: SignatureInfo, bundle_
         return False
     digest = hashlib.sha256(bundle_text.encode("utf-8", "surrogatepass")).hexdigest()
     data = canonical_string(info.environment_id, info.revision, info.checksum, digest).encode("utf-8")
-    candidates = keys if info.kid is None else [k for k in keys if k.kid == info.kid or k.kid is None]
+    return _verify_any(keys, info.kid, signature, data)
+
+
+def verify_shadow_text(keys: Sequence[ImportedKey], signature: str, kid: Optional[str], environment_id: str, session_id: str, checksum: str, bundle_text: str) -> bool:
+    """True when ``signature`` is a valid shadow-bundle signature by one of ``keys`` over ``bundle_text``."""
+    try:
+        sig = base64url_decode(signature)
+    except Exception:  # noqa: BLE001
+        return False
+    if len(sig) != 64:
+        return False
+    digest = hashlib.sha256(bundle_text.encode("utf-8", "surrogatepass")).hexdigest()
+    data = shadow_canonical_string(environment_id, session_id, checksum, digest).encode("utf-8")
+    return _verify_any(keys, kid, sig, data)
+
+
+def _verify_any(keys: Sequence[ImportedKey], kid: Optional[str], signature: bytes, data: bytes) -> bool:
+    candidates = keys if kid is None else [k for k in keys if k.kid == kid or k.kid is None]
     for k in candidates:
         try:
             k.key.verify(signature, data)

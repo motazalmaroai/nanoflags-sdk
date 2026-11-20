@@ -20,7 +20,7 @@ const RUN_FAIL = { ...RUN_OK, passed: 1, failed: 1, results: [RUN_OK.results[0]!
 describe("general", () => {
   it("--help, --version, no command, unknown command, unknown option", async () => {
     expect((await cli(["--help"])).out).toContain("Usage: nanoflags <command>");
-    expect((await cli(["--version"])).out).toBe("0.4.0\n");
+    expect((await cli(["--version"])).out).toBe("0.4.1\n");
     expect((await cli([])).code).toBe(2);
     expect(await cli(["frobnicate"])).toMatchObject({ code: 2, out: "" });
     expect((await cli(["export", "--nope"])).code).toBe(2);
@@ -294,6 +294,31 @@ describe("publish", () => {
     expect(r.code).toBe(0);
     expect(r.out).toBe("Published r5 (checksum def456).\n");
     expect(r.calls).toMatchObject([{ method: "POST", path: "/v1/admin/publish", body: { expectedRevision: 4, note: "ship it" } }]);
+  });
+
+  it("retries a publish refused BUSY (503) with backoff, then succeeds with the same request", async () => {
+    let n = 0;
+    const busy = "The draft of this project is being edited right now (for example by an import). Nothing was published. Try again in a moment.";
+    const r = await cli(["publish", "--expected-revision", "4"], { routes: { "POST /v1/admin/publish": () => (++n < 3 ? apiError(503, "BUSY", busy) : json({ revision: 5, checksum: "def456" })) } });
+    expect(r.code).toBe(0);
+    expect(r.out).toBe("Published r5 (checksum def456).\n");
+    expect(r.calls.filter((c) => c.path === "/v1/admin/publish")).toHaveLength(3);
+    expect(r.calls.filter((c) => c.path === "/v1/admin/publish").every((c) => JSON.stringify(c.body) === JSON.stringify({ expectedRevision: 4 }))).toBe(true);
+    expect(r.err).toContain("Retrying in 1 s");
+    expect(r.err).toContain("Retrying in 2 s");
+  });
+
+  it("gives up after 3 BUSY retries with the server's message and what to do", async () => {
+    const r = await cli(["publish", "--expected-revision", "4"], { routes: { "POST /v1/admin/publish": apiError(503, "BUSY", "The draft of this project is being edited right now.") } });
+    expect(r.code).toBe(1);
+    expect(r.calls.filter((c) => c.path === "/v1/admin/publish")).toHaveLength(4);
+    expect(r.err).toContain("Publish refused: The draft of this project is being edited right now. [BUSY]");
+    expect(r.err).toContain("Run the command again in a moment");
+  });
+
+  it("does not retry other refusals", async () => {
+    const r = await cli(["publish", "--expected-revision", "4"], { routes: { "POST /v1/admin/publish": apiError(409, "NO_CHANGES", "Nothing.") } });
+    expect(r.calls.filter((c) => c.path === "/v1/admin/publish")).toHaveLength(1);
   });
 
   it.each([

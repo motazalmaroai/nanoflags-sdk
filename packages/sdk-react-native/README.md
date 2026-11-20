@@ -100,9 +100,15 @@ createClient({
   streaming?: boolean,             // true; false = polling only
   live?: boolean,                  // true; false = SSE + polling
   events?: EventsOptions | false,  // telemetry, see below; false opts out
+  experiments?: ExperimentsOptions | false, // exposures and track(); off with events: false unless { enabled: true }
+  shadow?: ShadowOptions | false,  // shadow evaluation of drafts, ON by default when events are on; false turns it off
+  serviceVersion?: string,         // your app version, shown with shadow-evaluation reports
   verify?: VerifyOptions | false,  // default: embedded keys + required for the official edge
+  verifyLog?: boolean,             // false; true = check every update against the transparency log
+  coSignerKeys?: JsonWebKey[],     // customer co-signing public keys; updates without a valid co-signature are refused
+  allowEmergencyWithoutCosign?: boolean, // true: kill-switch revisions that only turn flags off need no co-signature
   crypto?: SignatureCrypto,        // default: bundled pure-JS SHA-256 / Ed25519
-  userAgent?: string,              // default "nanoflags-react-native/0.2.0"
+  userAgent?: string,              // default "nanoflags-react-native/0.3.0"
   fetch?, webSocket?, xmlHttpRequest?, // default: the React Native globals
 })
 ```
@@ -118,7 +124,7 @@ createClient({
 | `evaluate(key, fallback, ctx?)` | Raw engine result, no type check. |
 | `allFlags(ctx?)` | Values of every flag delivered to this key. |
 | `lifecycle` | `{ background, offline, metered, paused, realtime }`. |
-| `on("update" \| "error", cb)` | `update`: `{ revision, previousRevision, source, transport, latencyMs }`. `error`: `NanoFlagsError` with `code` (`signature`, `network`, `unauthorized`, `store`, `engine`, `environment_deleted`, …). |
+| `on("update" \| "error", cb)` | `update`: `{ revision, previousRevision, source, transport, latencyMs }`. `error`: `NanoFlagsError` with `code` (`signature`, `network`, `unauthorized`, `store`, `engine`, `environment_deleted`, `log`, `cosign`, `shadow`, …). |
 | `subscribe(cb)` / `version` | External-store hooks (used by the React bindings). |
 | `refresh()` / `flush()` / `close()` | Revalidate now / send telemetry now / stop everything (evaluations keep working). |
 
@@ -198,10 +204,30 @@ createClient({ sdkKey, storage: { getItem: (k) => mmkv.getString(k) ?? null, set
 
 ## Telemetry
 
-As in every NanoFlags SDK: a service report (`sdk: "react-native/0.2.0"`, the revision in use) and a sample (default
+As in every NanoFlags SDK: a service report (`sdk: "react-native/0.3.0"`, the revision in use) and a sample (default
 10 %) of evaluations with the flag, value, reason and revision. **Context values are never sent** — only the names
 of the attributes the flag's rules use and their types (e.g. `{ "plan": "string" }`). `events: { sampleRate }` tunes
 it, `events: false` turns it off. Telemetry is flushed when the app goes to the background.
+
+### Shadow evaluation of drafts
+
+**On by default whenever `events` is on.** It only acts in environments where an owner or admin turned shadow
+evaluation on, while a change waits for approval: the app loads the change's signed draft (the browser view: client-exposed
+flags only) and, for a sample of evaluations of the flags the draft changes (`shadow: { sampleRate }`, default 0.1), also
+evaluates the draft. It sends aggregate counters only (how often the value would change, per flag), with the telemetry
+report at most once a minute; never a context, attribute or identifier, and never your own fallback value. The app always
+gets the live value; the draft is never applied. Reports sent with a client key count only for client-exposed flags and
+are shown apart from server reports on the change page. `serviceVersion` labels them with your app version.
+
+Turn it off with `shadow: false` (or `events: false`, which turns all telemetry off).
+
+### Verifiable history and co-signing
+
+`verifyLog: true` checks every update against the environment's transparency log, and `coSignerKeys` refuses updates
+without a valid customer co-signature (kill-switch revisions that only turn flags off are accepted unless
+`allowEmergencyWithoutCosign: false`). A refused update emits `error` with code `log` or `cosign` and the configuration
+in use stays. Both need signature verification (on by default for the official edge); the bundled pure-JS crypto handles
+them.
 
 ## Notes
 

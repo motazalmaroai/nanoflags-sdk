@@ -106,6 +106,33 @@ Future<bool> verifyBundleText(List<ImportedKey> keys, SignatureInfo info, String
   return false;
 }
 
+/// The signed text of a shadow bundle (migration 0179), domain-separated from bundle signatures:
+/// `nanoflags-shadow-v1\n<environment>\n<session id>\n<draft checksum>\n<sha256 hex of the bundle text>`.
+String shadowCanonicalString(String environmentId, String sessionId, String checksum, String bundleSha256Hex) =>
+    'nanoflags-shadow-v1\n$environmentId\n$sessionId\n$checksum\n$bundleSha256Hex';
+
+/// True when [signature] is a valid shadow-bundle signature by one of [keys] over [bundleText].
+Future<bool> verifyShadowText(List<ImportedKey> keys,
+    {required String signature, required String? kid, required String environmentId, required String sessionId, required String checksum, required String bundleText}) async {
+  List<int> sig;
+  try {
+    sig = base64UrlDecodeStrict(signature);
+  } on FormatException {
+    return false;
+  }
+  if (sig.length != 64) return false;
+  final data = utf8.encode(shadowCanonicalString(environmentId, sessionId, checksum, sha256Hex(bundleText)));
+  final candidates = kid == null ? keys : keys.where((k) => k.kid == kid || k.kid == null);
+  for (final k in candidates) {
+    try {
+      if (await _ed25519.verify(data, signature: Signature(sig, publicKey: k.key))) return true;
+    } catch (_) {
+      // try the next key
+    }
+  }
+  return false;
+}
+
 /// Returns the exact source text of the top-level [member] of the JSON object [text], or null.
 ///
 /// The edge embeds the stored bundle text byte-for-byte; hashing that span avoids depending on

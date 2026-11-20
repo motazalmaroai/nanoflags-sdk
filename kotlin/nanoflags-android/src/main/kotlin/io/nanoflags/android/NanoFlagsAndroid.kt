@@ -25,7 +25,8 @@ import java.util.Locale
  *   [NanoFlagsOptions.dataSaverPolicy] (default: live on mobile data, polling only under Data Saver).
  * - **Storage**: the last verified bundle is kept in `noBackupFilesDir/nanoflags/` (excluded from cloud backups) and
  *   re-verified on the next start, so the app starts offline-first.
- * - Telemetry is reported as `android/<version>` with your application id as service name.
+ * - Telemetry is reported as `android/<version>` with your application id as service name and your app's
+ *   `versionName` as service version (it labels shadow evaluation reports).
  *
  * ```
  * val flags = NanoFlagsAndroid.create(applicationContext, "nf_pub_…") {
@@ -61,6 +62,7 @@ object NanoFlagsAndroid {
         val app = context.applicationContext ?: context
         val options = NanoFlagsOptions().apply {
             service = app.packageName
+            serviceVersion = versionName(app)
             sdkName = "android"
             userAgent = NanoFlagsAndroid.userAgent
             store = FileBundleStore(storeFile(app, sdkKey))
@@ -80,6 +82,14 @@ object NanoFlagsAndroid {
             }
         }
         return client
+    }
+
+    /** The app's `versionName`, or null. */
+    @Suppress("DEPRECATION")
+    internal fun versionName(app: Context): String? = try {
+        app.packageManager.getPackageInfo(app.packageName, 0).versionName
+    } catch (_: Exception) {
+        null
     }
 
     internal fun onMain(block: () -> Unit) {

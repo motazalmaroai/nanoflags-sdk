@@ -84,7 +84,7 @@ status changes emit `PROVIDER_READY` / `PROVIDER_STALE`.
 
 | | |
 | --- | --- |
-| `NanoFlags(sdk_key, *, base_url, service, poll_interval, streaming, live, live_poll_interval, bootstrap, cache_path, store, events, verify, on_change, on_error, start)` | the client |
+| `NanoFlags(sdk_key, *, base_url, service, poll_interval, streaming, live, live_poll_interval, bootstrap, cache_path, store, events, verify, on_change, on_error, start, service_version, shadow)` | the client |
 | `bool_variation` / `string_variation` / `number_variation` / `json_variation(key, default, context=None)` | typed value |
 | `*_variation_detail(...)` → `Evaluation` | `value`, `reason` (`rule_match`, `default`, `off`, `flag_not_found`, `error`), `rule_index`, `rule_id`, `in_rollout`, `bucket`, `revision`, `trace`, `error` |
 | `evaluate(key, default, context)` | engine result without a type check |
@@ -92,12 +92,12 @@ status changes emit `PROVIDER_READY` / `PROVIDER_STALE`.
 | `wait_until_ready(timeout)` / `ready(timeout)` → `bool` | blocks until a configuration is in use or the first load failed |
 | `status` (`not-ready` / `ready` / `stale`), `revision`, `transport` (`live` / `stream` / `poll`) | state |
 | `on_change(cb)`, `on_error(cb)`, `on("update" \| "error" \| "status", cb)` → unsubscribe | listeners |
-| `refresh()`, `flush()`, `close()` | revalidate now, send telemetry now, stop |
+| `refresh()`, `flush()`, `close()` | revalidate now, send telemetry (and shadow counters) now, stop |
 | `session(token, service=None)` → `SessionEvaluator` | test-session override (below) |
 
 `base_url` defaults to the hosted edge `https://edge.nanoflags.io`. Errors are delivered to `on_error` as
 `NanoFlagsError` with a `code`: `network`, `unauthorized`, `http`, `invalid_bundle`, `store`, `config`, `signature`,
-`session`, `engine`, `environment_deleted`. Nothing is ever raised from a variation call.
+`session`, `engine`, `environment_deleted`, `shadow`. Nothing is ever raised from a variation call.
 
 ## Behaviour
 
@@ -125,6 +125,16 @@ status changes emit `PROVIDER_READY` / `PROVIDER_STALE`.
 - **Telemetry.** A sampled 10 % of evaluations are sent every 10 s, plus a service report every 60 s. Context
   **values never leave the process** by default: only the names (and value types) of the attributes the flag's
   rules use. `events=EventsOptions(redact=...)` customises this; `events=False` turns it off.
+- **Shadow evaluation of drafts.** While a change waits for approval in an environment where an admin turned it
+  on, the edge announces a signed shadow bundle (the draft). The client verifies it (its own signature domain
+  `nanoflags-shadow-v1`, marker inside the signed bytes; without `verify`, with the keys of `GET /v1/keys`) and,
+  for a sample of the evaluations of the flags the draft changes (`shadow=ShadowOptions(sample_rate=0.1)`), also
+  evaluates the draft. Only aggregate counters leave the process, with the telemetry report at most once a
+  minute (and on `flush()` / `close()`): no context, attribute or identifier; the app's own default is sent as
+  `"<fallback>"`. Your code always gets the live value: a bundle with a `shadow` member is never used as
+  configuration. Test sessions are never shadowed. `service_version="3.1.0"` labels the reports;
+  `shadow=False` (or `events=False`) turns it off. A shadow bundle that does not verify is reported with
+  `code="shadow"` and ignored. See [Shadow evaluation](https://nanoflags.io/docs/shadow-evaluation).
 - **Test sessions.** `flags.session(request.headers.get("x-nanoflags-session"))` returns an evaluator pinned to the
   session's configuration and context while the session is active (resolved once per token, cached until it
   expires), and behaves like the client otherwise.

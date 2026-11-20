@@ -39,6 +39,24 @@ class EventsOptions {
     var random: () -> Double = { Math.random() }
 }
 
+/**
+ * Shadow evaluation of drafts. When an admin turned it on for the environment and a change waits for approval, the
+ * edge offers the change's draft as a signed shadow bundle. For a sample of the evaluations of the flags the draft
+ * changes, the client evaluates the draft as well and reports counters only (no context, attribute or identifier) with
+ * its telemetry, at most once a minute. The app always gets the live value: a shadow bundle is never applied, and one
+ * whose signature does not verify is ignored. Needs telemetry ([EventsOptions.enabled]); off with it.
+ */
+class ShadowOptions {
+    /** Off: shadow bundles are never fetched nor evaluated. */
+    var enabled: Boolean = true
+
+    /** Share of evaluations of changed flags that are also evaluated with the draft (0–1). */
+    var sampleRate: Double = 0.1
+
+    /** Random source in [0, 1) for sampling (tests). */
+    var random: () -> Double = { Math.random() }
+}
+
 /** Client configuration. All fields have mobile-friendly defaults. */
 class NanoFlagsOptions {
     /** Edge base URL. Default: the hosted edge (bundles verified against the embedded keys, unsigned bundles refused). */
@@ -46,6 +64,12 @@ class NanoFlagsOptions {
 
     /** Name reported with telemetry (e.g. your application id). */
     var service: String = "unknown"
+
+    /**
+     * Your app's version (e.g. `BuildConfig.VERSION_NAME`, at most 40 characters). It labels shadow evaluation reports,
+     * so the change page can show the impact per service and version.
+     */
+    var serviceVersion: String? = null
 
     /** The initial evaluation context (change it at runtime with `identify`). */
     var context: NanoFlagsContext = NanoFlagsContext.EMPTY
@@ -93,6 +117,13 @@ class NanoFlagsOptions {
         events.block()
     }
 
+    /** Shadow evaluation of drafts; see [ShadowOptions]. */
+    val shadow: ShadowOptions = ShadowOptions()
+
+    fun shadow(block: ShadowOptions.() -> Unit) {
+        shadow.block()
+    }
+
     /** HTTP client to build on (proxies, certificate pinning, interceptors). Timeouts are applied per request. */
     var httpClient: OkHttpClient? = null
 
@@ -119,6 +150,8 @@ class NanoFlagsOptions {
         o.bootstrap = bootstrap; o.meteredPolicy = meteredPolicy; o.dataSaverPolicy = dataSaverPolicy
         o.events.enabled = events.enabled; o.events.sampleRate = events.sampleRate; o.events.flushIntervalMs = events.flushIntervalMs
         o.events.reportIntervalMs = events.reportIntervalMs; o.events.redact = events.redact; o.events.random = events.random
+        o.serviceVersion = serviceVersion
+        o.shadow.enabled = shadow.enabled; o.shadow.sampleRate = shadow.sampleRate; o.shadow.random = shadow.random
         o.httpClient = httpClient; o.requestTimeoutMs = requestTimeoutMs; o.liveConnectTimeoutMs = liveConnectTimeoutMs
         o.dispatcher = dispatcher; o.logger = logger; o.foreground = foreground; o.network = network; o.sdkName = sdkName; o.userAgent = userAgent
     }

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "nanoflags"
-version = "0.1.0"
+version = "0.2.0"
 description = "NanoFlags server SDK for Python: local, deterministic feature-flag evaluation with signed live updates."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -44,7 +44,7 @@ Issues = "https://github.com/motazalmaroai/nanoflags-sdk/issues"
 packages = ["src/nanoflags"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src/nanoflags", "tests", "README.md", "LICENSE", "NOTICE", "pyproject.toml"]
+include = ["src/nanoflags", "tests", "README.md", "CHANGELOG.md", "LICENSE", "NOTICE", "pyproject.toml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -47,6 +47,10 @@ export const MAX_SHADOW_FLAGS = 100;
 export const MAX_SHADOW_PAIRS = 10;
 export const MAX_SHADOW_RULES = 50;
 export const MAX_SHADOW_VALUE_CHARS = 100;
+/** The edge accepts counts up to 10^7; a flag's counter stops there (the next report starts from zero again). */
+export const MAX_SHADOW_COUNT = 10_000_000;
+/** The edge accepts flag keys of 1–63 characters (UTF-16 code units) in a report. */
+export const MAX_SHADOW_FLAG_KEY = 63;
 /** Shadow counters go out with the events report at most this often (and on flush(), pause and close). */
 export const SHADOW_FLUSH_MS = 60_000;
 /** A failed shadow fetch is not retried for the same announcement before this. */
@@ -171,12 +175,16 @@ export class ShadowCounters {
    * Whether the value changes is decided on the values themselves, whatever the order of object keys.
    */
   add(flag: string, live: JsonValue | undefined, shadow: JsonValue | undefined, ruleIndex: number | undefined, liveFallback = false, shadowFallback = false): void {
+    // The edge refuses the whole report (400) over one flag key outside 1–63 characters.
+    if (typeof flag !== "string" || flag === "" || flag.length > MAX_SHADOW_FLAG_KEY) return;
     let c = this.flags.get(flag);
     if (!c) {
       if (this.flags.size >= MAX_SHADOW_FLAGS) return;
       c = { samples: 0, flips: 0, pairs: new Map(), rules: new Map() };
       this.flags.set(flag, c);
     }
+    // Every count of a flag (flips, pair and rule counters) is ≤ samples, so stopping samples keeps them all ≤ 10^7.
+    if (c.samples >= MAX_SHADOW_COUNT) return;
     c.samples++;
     const rk = typeof ruleIndex === "number" && Number.isInteger(ruleIndex) && ruleIndex >= 0 && ruleIndex < 10_000 ? String(ruleIndex) : "default";
     if (c.rules.has(rk) || c.rules.size < MAX_SHADOW_RULES) c.rules.set(rk, (c.rules.get(rk) ?? 0) + 1);

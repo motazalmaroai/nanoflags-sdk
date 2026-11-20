@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.0 — unreleased
+
+- Shadow evaluation of drafts (same rules and wire format as `@nanoflags/sdk` 0.7.1): while a change waits for
+  approval in an environment with shadow evaluation on, the client fetches the signed shadow bundle announced by
+  `X-NanoFlags-Shadow` (`GET /v1/shadow`, Ed25519 over `nanoflags-shadow-v1`, marker checked), evaluates the draft for
+  a sample of the evaluations of the flags it changes (`shadow { sampleRate }`, default 0.1) and reports bounded
+  counters only with the events report, at most once a minute (always on `flush()`, background and `close()`). The
+  app always gets the live value; any bundle with a `shadow` member is refused as configuration (HTTP, push, store,
+  bootstrap). New options `shadow { enabled, sampleRate }` and `serviceVersion` (Android default: the app's
+  `versionName`); new error code `ErrorCode.SHADOW`. Off with `shadow { enabled = false }` or `events { enabled = false }`.
+- Shadow reports always pass the edge's validation of `POST /v1/events`: flag keys over 63 characters (UTF-16
+  code units) are not counted and a flag's counters stop at 10^7 samples until the next report.
+
 ## 0.1.0 — unreleased
 
 First release of the Android / Kotlin SDK.

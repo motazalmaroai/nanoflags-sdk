@@ -187,10 +187,24 @@ s.Active(); s.ID(); s.ExpiresAt(); s.Revision()
 | `WithVerification(VerifyOptions{PublicKeys, FetchKeys, Require})` / `WithoutVerification()` | official edge: embedded keys, `Require` true; other edges: off |
 | `WithStore(Store)`, `WithBootstrap(*engine.Bundle)`, `WithBootstrapJSON([]byte)` | none |
 | `WithEvents(EventsOptions{Disabled, SampleRate, FlushInterval, ReportInterval, Redact})` | 10 % of evaluations, flushed every 10 s; service report every 60 s |
+| `WithServiceVersion(v)` | none — your service's version, shown next to the service on the shadow-evaluation panel |
+| `WithShadow(ShadowOptions{Disabled, SampleRate})` | on while events are on, 10 % of evaluations of the flags a draft changes |
 | `WithLogger(*slog.Logger)` | discard |
 
 Telemetry never sends attribute values by default: a sampled event carries the names of the
 attributes the flag's rules use, mapped to their type (`{"plan": "string"}`).
+
+**Shadow evaluation of drafts.** While a change waits for approval in an environment where an
+admin turned it on, the edge announces a signed shadow bundle (the draft). The client verifies it
+(signature domain `nanoflags-shadow-v1`, marker inside the signed bytes; without verification, with
+the keys of `GET /v1/keys`) and, for a sample of the evaluations of the flags the draft changes,
+also evaluates the draft. Only aggregate counters leave the process, with the telemetry report at
+most once a minute (and on `Flush` / `Close`): no context, attribute or identifier, and the app's
+own fallback is sent as `"<fallback>"`. Your code always gets the live value: a bundle with a
+`shadow` member is never used as configuration, and test sessions are never shadowed. A shadow
+bundle that does not verify is reported with code `ErrShadow` and ignored. Turn it off with
+`WithShadow(nanoflags.ShadowOptions{Disabled: true})`; it is off when events are disabled. See
+[Shadow evaluation](https://nanoflags.io/docs/shadow-evaluation).
 
 ## OpenFeature
 

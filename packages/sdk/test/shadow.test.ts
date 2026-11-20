@@ -1,7 +1,7 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { createClient, type Bundle, type NanoFlagsClient, type NanoFlagsError } from "../src/index";
 import { canonicalString, sha256Hex, shadowCanonicalString } from "../src/verify";
-import { changedFlags, MAX_SHADOW_FLAGS, MAX_SHADOW_PAIRS, parseShadowHeader, reprValue, ShadowCounters, type ShadowMarker } from "../src/shadow";
+import { changedFlags, MAX_SHADOW_COUNT, MAX_SHADOW_FLAG_KEY, MAX_SHADOW_FLAGS, MAX_SHADOW_PAIRS, parseShadowHeader, reprValue, ShadowCounters, type ShadowMarker } from "../src/shadow";
 import { BASE, CLIENT_KEY, SERVER_KEY, makeBundle, tick } from "./helpers";
 import { ENV_ID, makeSigner, mockRoutes, signedResponse, type Signer } from "./v2helpers";
 
@@ -356,5 +356,32 @@ describe("shadow helpers", () => {
     expect(r.pairs.reduce((a, x) => a + x.count, 0)).toBe(50);
     expect(Object.keys(r.rules)).toHaveLength(50);
     expect(p.report(undefined)).not.toHaveProperty("version");
+  });
+
+  it("skips flag keys the edge would refuse and stops a flag's counters at 10^7 samples", () => {
+    expect(MAX_SHADOW_FLAG_KEY).toBe(63);
+    expect(MAX_SHADOW_COUNT).toBe(10_000_000);
+    const c = new ShadowCounters(SESSION, DRAFT);
+    c.add("k".repeat(64), false, true, 0);
+    c.add("", false, true, 0);
+    expect(c.size).toBe(0);
+    c.add("k".repeat(63), false, true, 0);
+    // 63 UTF-16 code units, as the edge counts them (String.length): 31 surrogate pairs + 1.
+    c.add("\u{1F600}".repeat(31) + "x", false, true, 0);
+    c.add("\u{1F600}".repeat(32), false, true, 0);
+    expect(c.size).toBe(2);
+    c.add("big", false, true, 0);
+    (c as unknown as { flags: Map<string, { samples: number }> }).flags.get("big")!.samples = MAX_SHADOW_COUNT;
+    c.add("big", false, true, 0);
+    c.add("big", true, true, 0);
+    const big = c.report(undefined).flags.find((f) => f.flag === "big")!;
+    expect(big).toMatchObject({ samples: MAX_SHADOW_COUNT, flips: 1, rules: { "0": 1 } });
+    // Every flag and count of the report passes the edge's checks (1–63 characters, integers 0..10^7, flips ≤ samples).
+    for (const f of c.report(undefined).flags) {
+      expect(f.flag.length).toBeGreaterThan(0);
+      expect(f.flag.length).toBeLessThanOrEqual(63);
+      for (const n of [f.samples, f.flips, ...f.pairs.map((p) => p.count), ...Object.values(f.rules)]) expect(n).toBeLessThanOrEqual(10_000_000);
+      expect(f.flips).toBeLessThanOrEqual(f.samples);
+    }
   });
 });

@@ -8,7 +8,7 @@ import io.nanoflags.engine.TraceStep
 /** SDK release information. */
 object BuildInfo {
     /** This SDK's version (also in the User-Agent and in telemetry as `kotlin/<version>` / `android/<version>`). */
-    const val VERSION: String = "0.1.0"
+    const val VERSION: String = "0.2.0"
 }
 
 /** What kind of problem a [NanoFlagsException] reports. */
@@ -31,6 +31,8 @@ enum class ErrorCode {
     STORE,
     /** The environment of the SDK key was deleted (live socket closed with 4004). */
     ENVIRONMENT_DELETED,
+    /** A shadow bundle (draft of a change waiting for approval) was ignored. Nothing changes for the app. */
+    SHADOW,
 }
 
 /** A background problem. A failed update never changes the configuration in use. */

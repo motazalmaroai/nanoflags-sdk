@@ -4,7 +4,8 @@ Flags are evaluated locally and synchronously against an in-memory bundle; a var
 performs I/O and never raises. The network is used in background threads only: to load the bundle,
 to receive new revisions (live WebSocket ``/v1/live``, falling back to SSE ``/v1/stream`` and polling
 ``/v1/bundle``), and to send sampled telemetry plus the periodic service report (``/v1/events``).
-Behaviour follows the TypeScript SDK (``@nanoflags/sdk`` 0.4) and RUNTIME.md.
+Behaviour follows the TypeScript SDK (``@nanoflags/sdk`` 0.4) and RUNTIME.md; shadow evaluation of drafts
+(``shadow.py``) follows ``@nanoflags/sdk`` 0.7.
 """
 
 from __future__ import annotations
@@ -23,8 +24,18 @@ from . import _http
 from ._js import js_stringify
 from .engine import ENGINE_VERSION, Evaluation, TraceStep, evaluate as engine_evaluate, is_bundle, murmur3, supports_engine, type_of
 from .keys import OFFICIAL_EDGE_URL, OFFICIAL_SIGNING_KEYS
+from .shadow import (
+    SHADOW_FLUSH_INTERVAL,
+    SHADOW_RETRY_INTERVAL,
+    ShadowCounters,
+    ShadowOptions,
+    changed_flags,
+    is_shadow_bundle,
+    parse_shadow_header,
+    utf16_truncate,
+)
 from .store import FileStore, Store
-from .verify import ImportedKey, SignatureInfo, import_public_keys, is_public_ed25519_jwk, raw_member, verify_bundle_text
+from .verify import ImportedKey, SignatureInfo, import_public_keys, is_public_ed25519_jwk, raw_member, verify_bundle_text, verify_shadow_text
 
 try:
     from typing import Literal
@@ -41,11 +52,12 @@ __all__ = [
     "SESSION_HEADER",
     "SUPPORTED_ENGINE_VERSION",
     "SessionEvaluator",
+    "ShadowOptions",
     "UpdateEvent",
     "VerifyOptions",
 ]
 
-SDK_VERSION = "0.1.0"
+SDK_VERSION = "0.2.0"
 SUPPORTED_ENGINE_VERSION = ENGINE_VERSION
 #: WebSocket close code of the edge for a deleted environment: the client stops reconnecting.
 CLOSE_ENVIRONMENT_DELETED = 4004
@@ -56,7 +68,7 @@ SESSION_HEADER = "x-nanoflags-session"
 
 Status = Literal["not-ready", "ready", "stale"]
 Transport = Literal["live", "stream", "poll"]
-ErrorCode = Literal["network", "unauthorized", "http", "invalid_bundle", "store", "config", "signature", "session", "engine", "environment_deleted"]
+ErrorCode = Literal["network", "unauthorized", "http", "invalid_bundle", "store", "config", "signature", "session", "engine", "environment_deleted", "shadow"]
 
 log = logging.getLogger("nanoflags")
 
@@ -148,6 +160,11 @@ def _loads(text: str) -> Any:
         raise ValueError(f"invalid JSON constant {name}")
 
     return json.loads(text, parse_constant=reject)
+
+
+def _is_config(v: Any) -> bool:
+    """A bundle that may be used as configuration. A shadow bundle (migration 0179) never is, on any path."""
+    return is_bundle(v) and "shadow" not in v
 
 
 def _is_session_token(v: Any) -> bool:
@@ -267,6 +284,8 @@ class NanoFlags:
         start: bool = True,
         http: Optional[_http.HttpFunction] = None,
         live_url: Optional[str] = None,
+        service_version: Optional[str] = None,
+        shadow: Union[ShadowOptions, bool, None] = None,
     ) -> None:
         """
         :param sdk_key: ``nf_srv_…`` (server view) or ``nf_pub_…`` (client-exposed flags only).
@@ -286,6 +305,12 @@ class NanoFlags:
         :param start: ``False`` defers the background work until :meth:`start`.
         :param http: injectable ``(method, url, headers, body, timeout) -> HttpResponse``.
         :param live_url: WebSocket URL of ``/v1/live`` when it is not ``base_url`` with ``ws(s)://`` (advanced).
+        :param service_version: your service's own version (e.g. ``"3.1.0"``, at most 40 characters), shown next to
+            ``service`` on the change page's "Production impact (shadow)" panel.
+        :param shadow: shadow evaluation of drafts. While a change waits for approval in an environment where an admin
+            turned it on, a sample of the evaluations of the flags the draft changes is also evaluated with the draft
+            (signed, verified, never applied) and only aggregate counters are reported with telemetry. Default on (sample
+            rate 0.1) while ``events`` are enabled; ``False`` or ``ShadowOptions(enabled=False)`` turns it off.
         """
         self.sdk_key = sdk_key
         self.base_url = str(base_url or "").rstrip("/")
@@ -303,6 +328,21 @@ class NanoFlags:
         else:
             self._ev = events
         self._sample_rate = min(1.0, max(0.0, self._ev.sample_rate))
+        # ---- shadow evaluation of drafts (migration 0179; shadow.py). Never changes what the app gets.
+        so = ShadowOptions(enabled=False) if shadow is False else (ShadowOptions() if shadow is None or shadow is True else shadow)
+        self._shadow_enabled = bool(so.enabled) and self._ev.enabled
+        rate = so.sample_rate if isinstance(so.sample_rate, (int, float)) and not isinstance(so.sample_rate, bool) and math.isfinite(so.sample_rate) else 0.1
+        self._shadow_rate = min(1.0, max(0.0, float(rate)))
+        self._shadow_random: Callable[[], float] = so.random or random.random
+        sv = service_version.strip() if isinstance(service_version, str) else ""
+        self._service_version: Optional[str] = utf16_truncate(sv, 40) if sv else None
+        #: The verified shadow bundle in use: {"bundle", "marker", "counters", "live": (live bundle, changed flags)}.
+        self._shadow: Optional[Dict[str, Any]] = None
+        self._shadow_flushed_at = time.monotonic()
+        self._shadow_fetch: Optional[Dict[str, Any]] = None
+        self._shadow_keys: Optional[List[ImportedKey]] = None
+        self._shadow_announce: Any = None
+        self._shadow_announced = False
         self._id = format(murmur3(f"{self.base_url}|{sdk_key}"), "08x")
         self._store: Optional[Store] = store if store is not None else (FileStore(cache_path) if cache_path else None)
         self._is_browser_key = isinstance(sdk_key, str) and sdk_key.startswith("nf_pub_")
@@ -372,9 +412,9 @@ class NanoFlags:
                     b = _loads(b)
                 except ValueError:
                     b = None
-            if is_bundle(b) and not supports_engine(b):
+            if _is_config(b) and not supports_engine(b):
                 self._pending_errors = [self._engine_error(b)]
-            elif is_bundle(b):
+            elif _is_config(b):
                 self._adopt(dict(b), etag=None, checksum=None, status="ready", source="bootstrap", transport="poll")
             else:
                 self._pending_errors = [NanoFlagsError("The bootstrap bundle is invalid and was ignored.", "invalid_bundle")]
@@ -573,6 +613,9 @@ class NanoFlags:
                 error = f'Flag "{key}" has a {type_of(result.value)} value, which does not match the requested type.'
                 result = Evaluation(key, default, "error", result.revision, trace=[*result.trace, TraceStep("result", "Returned the fallback", error)], error=error)
             self._record(result, ctx, b, scope.id if scope else None)
+            # Test sessions evaluate their own snapshot: never shadowed.
+            if self._shadow is not None and scope is None and b is not None:
+                self._shadow_evaluate(key, default, ctx, accepts, result, b)
             return result
         except Exception as e:  # noqa: BLE001 - accessors never raise
             return Evaluation(key, default, "error", 0, error=str(e))
@@ -623,7 +666,7 @@ class NanoFlags:
             if not raw or self._closed:
                 return
             p = _loads(raw)
-            if not isinstance(p, dict) or p.get("v") != 1 or p.get("id") != self._id or not is_bundle(p.get("bundle")):
+            if not isinstance(p, dict) or p.get("v") != 1 or p.get("id") != self._id or not _is_config(p.get("bundle")):
                 return
             restored = p["bundle"]
             if not supports_engine(restored):
@@ -645,7 +688,7 @@ class NanoFlags:
                         ok = verify_bundle_text(self._load_keys(s.kid), s, text)
                         if ok:
                             parsed = _loads(text)
-                            ok = is_bundle(parsed) and parsed.get("revision") == s.revision
+                            ok = _is_config(parsed) and parsed.get("revision") == s.revision
                             if ok:
                                 restored = parsed
                     except Exception:  # noqa: BLE001
@@ -763,7 +806,7 @@ class NanoFlags:
         for candidate in candidates:
             if verify_bundle_text(keys, info, candidate):
                 parsed = _loads(candidate)
-                if is_bundle(parsed) and parsed.get("revision") == revision:
+                if _is_config(parsed) and parsed.get("revision") == revision:
                     with self._lock:
                         self._pinned_env = environment_id
                     return {"bundle": parsed, "sig": info, "raw": candidate}
@@ -779,6 +822,9 @@ class NanoFlags:
             if self._closed:
                 return
             served_stale = res.headers.get("X-NanoFlags-Stale") == "true"
+            # Migration 0179: a change is being shadow-evaluated (fresh answers only; a stale answer says nothing about it).
+            if (res.status == 304 or res.ok) and not served_stale:
+                self._shadow_announced, self._shadow_announce = True, res.headers.get("X-NanoFlags-Shadow")
             if res.status == 304:
                 self._failures = 0
                 if self._bundle is not None:
@@ -793,7 +839,7 @@ class NanoFlags:
                 body = _loads(text)
             except ValueError:
                 body = None
-            if not isinstance(body, dict) or not is_bundle(body.get("bundle")):
+            if not isinstance(body, dict) or not _is_config(body.get("bundle")):
                 raise NanoFlagsError("The edge returned an invalid bundle.", "invalid_bundle")
             verified = self._check_signature(res, text, body)
             if self._closed:
@@ -836,7 +882,10 @@ class NanoFlags:
     def _sync(self) -> None:
         with self._sync_mutex:
             if not self._closed:
+                self._shadow_announced = False
                 self._sync_once()
+                if self._shadow_announced:
+                    self._note_shadow(self._shadow_announce)
 
     def refresh(self) -> None:
         """Revalidate now (blocking). Errors are reported to ``on_error`` listeners, never raised."""
@@ -1034,7 +1083,7 @@ class NanoFlags:
             parsed = _loads(text)
         except ValueError:
             parsed = None
-        if not is_bundle(parsed) or parsed.get("revision") != revision:
+        if not _is_config(parsed) or parsed.get("revision") != revision:
             self._emit_error(NanoFlagsError("The edge pushed an invalid bundle; it was ignored.", "invalid_bundle"))
             return
         if not supports_engine(parsed):
@@ -1206,9 +1255,24 @@ class NanoFlags:
             pass
 
     def flush(self, timeout: float = _REQUEST_TIMEOUT) -> None:
-        """Send queued telemetry and the service report now (blocking, best effort, never raises)."""
+        """Send queued telemetry, pending shadow counters and the service report now (blocking, best effort, never raises)."""
+        self._flush(True, timeout)
+
+    def _flush(self, force: bool, timeout: float = _REQUEST_TIMEOUT, counters: Optional[ShadowCounters] = None) -> None:
         if not self._ev.enabled:
             return
+        # Shadow counters ride along at most once a minute (or now: flush(), close(), a new or withdrawn shadow session).
+        shadow_report: Optional[Dict[str, Any]] = None
+        try:
+            if counters is None:
+                st = self._shadow
+                if st is not None and st["counters"].size > 0 and (force or time.monotonic() - self._shadow_flushed_at >= SHADOW_FLUSH_INTERVAL):
+                    counters = st["counters"]
+            if counters is not None:
+                shadow_report = counters.drain(self._service_version)
+                self._shadow_flushed_at = time.monotonic()
+        except Exception:  # noqa: BLE001 - shadow evaluation never affects the app
+            shadow_report = None
         with self._queue_lock:
             batch = self._queue[:_MAX_BATCH]
             del self._queue[:_MAX_BATCH]
@@ -1225,7 +1289,9 @@ class NanoFlags:
             out.append({**ev, "flagKey": ev["flagKey"][:63], "value": value})
         self._last_report = time.monotonic()
         rev = self.revision
-        payload = {"service": self.service[:60], "sdk": f"python/{SDK_VERSION}", "revision": rev if isinstance(rev, int) and rev >= 0 else 0, "events": out}
+        payload: Dict[str, Any] = {"service": self.service[:60], "sdk": f"python/{SDK_VERSION}", "revision": rev if isinstance(rev, int) and rev >= 0 else 0, "events": out}
+        if shadow_report is not None:
+            payload["shadow"] = shadow_report
         try:
             self._request("POST", "/v1/events", {"Content-Type": "application/json"}, json.dumps(payload).encode("utf-8"), timeout)
         except Exception:  # noqa: BLE001 - dropped on failure, by design: telemetry is never retried
@@ -1240,7 +1306,115 @@ class NanoFlags:
                 empty = not self._queue
             if empty and time.monotonic() - self._last_report < self._ev.report_interval:
                 continue  # nothing queued: the service report alone goes out once per report interval
-            self.flush()
+            self._flush(False)
+
+    # ------------------------------------------------------------------ shadow evaluation of drafts (migration 0179)
+
+    def _drop_shadow(self) -> None:
+        """No session any more (the announcement stopped, or ``/v1/shadow`` is 404): pending counters go out first."""
+        st, self._shadow = self._shadow, None
+        if st is not None and st["counters"].size > 0:
+            self._flush(True, counters=st["counters"])
+
+    def _note_shadow(self, header: Optional[str]) -> None:
+        """``X-NanoFlags-Shadow`` of a fresh ``/v1/bundle`` answer: fetch the announced shadow bundle, or drop the one
+        in use. Runs on the thread that synced (fetches are serialised with bundle requests)."""
+        if not self._shadow_enabled or self._closed:
+            return
+        try:
+            want = parse_shadow_header(header)
+            if want is None:
+                return self._drop_shadow()
+            st = self._shadow
+            if st is not None and st["marker"]["sessionId"] == want["sessionId"] and st["marker"]["checksum"] == want["checksum"]:
+                return
+            sid = f"{want['sessionId']}.{want['checksum']}"
+            f = self._shadow_fetch
+            if f is not None and f["id"] == sid and time.monotonic() - f["at"] < SHADOW_RETRY_INTERVAL:
+                return
+            try:
+                self._fetch_shadow(want)
+            finally:
+                self._shadow_fetch = {"id": sid, "at": time.monotonic()}
+        except Exception:  # noqa: BLE001 - shadow evaluation never affects the app
+            log.debug("nanoflags shadow announcement failed", exc_info=True)
+
+    def _shadow_verify_keys(self, kid: Optional[str]) -> List[ImportedKey]:
+        """Keys a shadow bundle is checked with: the configured ones, or (verification off for this edge) ``/v1/keys``."""
+        if self._verify:
+            return self._load_keys(kid)
+        if self._shadow_keys is None:
+            self._shadow_keys = self._fetch_keys()  # a failure is retried with the next announcement
+        return self._shadow_keys
+
+    def _fetch_shadow(self, want: Dict[str, str]) -> None:
+        """Loads and verifies a shadow bundle. Only a bundle signed for this session, with a matching marker inside, is used."""
+        def reject(why: str) -> None:
+            self._emit_error(NanoFlagsError(f"The shadow bundle of session {want['sessionId']} was ignored: {why} Nothing changes for the app (shadow bundles are never applied).", "shadow"))
+
+        res = self._request("GET", "/v1/shadow")
+        if self._closed:
+            return
+        if res.status == 404:
+            return self._drop_shadow()
+        if not res.ok:
+            return
+        text = res.text()
+        body = _loads(text)
+        # Already replaced by a newer session: the next bundle answer announces that one.
+        if not isinstance(body, dict) or body.get("sessionId") != want["sessionId"] or body.get("checksum") != want["checksum"]:
+            return
+        raw = raw_member(text, "bundle")
+        signature = res.headers.get("X-NanoFlags-Signature")
+        kid = res.headers.get("X-NanoFlags-Key-Id")
+        environment_id = res.headers.get("X-NanoFlags-Environment-Id")
+        if not signature or not environment_id or raw is None:
+            return reject("it is not signed.")
+        if self._pinned_env is not None and self._pinned_env != environment_id:
+            return reject("it was signed for a different environment.")
+        try:
+            ok = verify_shadow_text(self._shadow_verify_keys(kid), signature, kid, environment_id, want["sessionId"], want["checksum"], raw)
+        except Exception:  # noqa: BLE001
+            ok = False
+        if self._closed:
+            return
+        if not ok:
+            return reject("its signature does not verify.")
+        parsed = _loads(raw)
+        if not is_shadow_bundle(parsed):
+            return reject("it is not a shadow bundle.")
+        m = parsed["shadow"]
+        if m["sessionId"] != want["sessionId"] or m["checksum"] != want["checksum"] or m["environmentId"] != environment_id:
+            return reject("its shadow marker does not match.")
+        if not supports_engine(parsed):
+            return
+        old, self._shadow = self._shadow, {"bundle": parsed, "marker": m, "counters": ShadowCounters(want["sessionId"], want["checksum"]), "live": None}
+        if old is not None and old["counters"].size > 0:
+            self._flush(True, counters=old["counters"])
+
+    def _shadow_evaluate(self, key: str, default: Any, ctx: Dict[str, Any], accepts: Optional[Callable[[Any], bool]], live: Evaluation, b: Dict[str, Any]) -> None:
+        """After a live evaluation: for a sample of the flags the draft changes, evaluate the draft too and count."""
+        st = self._shadow
+        if st is None or self._shadow_rate <= 0:
+            return
+        try:
+            cache = st["live"]
+            if cache is None or cache[0] is not b:
+                changed = frozenset(changed_flags(b, st["bundle"]))
+                st["live"] = (b, changed)  # one tuple: concurrent readers see a consistent pair
+            else:
+                changed = cache[1]
+            if key not in changed or self._shadow_random() >= self._shadow_rate:
+                return
+            r = engine_evaluate(st["bundle"], key, ctx, default)
+            # A side that used the app's own fallback is reported as "<fallback>": that value is the app's, not a
+            # bundle's (flag missing on that side, evaluation error, or a value of the wrong type, which _run() already
+            # turned into "error").
+            live_fallback = live.reason in ("flag_not_found", "error")
+            shadow_fallback = r.reason in ("flag_not_found", "error") or (accepts is not None and not accepts(r.value))
+            st["counters"].add(key, live.value, default if shadow_fallback else r.value, r.rule_index if r.reason == "rule_match" else None, live_fallback, shadow_fallback)
+        except Exception:  # noqa: BLE001 - shadow evaluation never affects the app
+            pass
 
     # ------------------------------------------------------------------ test sessions
 
@@ -1287,7 +1461,7 @@ class NanoFlags:
                     expires_ts = datetime.fromisoformat(body["expires_at"].replace("Z", "+00:00")).timestamp()
                 except ValueError:
                     expires_ts = None
-            if not isinstance(body, dict) or not isinstance(body.get("id"), str) or not is_bundle(body.get("bundle")) or expires_ts is None:
+            if not isinstance(body, dict) or not isinstance(body.get("id"), str) or not _is_config(body.get("bundle")) or expires_ts is None:
                 raise NanoFlagsError("The edge returned an invalid session.", "session")
             if not supports_engine(body["bundle"]):
                 raise self._engine_error(body["bundle"])

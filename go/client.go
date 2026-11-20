@@ -21,7 +21,7 @@ import (
 )
 
 // SDKVersion is the version of this SDK, reported to the edge as "go/<version>".
-const SDKVersion = "0.2.0"
+const SDKVersion = "0.3.0"
 
 // SupportedEngineVersion is the newest bundle format (`bundle.engine`) this SDK evaluates.
 // Newer bundles are refused; the configuration in use stays.
@@ -189,6 +189,11 @@ type Client struct {
 	listeners listeners
 	events    *eventQueue
 	sessions  sessionCache
+	shadow    shadowRuntime
+
+	// X-NanoFlags-Shadow of the last fresh bundle answer (guarded by syncMu).
+	shadowAnnounced bool
+	shadowHeader    string
 }
 
 // New creates a client for sdkKey (`nf_srv_…` on servers) and starts loading the configuration
@@ -209,6 +214,8 @@ func New(sdkKey string, opts ...Option) (*Client, error) {
 		requestTimeout:     10 * time.Second,
 		liveConnectTimeout: 10 * time.Second,
 		random:             rand.Float64,
+		shadowSampleRate:   0.1,
+		shadowRandom:       rand.Float64,
 	}
 	for _, o := range opts {
 		o(&cfg)
@@ -239,6 +246,10 @@ func New(sdkKey string, opts ...Option) (*Client, error) {
 		kick:    make(chan struct{}, 1),
 		resched: make(chan struct{}, 1),
 	}
+	c.shadow = shadowRuntime{enabled: !cfg.shadowDisabled && cfg.eventsEnabled, rate: math.Min(1, math.Max(0, cfg.shadowSampleRate)), random: cfg.shadowRandom, version: cfg.serviceVersion, flushedAt: time.Now()}
+	if math.IsNaN(c.shadow.rate) {
+		c.shadow.rate = 0.1
+	}
 	c.listeners.init(ctx, &c.wg)
 	var cfgErrs []error
 	c.verifier, cfgErrs = newVerifier(&cfg, c)
@@ -249,7 +260,9 @@ func New(sdkKey string, opts ...Option) (*Client, error) {
 	if cfg.bootstrapErr != nil {
 		c.emitError(&Error{Code: ErrInvalidBundle, Message: "the bootstrap bundle is invalid and was ignored", Err: cfg.bootstrapErr})
 	} else if b := cfg.bootstrap; b != nil {
-		if !b.SupportsEngine() {
+		if !isConfig(b.Value()) {
+			c.emitError(newError(ErrInvalidBundle, "the bootstrap bundle is a shadow bundle and was ignored (shadow bundles are never applied)"))
+		} else if !b.SupportsEngine() {
 			c.emitError(engineError(b))
 		} else {
 			c.adopt(&snapshot{bundle: b}, StatusReady, SourceBootstrap, TransportPoll, nil)
@@ -340,7 +353,7 @@ func (c *Client) Refresh(ctx context.Context) error {
 	return c.syncNow(ctx, false)
 }
 
-// Flush sends queued telemetry now.
+// Flush sends queued telemetry and pending shadow-evaluation counters now.
 func (c *Client) Flush(ctx context.Context) error { return c.events.flush(ctx) }
 
 // Close stops every background activity (after a best-effort final telemetry flush) and waits
@@ -504,7 +517,11 @@ func (c *Client) syncNow(ctx context.Context, fromStream bool) error {
 	}
 	c.streamTriggered = false
 	c.mu.Unlock()
+	c.shadowAnnounced = false
 	err := c.syncOnce(ctx, transport)
+	if c.shadowAnnounced {
+		c.noteShadow(c.shadowHeader)
+	}
 	if err == nil {
 		c.mu.Lock()
 		c.failures, c.lastErr = 0, nil
@@ -556,6 +573,11 @@ func (c *Client) syncOnce(ctx context.Context, transport Transport) error {
 	}
 	defer res.Body.Close()
 	servedStale := res.Header.Get("X-NanoFlags-Stale") == "true"
+	// Migration 0179: a change is being shadow-evaluated (fresh answers only; a stale answer says
+	// nothing about it). Handled by syncNow once this request is done.
+	if (res.StatusCode == http.StatusNotModified || (res.StatusCode >= 200 && res.StatusCode <= 299)) && !servedStale {
+		c.shadowAnnounced, c.shadowHeader = true, res.Header.Get("X-NanoFlags-Shadow")
+	}
 	switch {
 	case res.StatusCode == http.StatusNotModified:
 		if cur != nil {
@@ -575,7 +597,7 @@ func (c *Client) syncOnce(ctx context.Context, transport Transport) error {
 		return newError(ErrInvalidBundle, "the edge returned a bundle larger than %d bytes", maxBundleBytes)
 	}
 	body, err := engine.ParseJSON(text)
-	if err != nil || !engine.IsBundle(body.Field("bundle")) {
+	if err != nil || !isConfig(body.Field("bundle")) {
 		return newError(ErrInvalidBundle, "the edge returned an invalid bundle")
 	}
 	bundle, _ := engine.NewBundle(body.Field("bundle"))
@@ -723,7 +745,7 @@ func (c *Client) restore() {
 	}
 	// json.RawMessage keeps the exact bytes that were signed.
 	bundle, err := engine.ParseBundle(p.Bundle)
-	if err != nil {
+	if err != nil || !isConfig(bundle.Value()) {
 		return
 	}
 	if !bundle.SupportsEngine() {
@@ -803,6 +825,10 @@ func (c *Client) evalIn(scope *sessionState, key string, ctx Context, fallback e
 	}
 	if record {
 		c.events.record(&res, ctx, s, sessionID)
+		// Test sessions evaluate their own snapshot: never shadowed.
+		if scope == nil && b != nil && c.shadow.state.Load() != nil {
+			c.shadowEvaluate(key, ctx, fallback, accepts, &res, b)
+		}
 	}
 	return res
 }

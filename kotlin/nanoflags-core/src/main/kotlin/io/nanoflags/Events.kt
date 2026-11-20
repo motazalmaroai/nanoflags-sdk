@@ -32,7 +32,7 @@ internal class EventQueue(private val client: NanoFlags, private val opts: NanoF
         if (interval <= 0) return
         while (true) {
             delay(interval)
-            val idle = synchronized(lock) { queue.isEmpty() && System.currentTimeMillis() - lastReport < opts.events.reportIntervalMs }
+            val idle = synchronized(lock) { queue.isEmpty() && System.currentTimeMillis() - lastReport < opts.events.reportIntervalMs } && !client.shadow.due
             if (!idle) runCatching { flush() }
         }
     }
@@ -73,9 +73,14 @@ internal class EventQueue(private val client: NanoFlags, private val opts: NanoF
         return out.build()
     }
 
-    /** Sends up to one batch of queued events with the service report. [force]: final flush on close (skipped when there is nothing to say). */
-    suspend fun flush(force: Boolean = false) {
+    /**
+     * Sends up to one batch of queued events with the service report. [force]: final flush on close (skipped when there
+     * is nothing to say). Shadow evaluation counters ride along at most once a minute, or now with [shadowNow]
+     * (flush(), background, close); [shadowReport]: a report already taken (the session it belongs to just ended).
+     */
+    suspend fun flush(force: Boolean = false, shadowNow: Boolean = false, shadowReport: JsonValue.Obj? = null) {
         if (!enabled) return
+        val shadow = shadowReport ?: client.shadow.takeReport(shadowNow)
         val batch = synchronized(lock) {
             val n = minOf(queue.size, MAX_BATCH)
             val b = ArrayList(queue.subList(0, n))
@@ -83,7 +88,7 @@ internal class EventQueue(private val client: NanoFlags, private val opts: NanoF
             lastReport = System.currentTimeMillis()
             b
         }
-        if (force && batch.isEmpty() && client.revision == null) return
+        if (force && batch.isEmpty() && client.revision == null && shadow == null) return
         val events = batch.map { e ->
             val k = (e["flagKey"] as JsonValue.Str).value
             if (k.length <= 63) e else JsonValue.Obj.Builder().apply { for ((name, v) in e.entries) put(name, if (name == "flagKey") JsonValue.Str(k.substring(0, 63)) else v) }.build()
@@ -93,6 +98,7 @@ internal class EventQueue(private val client: NanoFlags, private val opts: NanoF
             .put("sdk", JsonValue.Str("${opts.sdkName}/${BuildInfo.VERSION}"))
             .put("revision", JsonValue.Num((client.revision ?: 0L).toDouble()))
             .put("events", JsonValue.Arr(events))
+            .apply { if (shadow != null) put("shadow", shadow) }
             .build()
         val req = client.request("/v1/events").post(body.toJson()!!.toRequestBody(JSON)).build()
         // Dropped on failure by design: telemetry is never retried.

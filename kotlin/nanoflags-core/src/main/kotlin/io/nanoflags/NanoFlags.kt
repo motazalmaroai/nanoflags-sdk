@@ -114,6 +114,7 @@ class NanoFlags(sdkKey: String, options: NanoFlagsOptions = NanoFlagsOptions()) 
 
     internal val verifier: Verifier? = Verifier.create(opts.verify, official, this)
     internal val events = EventQueue(this, opts)
+    internal val shadow = ShadowEvaluator(this, opts)
     internal val live = LiveTransport(this, opts)
 
     /* ---------------- lifecycle & network ---------------- */
@@ -174,7 +175,8 @@ class NanoFlags(sdkKey: String, options: NanoFlagsOptions = NanoFlagsOptions()) 
      */
     fun setForeground(foreground: Boolean) {
         if (closed) return
-        if (!foreground && this.foreground.value) scope.launch { runCatching { events.flush() } }
+        // The app may be suspended next: queued telemetry and pending shadow counters go out now.
+        if (!foreground && this.foreground.value) scope.launch { runCatching { events.flush(shadowNow = true) } }
         this.foreground.value = foreground
     }
 
@@ -236,8 +238,8 @@ class NanoFlags(sdkKey: String, options: NanoFlagsOptions = NanoFlagsOptions()) 
         return syncNow(false) == null
     }
 
-    /** Sends queued telemetry now. */
-    suspend fun flush() = events.flush()
+    /** Sends queued telemetry now (pending shadow evaluation counters included). */
+    suspend fun flush() = events.flush(shadowNow = true)
 
     /** Registers [listener] for new configurations (called on a background thread). Close the result to unregister. */
     fun addChangeListener(listener: (ChangeEvent) -> Unit): Closeable = subscribe(_changes, listener)
@@ -274,7 +276,7 @@ class NanoFlags(sdkKey: String, options: NanoFlagsOptions = NanoFlagsOptions()) 
         val hooks = synchronized(lock) { closeHooks.toList().also { closeHooks.clear() } }
         hooks.forEach { runCatching { it() } }
         val q = events
-        CoroutineScope(SupervisorJob() + Dispatchers.IO).launch { withTimeoutOrNull(2_000) { runCatching { q.flush(force = true) } } }
+        CoroutineScope(SupervisorJob() + Dispatchers.IO).launch { withTimeoutOrNull(2_000) { runCatching { q.flush(force = true, shadowNow = true) } } }
         scope.cancel()
         markReady()
     }
@@ -399,6 +401,8 @@ class NanoFlags(sdkKey: String, options: NanoFlagsOptions = NanoFlagsOptions()) 
             Triple(r.code, r.headers, if (r.code in 200..299) r.bodyBytes(MAX_BUNDLE_BYTES) ?: throw NanoFlagsException(ErrorCode.INVALID_BUNDLE, "The edge returned a bundle larger than $MAX_BUNDLE_BYTES bytes.") else null)
         }
         val servedStale = headers["X-NanoFlags-Stale"] == "true"
+        // Migration 0179: a change is being shadow-evaluated (fresh answers only; a stale answer says nothing about it).
+        if ((code == 304 || code in 200..299) && !servedStale) shadow.note(headers["X-NanoFlags-Shadow"])
         when {
             code == 304 -> {
                 if (cur != null) setStatus(if (servedStale) Status.STALE else Status.READY)
@@ -655,6 +659,7 @@ class NanoFlags(sdkKey: String, options: NanoFlagsOptions = NanoFlagsOptions()) 
             res = EngineResult(key, fallback, Reason.ERROR, revision = res.revision, trace = res.trace + TraceStep("result", "Returned the fallback", msg), error = msg)
         }
         if (record) events.record(res, c, s)
+        if (record && s != null) shadow.evaluate(key, fallback, c, accepts, res, s.bundle)
         return res
     }
 
@@ -771,6 +776,7 @@ class NanoFlags(sdkKey: String, options: NanoFlagsOptions = NanoFlagsOptions()) 
     /** Every flag's value, re-evaluated on every new configuration or context. */
     fun allFlagsFlow(): Flow<Map<String, Any?>> = flagFlow { allFlags(it) }
 
+    internal val pinned: String? get() = synchronized(lock) { pinnedEnvironment }
     internal val currentContext: NanoFlagsContext get() = _context.value
     internal val sdkName: String get() = opts.sdkName
     internal val userAgent: String get() = opts.userAgent

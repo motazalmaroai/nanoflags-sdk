@@ -123,6 +123,28 @@ internal object Signatures {
         "nanoflags-bundle-v1\n$environmentId\n$revision\n$checksum\n${sha256Hex(bundleText)}".toByteArray(Charsets.UTF_8)
 
     /**
+     * The signed text of a shadow bundle (migration 0179), domain-separated from bundle signatures:
+     * `nanoflags-shadow-v1\n<environment>\n<session id>\n<draft checksum>\n<sha256 hex of the bundle text>`.
+     */
+    fun shadowCanonicalString(environmentId: String, sessionId: String, checksum: String, bundleText: ByteArray): ByteArray =
+        "nanoflags-shadow-v1\n$environmentId\n$sessionId\n$checksum\n${sha256Hex(bundleText)}".toByteArray(Charsets.UTF_8)
+
+    /** Whether [signature] is a valid shadow-bundle signature by one of [keys] over [bundleText]. */
+    fun verifyShadow(keys: List<PublicKey>, signature: String, kid: String?, environmentId: String, sessionId: String, checksum: String, bundleText: ByteArray): Boolean {
+        val sig = base64UrlDecode(signature) ?: return false
+        if (sig.size != 64) return false
+        val msg = shadowCanonicalString(environmentId, sessionId, checksum, bundleText)
+        return keys.any { k -> (kid == null || k.kid == null || k.kid == kid) && verifyOne(k, msg, sig) }
+    }
+
+    private fun verifyOne(k: PublicKey, msg: ByteArray, sig: ByteArray): Boolean {
+        val signer = Ed25519Signer()
+        signer.init(false, k.key)
+        signer.update(msg, 0, msg.size)
+        return signer.verifySignature(sig)
+    }
+
+    /**
      * Whether [info]'s signature is valid by one of [keys] over the canonical string for [bundleText]. A key id narrows
      * the candidates; an unknown key id matches no key.
      */

@@ -44,7 +44,7 @@ dart pub get && dart test && dart pub publish --dry-run
 dart pub publish            # browser login with the pub.dev Google account
 
 cd ../nanoflags_openfeature
-rm -f pubspec_overrides.yaml   # dev-only path override; the published package depends on nanoflags ^0.1.0
+rm -f pubspec_overrides.yaml   # dev-only path override; the published package depends on nanoflags ">=0.1.0 <0.3.0"
 dart pub get && dart test && dart pub publish
 
 cd ../nanoflags_flutter

@@ -46,6 +46,18 @@ type fakeEdge struct {
 	extraKeys  []JWK
 	sessions   map[string]func() (int, string) // token → (status, body) for GET /v1/session; unknown tokens: 404
 	sessionReq []http.Header                   // headers of every /v1/session request
+	// Shadow evaluation (migration 0179): X-NanoFlags-Shadow on /v1/bundle answers ("" = none),
+	// the /v1/shadow answer (nil = 404), another accepted SDK key, and what /v1/keys was sent.
+	shadowHeader string
+	shadowAnswer *cannedResponse
+	altKey       string
+	keysAuth     []string
+}
+
+type cannedResponse struct {
+	status int
+	body   string
+	header http.Header
 }
 
 func newFakeEdge(t *testing.T) *fakeEdge {
@@ -154,12 +166,16 @@ func (e *fakeEdge) serve(w http.ResponseWriter, r *http.Request) {
 	e.mu.Unlock()
 	if r.URL.Path == "/v1/keys" {
 		e.mu.Lock()
+		e.keysAuth = append(e.keysAuth, r.Header.Get("Authorization"))
 		keys := append([]JWK{e.pub}, e.extraKeys...)
 		e.mu.Unlock()
 		_ = json.NewEncoder(w).Encode(map[string]any{"keys": keys})
 		return
 	}
-	if r.Header.Get("Authorization") != "Bearer "+testKey {
+	e.mu.Lock()
+	alt := e.altKey
+	e.mu.Unlock()
+	if auth := r.Header.Get("Authorization"); auth != "Bearer "+testKey && (alt == "" || auth != "Bearer "+alt) {
 		w.WriteHeader(http.StatusUnauthorized)
 		_, _ = io.WriteString(w, `{"error":{"code":"unauthorized","message":"unknown key"}}`)
 		return
@@ -178,6 +194,9 @@ func (e *fakeEdge) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		if e.stale {
 			h.Set("X-NanoFlags-Stale", "true")
+		}
+		if e.shadowHeader != "" {
+			h.Set("X-NanoFlags-Shadow", e.shadowHeader)
 		}
 		body := fmt.Sprintf(`{"revision":%d,"checksum":%q,"bundle":%s}`, e.rev, e.checksum, e.text)
 		e.mu.Unlock()
@@ -234,6 +253,20 @@ func (e *fakeEdge) serve(w http.ResponseWriter, r *http.Request) {
 				w.(http.Flusher).Flush()
 			}
 		}
+	case "/v1/shadow":
+		e.mu.Lock()
+		a := e.shadowAnswer
+		e.mu.Unlock()
+		if a == nil {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = io.WriteString(w, `{"error":{"code":"shadow_not_found","message":"x"}}`)
+			return
+		}
+		for k, v := range a.header {
+			w.Header()[k] = v
+		}
+		w.WriteHeader(a.status)
+		_, _ = io.WriteString(w, a.body)
 	case "/v1/session":
 		e.mu.Lock()
 		e.sessionReq = append(e.sessionReq, r.Header.Clone())

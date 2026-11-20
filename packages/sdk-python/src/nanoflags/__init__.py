@@ -17,6 +17,7 @@ from .client import (
     UpdateEvent,
     VerifyOptions,
 )
+from .shadow import ShadowOptions
 from .engine import ENGINE_VERSION, Evaluation, TraceStep
 from .keys import OFFICIAL_EDGE_URL, OFFICIAL_SIGNING_KEYS
 from .store import FileStore, Store
@@ -42,6 +43,7 @@ __all__ = [
     "SESSION_HEADER",
     "SUPPORTED_ENGINE_VERSION",
     "SessionEvaluator",
+    "ShadowOptions",
     "Store",
     "TraceStep",
     "UpdateEvent",

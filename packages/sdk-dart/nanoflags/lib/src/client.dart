@@ -11,6 +11,7 @@ import 'engine/engine.dart' as engine show evaluate;
 import 'engine/js.dart';
 import 'keys.dart';
 import 'platform/platform.dart' as platform;
+import 'shadow.dart';
 import 'sse.dart';
 import 'types.dart';
 import 'verify.dart';
@@ -52,7 +53,9 @@ final class _Checked {
   final String raw;
 }
 
-bool _usable(Object? v) => isBundle(v) && jsIsInteger((v as Map)['revision']);
+/// A shadow bundle (the draft of a change waiting for approval, migration 0179) is never configuration, whatever path
+/// it arrives on (HTTP, push, store, bootstrap).
+bool _usable(Object? v) => isBundle(v) && jsIsInteger((v as Map)['revision']) && !v.containsKey('shadow');
 
 int _revisionOf(Map<String, Object?> b) => (b['revision'] as num).toInt();
 
@@ -165,6 +168,14 @@ class NanoFlagsClient {
   final List<_QueuedEvent> _queue = [];
   DateTime _lastReportAt = DateTime.fromMillisecondsSinceEpoch(0);
   final Expando<Map<String, List<String>>> _usedAttrs = Expando();
+
+  // shadow evaluation of drafts (shadow.dart)
+  ShadowState? _shadowState;
+  ShadowCounters? _shadowCounters;
+  DateTime _shadowFlushedAt = DateTime.now();
+  ({String id, DateTime at, bool running})? _shadowFetch;
+  List<ImportedKey> _shadowFetchedKeys = const [];
+  DateTime? _shadowKeysAt;
 
   Future<void> _storeChain = Future.value();
   final Completer<void> _ready = Completer<void>();
@@ -298,8 +309,8 @@ class NanoFlagsClient {
     await _sync();
   }
 
-  /// Sends queued telemetry now.
-  Future<void> flush() => _flush();
+  /// Sends queued telemetry now (pending shadow evaluation counters included).
+  Future<void> flush() => _flush(shadowNow: true);
 
   /// The app went to the background: closes the live socket and the stream, stops polling, and
   /// sends queued telemetry once. Evaluations keep working on the last configuration.
@@ -314,7 +325,7 @@ class NanoFlagsClient {
     _stopStream();
     _flushTimer?.cancel();
     _flushTimer = null;
-    if (!_dataSaver) unawaited(_flush());
+    if (!_dataSaver) unawaited(_flush(shadowNow: true)); // the app may be suspended next
     _changed();
   }
 
@@ -358,7 +369,7 @@ class NanoFlagsClient {
   /// working on the last configuration.
   Future<void> close() async {
     if (_closed) return;
-    final last = _flush();
+    final last = _flush(shadowNow: true);
     _closed = true;
     _pollTimer?.cancel();
     _flushTimer?.cancel();
@@ -646,6 +657,8 @@ class NanoFlagsClient {
       final res = await _request('GET', '/v1/bundle', headers: {if (_etag != null) 'If-None-Match': _etag!});
       if (_closed) return;
       final servedStale = res.headers['x-nanoflags-stale'] == 'true';
+      // Migration 0179: a change is being shadow-evaluated (fresh answers only; a stale answer says nothing about it).
+      if ((res.statusCode == 304 || (res.statusCode >= 200 && res.statusCode <= 299)) && !servedStale) _noteShadow(res.headers['x-nanoflags-shadow']);
       if (res.statusCode == 304) {
         _failures = 0;
         if (_bundle != null) _setStatus(servedStale ? NanoFlagsStatus.stale : NanoFlagsStatus.ready);
@@ -1080,8 +1093,11 @@ class NanoFlagsClient {
     }
   }
 
-  Future<void> _flush() async {
+  /// One events request. Shadow counters ride along at most once a minute, or now with [shadowNow] (`flush()`,
+  /// `pause()`, `close()`); [shadowReport]: a report already taken (the session it belongs to just ended).
+  Future<void> _flush({bool shadowNow = false, Map<String, Object?>? shadowReport}) async {
     if (!_options.events.enabled) return;
+    final shadow = shadowReport ?? _takeShadowReport(shadowNow);
     // One request per interval: the service report plus up to one batch. Anything beyond that waits.
     final n = math.min(_queue.length, _maxBatch);
     final batch = [
@@ -1110,7 +1126,7 @@ class NanoFlagsClient {
     try {
       final res = await _request('POST', '/v1/events',
           headers: {'Content-Type': 'application/json'},
-          body: jsonEncode({'service': service, 'sdk': 'dart/$sdkVersion', 'revision': revision ?? 0, 'events': batch}));
+          body: jsonEncode({'service': service, 'sdk': 'dart/$sdkVersion', 'revision': revision ?? 0, 'events': batch, if (shadow != null) 'shadow': shadow}));
       if (res.statusCode >= 400 && res.statusCode != 429) {
         // dropped by design: telemetry is never retried
       }
@@ -1129,7 +1145,7 @@ class NanoFlagsClient {
       // Data saver: nothing is sent; the queue stays bounded.
       if (_dataSaver) return _scheduleFlush();
       // Nothing queued: the service report alone goes out once per report interval.
-      if (_queue.isEmpty && DateTime.now().difference(_lastReportAt) < ev.reportInterval) return _scheduleFlush();
+      if (_queue.isEmpty && DateTime.now().difference(_lastReportAt) < ev.reportInterval && !_shadowDue) return _scheduleFlush();
       unawaited(_flush().then((_) => _scheduleFlush()));
     });
   }
@@ -1146,6 +1162,136 @@ class NanoFlagsClient {
           flagKey: key, value: fallback, reason: Reasons.error, revision: result.revision, trace: [...result.trace, TraceStep('result', 'Returned the fallback', error)], error: error);
     }
     _record(result, ctx, b);
+    if (_shadowState != null && b != null) _shadowEvaluate(key, fallback, ctx, accepts, result, b);
     return result;
+  }
+
+  /* ---------------- shadow evaluation of drafts (migration 0179; shadow.dart) ---------------- */
+
+  bool get _shadowEnabled => _options.shadow.enabled && _options.events.enabled;
+
+  String? get _serviceVersion {
+    final v = _options.serviceVersion?.trim();
+    if (v == null || v.isEmpty) return null;
+    return v.length > 40 ? v.substring(0, 40) : v;
+  }
+
+  /// Takes the pending shadow report: when [force], or when the last one went out at least a minute ago.
+  Map<String, Object?>? _takeShadowReport(bool force) {
+    final c = _shadowCounters;
+    if (c == null || c.size == 0) return null;
+    if (!force && DateTime.now().difference(_shadowFlushedAt) < shadowFlushInterval) return null;
+    _shadowCounters = ShadowCounters(c.sessionId, c.checksum);
+    _shadowFlushedAt = DateTime.now();
+    return c.report(_serviceVersion);
+  }
+
+  bool get _shadowDue => (_shadowCounters?.size ?? 0) > 0 && DateTime.now().difference(_shadowFlushedAt) >= shadowFlushInterval;
+
+  /// Sends the pending counters now (the session they belong to ends).
+  void _sendPendingShadow() {
+    final r = _takeShadowReport(true);
+    if (r != null) unawaited(_flush(shadowReport: r));
+  }
+
+  void _dropShadow() {
+    _sendPendingShadow();
+    _shadowState = null;
+    _shadowCounters = null;
+  }
+
+  /// `X-NanoFlags-Shadow` of a fresh `/v1/bundle` answer (200 or 304): fetch the announced shadow bundle, or drop the
+  /// one in use.
+  void _noteShadow(String? header) {
+    if (!_shadowEnabled || _closed) return;
+    final want = parseShadowHeader(header);
+    if (want == null) return _dropShadow();
+    final st = _shadowState;
+    if (st != null && st.sessionId == want.sessionId && st.checksum == want.checksum) return;
+    final id = '${want.sessionId}.${want.checksum}';
+    final f = _shadowFetch;
+    if (f != null && f.id == id && (f.running || DateTime.now().difference(f.at) < shadowRetryInterval)) return;
+    _shadowFetch = (id: id, at: DateTime.now(), running: true);
+    unawaited(_fetchShadow(want.sessionId, want.checksum).whenComplete(() {
+      if (_shadowFetch?.id == id) _shadowFetch = (id: id, at: DateTime.now(), running: false);
+    }));
+  }
+
+  /// Keys a shadow bundle is checked with: the configured ones, or (verification off for this edge) `/v1/keys`.
+  Future<List<ImportedKey>> _shadowKeys(String? kid) async {
+    if (_verify != null) return _loadKeys(kid);
+    final at = _shadowKeysAt;
+    final known = _shadowFetchedKeys;
+    if (known.isNotEmpty && (kid == null || known.any((k) => k.kid == kid))) return known;
+    if (at != null && DateTime.now().difference(at) < _keysRefetch) return known;
+    _shadowKeysAt = DateTime.now();
+    _shadowFetchedKeys = await _fetchKeys();
+    return _shadowFetchedKeys;
+  }
+
+  /// Loads and verifies a shadow bundle. Only a bundle signed for this session, with a matching marker inside, is used.
+  Future<void> _fetchShadow(String sessionId, String checksum) async {
+    void reject(String why) => _emitError(NanoFlagsException(
+        'The shadow bundle of session $sessionId was ignored: $why Nothing changes for the app (shadow bundles are never applied).', NanoFlagsErrorCode.shadow));
+    try {
+      final res = await _request('GET', '/v1/shadow', headers: {'Cache-Control': 'no-store'});
+      if (_closed) return;
+      if (res.statusCode == 404) return _dropShadow();
+      if (res.statusCode < 200 || res.statusCode > 299) return;
+      final text = utf8.decode(res.bodyBytes);
+      final body = jsonDecode(text);
+      // Already replaced by a newer session: the next bundle answer announces that one.
+      if (body is! Map || body['sessionId'] != sessionId || body['checksum'] != checksum) return;
+      final raw = rawMember(text, 'bundle');
+      final signature = res.headers['x-nanoflags-signature'];
+      final kid = res.headers['x-nanoflags-key-id'];
+      final environmentId = res.headers['x-nanoflags-environment-id'];
+      if (signature == null || signature.isEmpty || environmentId == null || environmentId.isEmpty || raw == null) return reject('it is not signed.');
+      if (_pinnedEnvironment != null && _pinnedEnvironment != environmentId) return reject('it was signed for a different environment.');
+      var ok = false;
+      try {
+        ok = await verifyShadowText(await _shadowKeys(kid),
+            signature: signature, kid: kid, environmentId: environmentId, sessionId: sessionId, checksum: checksum, bundleText: raw);
+      } catch (_) {
+        ok = false;
+      }
+      if (_closed) return;
+      if (!ok) return reject('its signature does not verify.');
+      final parsed = jsonDecode(raw);
+      if (!isShadowBundle(parsed)) return reject('it is not a shadow bundle.');
+      final m = (parsed as Map)['shadow'] as Map;
+      if (m['sessionId'] != sessionId || m['checksum'] != checksum || m['environmentId'] != environmentId) return reject('its shadow marker does not match.');
+      if (!supportsEngine(parsed)) return;
+      _sendPendingShadow();
+      _shadowState = ShadowState(parsed.cast<String, Object?>(), sessionId, checksum);
+      _shadowCounters = ShadowCounters(sessionId, checksum);
+    } catch (_) {
+      // shadow evaluation never affects the app
+    }
+  }
+
+  /// After a live evaluation: for a sample of the flags the draft changes, evaluate the draft too and count.
+  void _shadowEvaluate(String key, Object? fallback, Map<String, Object?> ctx, bool Function(Object? v)? accepts, Evaluation live, Map<String, Object?> b) {
+    final st = _shadowState;
+    final counters = _shadowCounters;
+    final o = _options.shadow;
+    final rate = o.sampleRate.isFinite ? o.sampleRate.clamp(0.0, 1.0) : 0.1;
+    if (st == null || counters == null || rate <= 0) return;
+    try {
+      if (!identical(st.live, b)) {
+        st.live = b;
+        st.changed = changedFlags(b, st.bundle);
+      }
+      if (!st.changed.contains(key) || (o.random ?? _random.nextDouble)() >= rate) return;
+      final r = engine.evaluate(st.bundle, key, ctx, fallback);
+      // A side that used the app's own fallback is reported as "<fallback>" (flag missing on that side, evaluation
+      // error, or a value of the wrong type, which _run() already turned into an error).
+      final liveFallback = live.reason == Reasons.flagNotFound || live.reason == Reasons.error;
+      final shadowFallback = r.reason == Reasons.flagNotFound || r.reason == Reasons.error || (accepts != null && !accepts(r.value));
+      counters.add(key, live.value, shadowFallback ? fallback : r.value, r.reason == Reasons.ruleMatch ? r.ruleIndex : null,
+          liveFallback: liveFallback, shadowFallback: shadowFallback);
+    } catch (_) {
+      // shadow evaluation never affects the app
+    }
   }
 }

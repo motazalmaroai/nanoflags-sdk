@@ -46,6 +46,7 @@ export async function cli(argv: string[], opts: { routes?: Record<string, Reply>
     fetch: fetch as unknown as typeof globalThis.fetch,
     out: (t) => void (out += t),
     err: (t) => void (err += t),
+    sleep: async () => {},
   };
   const code = await main(argv, io);
   return { code, out, err, calls };

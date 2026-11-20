@@ -3,7 +3,7 @@ import 'store.dart';
 import 'keys.dart';
 
 /// Version of this SDK (sent as `sdk: "dart/<version>"` with telemetry and in the User-Agent).
-const String sdkVersion = '0.1.1';
+const String sdkVersion = '0.2.0';
 
 /// WebSocket close code of the edge for an environment that was deleted: the SDK stops reconnecting.
 const int closeEnvironmentDeleted = 4004;
@@ -40,7 +40,20 @@ enum NanoFlagsTransport {
 }
 
 /// What kind of problem an [NanoFlagsException] reports.
-enum NanoFlagsErrorCode { network, unauthorized, http, invalidBundle, store, config, signature, engine, environmentDeleted }
+enum NanoFlagsErrorCode {
+  network,
+  unauthorized,
+  http,
+  invalidBundle,
+  store,
+  config,
+  signature,
+  engine,
+  environmentDeleted,
+
+  /// A shadow bundle (the draft of a change waiting for approval) was ignored. Nothing changes for the app.
+  shadow,
+}
 
 /// Errors are reported on [NanoFlagsClient.errors]; accessors never throw.
 final class NanoFlagsException implements Exception {
@@ -171,6 +184,29 @@ final class EventsOptions {
   final Map<String, Object?> Function(Map<String, Object?> context)? redact;
 }
 
+/// Shadow evaluation of drafts. When an admin turned it on for the environment and a change waits for approval, the
+/// edge offers the change's draft as a signed shadow bundle. For a sample of the evaluations of the flags the draft
+/// changes, the client evaluates the draft as well and reports counters only (no context, attribute or identifier)
+/// with its telemetry, at most once a minute. The app always gets the live value: a shadow bundle is never applied,
+/// and one whose signature does not verify is ignored. Needs telemetry ([NanoFlagsOptions.events]); off with it.
+final class ShadowOptions {
+  const ShadowOptions({this.enabled = true, this.sampleRate = 0.1, this.random});
+
+  /// Never fetch nor evaluate shadow bundles.
+  const ShadowOptions.off()
+      : enabled = false,
+        sampleRate = 0,
+        random = null;
+
+  final bool enabled;
+
+  /// Fraction of evaluations of changed flags that are also evaluated with the draft, 0–1.
+  final double sampleRate;
+
+  /// Random source in [0, 1) for sampling (tests). Default: the client's random source.
+  final double Function()? random;
+}
+
 /// Configuration of a [NanoFlagsClient]. See the README for the defaults.
 final class NanoFlagsOptions {
   const NanoFlagsOptions({
@@ -185,6 +221,8 @@ final class NanoFlagsOptions {
     this.bootstrap,
     this.store,
     this.events = const EventsOptions(),
+    this.serviceVersion,
+    this.shadow = const ShadowOptions(),
     this.verify = const VerifyOptions(),
     this.dataSaver = false,
     this.dataSaverPollInterval = const Duration(minutes: 15),
@@ -224,6 +262,13 @@ final class NanoFlagsOptions {
   /// `SharedPreferencesStore`).
   final NanoFlagsStore? store;
   final EventsOptions events;
+
+  /// Your app's version (e.g. from `package_info_plus`), at most 40 characters. It labels shadow evaluation
+  /// reports, so the change page shows the impact per service and version.
+  final String? serviceVersion;
+
+  /// Shadow evaluation of drafts; see [ShadowOptions]. On by default (it also needs [events]).
+  final ShadowOptions shadow;
   final VerifyOptions verify;
 
   /// Start in data-saver mode (metered / low-data network): see [NanoFlagsClient.setDataSaver].
@@ -232,7 +277,7 @@ final class NanoFlagsOptions {
   /// Poll interval in data-saver mode (no socket, no stream).
   final Duration dataSaverPollInterval;
 
-  /// Appended to the SDK's User-Agent (`nanoflags-dart/0.1.1 (<platform>)`) on native platforms.
+  /// Appended to the SDK's User-Agent (`nanoflags-dart/0.2.0 (<platform>)`) on native platforms.
   final String? userAgent;
 
   /// A copy with the given members replaced.
@@ -248,6 +293,8 @@ final class NanoFlagsOptions {
     Object? bootstrap,
     NanoFlagsStore? store,
     EventsOptions? events,
+    String? serviceVersion,
+    ShadowOptions? shadow,
     VerifyOptions? verify,
     bool? dataSaver,
     Duration? dataSaverPollInterval,
@@ -265,6 +312,8 @@ final class NanoFlagsOptions {
         bootstrap: bootstrap ?? this.bootstrap,
         store: store ?? this.store,
         events: events ?? this.events,
+        serviceVersion: serviceVersion ?? this.serviceVersion,
+        shadow: shadow ?? this.shadow,
         verify: verify ?? this.verify,
         dataSaver: dataSaver ?? this.dataSaver,
         dataSaverPollInterval: dataSaverPollInterval ?? this.dataSaverPollInterval,

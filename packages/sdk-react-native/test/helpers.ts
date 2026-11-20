@@ -3,7 +3,7 @@
  * scriptable React Native WebSocket, a fake XMLHttpRequest and a fake NetInfo.
  */
 import type { Bundle } from "@nanoflags/sdk";
-import { canonicalString, sha256Hex } from "../../sdk/src/verify";
+import { canonicalString, sha256Hex, shadowCanonicalString } from "../../sdk/src/verify";
 
 export const BASE = "https://edge.test";
 export const CLIENT_KEY = "nf_pub_test_rn_000000000000000000000000000000000000000";
@@ -75,6 +75,10 @@ export class FakeEdge {
   tamper: ((body: string) => string) | null = null;
   /** Network down: every request rejects. */
   offline = false;
+  /** Extra routes (e.g. `/v1/shadow`, `/v1/log/proof`, `/v1/track`), answered before the built-in ones. */
+  routes: Record<string, (call: Call) => Response | Promise<Response>> = {};
+  /** Extra headers on `/v1/bundle` answers (e.g. `X-NanoFlags-Shadow`). */
+  bundleHeaders: Record<string, string> = {};
   kid: string;
   keys: Array<JsonWebKey & { kid: string }>;
 
@@ -100,6 +104,21 @@ export class FakeEdge {
     return { text, signature: await this.signer.sign(canonicalString(ENV_ID, bundle.revision, checksum, await sha256Hex(text))) };
   }
 
+  /**
+   * Announces a shadow session for `draft` (`X-NanoFlags-Shadow` on `/v1/bundle`) and serves it, signed in the shadow
+   * domain, on `/v1/shadow` (the edge's browser view: the bundle plus its `shadow` marker).
+   */
+  async serveShadow(draft: Bundle, sessionId: string, checksum: string): Promise<void> {
+    const text = JSON.stringify({ ...draft, shadow: { sessionId, checksum, environmentId: ENV_ID, baseRevision: this.bundle.revision } });
+    const signature = await this.signer.sign(shadowCanonicalString(ENV_ID, sessionId, checksum, await sha256Hex(text)));
+    this.bundleHeaders["X-NanoFlags-Shadow"] = `${sessionId}.${checksum}`;
+    this.routes["/v1/shadow"] = () =>
+      new Response(`{"sessionId":${JSON.stringify(sessionId)},"checksum":${JSON.stringify(checksum)},"baseRevision":${this.bundle.revision},"bundle":${text}}`, {
+        status: 200,
+        headers: { "Content-Type": "application/json", "X-NanoFlags-Signed": "true", "X-NanoFlags-Signature": signature, "X-NanoFlags-Key-Id": this.kid, "X-NanoFlags-Environment-Id": ENV_ID, "X-NanoFlags-Shadow": `${sessionId}.${checksum}` },
+      });
+  }
+
   /** A `rev` / `hello` message as the sequencer pushes it over `/v1/live`. */
   async push(bundle: Bundle, t: "rev" | "hello" = "rev", committedAt: number | null = Date.now() - 50): Promise<Record<string, unknown>> {
     const checksum = `c${bundle.revision}`;
@@ -113,6 +132,8 @@ export class FakeEdge {
     const headers = new Headers(init?.headers);
     this.calls.push({ url, path, method: init?.method ?? "GET", headers, body: typeof init?.body === "string" ? JSON.parse(init.body) : undefined });
     if (this.offline) throw new TypeError("Network request failed");
+    const route = this.routes[path];
+    if (route) return route(this.calls.at(-1)!);
     if (path === "/v1/keys") return Response.json({ keys: this.keys.map((k) => ({ ...k, alg: "EdDSA", use: "sig", status: "active" })) });
     if (path === "/v1/events") return new Response('{"accepted":1,"capped":false}', { status: 202 });
     if (path !== "/v1/bundle") return new Response('{"error":{"code":"not_found"}}', { status: 404 });
@@ -120,11 +141,11 @@ export class FakeEdge {
     const checksum = `c${b.revision}`;
     const etag = `"${checksum}-client"`;
     const signedHeaders: Record<string, string> = this.signed ? { "X-NanoFlags-Signed": "true", "X-NanoFlags-Key-Id": this.kid } : { "X-NanoFlags-Signed": "false" };
-    if (headers.get("If-None-Match") === etag) return new Response(null, { status: 304, headers: { ETag: etag, "X-NanoFlags-Environment-Id": ENV_ID, ...signedHeaders } });
+    if (headers.get("If-None-Match") === etag) return new Response(null, { status: 304, headers: { ETag: etag, "X-NanoFlags-Environment-Id": ENV_ID, ...signedHeaders, ...this.bundleHeaders } });
     const { text, signature } = await this.signedText(b, checksum);
     let body = `{"revision":${b.revision},"checksum":${JSON.stringify(checksum)},"bundle":${text}}`;
     if (this.tamper) body = this.tamper(body);
-    return new Response(body, { status: 200, headers: { "Content-Type": "application/json", ETag: etag, "X-NanoFlags-Environment-Id": ENV_ID, ...signedHeaders, ...(this.signed ? { "X-NanoFlags-Signature": signature } : {}) } });
+    return new Response(body, { status: 200, headers: { "Content-Type": "application/json", ETag: etag, "X-NanoFlags-Environment-Id": ENV_ID, ...signedHeaders, ...(this.signed ? { "X-NanoFlags-Signature": signature } : {}), ...this.bundleHeaders } });
   }) as typeof fetch;
 }
 

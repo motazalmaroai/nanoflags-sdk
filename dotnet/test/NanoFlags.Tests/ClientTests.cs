@@ -396,6 +396,46 @@ namespace NanoFlags.Tests
         }
 
         [Fact]
+        public async Task OptionsErrorHandlerSeesErrorsRaisedWhileTheClientIsCreated()
+        {
+            _edge.BundleStatus = 503;
+            var early = new ConcurrentQueue<NanoFlagsException>();
+            var late = new ConcurrentQueue<NanoFlagsException>();
+            var o = Opts(false, false);
+            o.PollInterval = TimeSpan.Zero;
+            o.BootstrapJson = "{nope";
+            o.OnError = (_, e) => early.Enqueue(e);
+            var c = Client(o);
+            c.Error += (_, e) => late.Enqueue(e);
+            await Until("bootstrap error", 5_000, () => early.Any(e => e.Code == ErrorCode.InvalidBundle));
+            Assert.False(await c.WaitForReadyAsync(Ten));
+            await Until("first load error", 5_000, () => early.Any(e => e.HttpStatus == 503));
+            Assert.DoesNotContain(late, e => e.Code == ErrorCode.InvalidBundle);
+        }
+
+        [Fact]
+        public async Task OptionsErrorHandlerSeesTheFirstLoadFailure()
+        {
+            var calls = new ConcurrentQueue<string>();
+            var o = Opts(false, false);
+            o.PollInterval = TimeSpan.Zero;
+            o.OnError += (_, e) => calls.Enqueue("a:" + e.Code);
+            o.OnError += (_, e) => calls.Enqueue("b:" + e.Code);
+            var c = Client(o, "bad-key");
+            c.Error += (_, e) => calls.Enqueue("c:" + e.Code);
+            Assert.False(await c.WaitForReadyAsync(Ten));
+            await Until("handlers", 5_000, () => calls.Count >= 2);
+            var first = calls.ToArray();
+            Assert.Equal("a:" + ErrorCode.Unauthorized, first[0]);
+            Assert.Equal("b:" + ErrorCode.Unauthorized, first[1]);
+            // The options are copied at Create: the same options create another client with the same handlers.
+            var before = calls.Count;
+            var again = Client(o, "bad-key");
+            Assert.False(await again.WaitForReadyAsync(Ten));
+            await Until("second client", 5_000, () => calls.Count >= before + 2);
+        }
+
+        [Fact]
         public async Task TelemetrySendsAttributeNamesAndTypesOnly()
         {
             var o = Opts(false, false);

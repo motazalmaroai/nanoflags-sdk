@@ -77,6 +77,15 @@ result     Returned true — Inside the 25% allocation.
   each returns a `Subscription` to close): `onChange(ChangeEvent)` (`revision`, `previousRevision`, `source`
   network/store/bootstrap, `transport` live/stream/poll, `latency` from the database commit for pushed revisions),
   `onError(NanoFlagsException)` (with `code()`), `onStatus(Status)`.
+- Errors of the first load: the client starts loading as soon as it is created, so a listener added afterwards with
+  `onError` can miss them (and configuration errors such as an invalid bootstrap bundle). Add it on the builder
+  instead; it is attached before the client starts:
+
+  ```java
+  NanoFlagsClient flags = NanoFlagsClient.create(key, NanoFlagsOptions.builder()
+      .onError(e -> log.warn("nanoflags: {} {}", e.code(), e.getMessage()))
+      .build());
+  ```
 - `status()` — `NOT_READY`, `READY` or `STALE` (a configuration is in use but is not known to be current). `revision()`,
   `transport()`, `bundle()`.
 - `refresh()`, `flush()`, `close()` (idempotent; evaluations keep working on the last configuration).

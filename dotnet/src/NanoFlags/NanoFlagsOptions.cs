@@ -70,6 +70,14 @@ namespace NanoFlags
         /// <summary>Logger for background activity (debug level only). Default: none.</summary>
         public ILogger? Logger { get; set; }
 
+        /// <summary>
+        /// A handler for background errors that is attached before the client starts, so it also receives the errors of
+        /// the first load and the configuration errors reported while the client is created (for example an invalid
+        /// <see cref="BootstrapJson"/>). A handler added afterwards to <see cref="NanoFlagsClient.Error"/> can miss them.
+        /// Combine several with <c>+=</c>; they run before the handlers added to the event later. Default: none.
+        /// </summary>
+        public EventHandler<NanoFlagsException>? OnError { get; set; }
+
         internal Func<double> Random { get; set; } = DefaultRandom;
 
         private static readonly Random Rng = new Random();

@@ -130,6 +130,8 @@ public final class NanoFlagsClient implements AutoCloseable {
         this.id = String.format("%08x", Engine.murmur3(cfg.baseUrl + "|" + sdkKey));
         this.browserKey = sdkKey.startsWith("nf_pub_");
         this.listeners = new Listeners();
+        // Builder listeners first: they must see the configuration errors below and the first load.
+        for (Consumer<NanoFlagsException> l : cfg.errorListeners) listeners.add(listeners.errors, l);
         ScheduledThreadPoolExecutor s = new ScheduledThreadPoolExecutor(1, daemon("nanoflags-timer"));
         s.setRemoveOnCancelPolicy(true);
         this.scheduler = s;
@@ -238,7 +240,11 @@ public final class NanoFlagsClient implements AutoCloseable {
     /** Registers {@code listener} for every newly adopted configuration. Listeners run one at a time, in order, on a thread of the client. */
     public Subscription onChange(Consumer<ChangeEvent> listener) { return listeners.add(listeners.change, listener); }
 
-    /** Registers {@code listener} for background errors (failed requests, rejected signatures, …). They never change the configuration in use. */
+    /**
+     * Registers {@code listener} for background errors (failed requests, rejected signatures, …). They never change the
+     * configuration in use. A listener registered here can miss errors of the first load, which starts when the client
+     * is created; use {@link NanoFlagsOptions.Builder#onError} to receive those too.
+     */
     public Subscription onError(Consumer<NanoFlagsException> listener) { return listeners.add(listeners.errors, listener); }
 
     /** Registers {@code listener} for status changes. */

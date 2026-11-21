@@ -2,7 +2,8 @@
 
 ## 0.3.0 — unreleased
 
-Additive, no breaking changes. Unreleased: TODO release date.
+Additive, no breaking changes: the version and date operators and an error listener attached before the first
+load ship together. Unreleased: TODO release date.
 
 - New condition operators: `semver_eq`, `semver_neq`, `semver_gt`, `semver_gte`, `semver_lt`, `semver_lte` compare
   semantic versions (SemVer 2.0 precedence: `4.10.0` > `4.9.0`, `1.0.0-alpha` < `1.0.0-alpha.1` < `1.0.0-beta` <
@@ -15,6 +16,10 @@ Additive, no breaking changes. Unreleased: TODO release date.
   `parity.json`) that every NanoFlags SDK passes. No bundle-format change (`engine` stays 1).
 - Earlier releases evaluate conditions with these operators as not matching (they never fail on them): upgrade before
   publishing rules that use them.
+- `NanoFlagsOptions.OnError` (`EventHandler<NanoFlagsException>`) is attached before the client starts loading, so it
+  also receives the errors of the first load and the configuration errors reported while the client is created (for
+  example an invalid `BootstrapJson`), which a handler added afterwards to `NanoFlagsClient.Error` can miss. Combine
+  several with `+=`; they run before handlers added to the event later.
 
 ## 0.2.0 — 2026-11-18
 

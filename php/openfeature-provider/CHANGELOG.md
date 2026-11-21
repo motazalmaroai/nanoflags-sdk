@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.0 (2026-11-21)
+
+- Requires `nanoflags/nanoflags` ^0.3 (version and date operators). Composer's `^0.2` excluded 0.3.0. No code changes.
+
 ## 0.2.0 (2026-11-18)
 
 - Requires `nanoflags/nanoflags` ^0.2 (test sessions).

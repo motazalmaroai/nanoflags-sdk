@@ -2,7 +2,7 @@ name: nanoflags_openfeature
 description: >-
   OpenFeature provider for NanoFlags (static-context client paradigm): evaluates locally with the
   NanoFlags Dart SDK, for openfeature_dart_client_sdk in Dart and Flutter apps.
-version: 0.1.1
+version: 0.1.2
 homepage: https://nanoflags.io
 repository: https://github.com/motazalmaroai/nanoflags-sdk/tree/main/packages/sdk-dart/nanoflags_openfeature
 issue_tracker: https://github.com/motazalmaroai/nanoflags-sdk/issues
@@ -15,7 +15,7 @@ environment:
   sdk: ^3.10.0
 
 dependencies:
-  nanoflags: ">=0.1.0 <0.3.0"
+  nanoflags: ">=0.1.0 <0.4.0"
   # Official OpenFeature client SDK (publisher openfeature.dev). Pre-1.0: ^0.0.1 allows 0.0.x patches only.
   openfeature_dart_client_sdk: ^0.0.1
 

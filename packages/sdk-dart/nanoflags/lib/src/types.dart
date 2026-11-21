@@ -3,7 +3,7 @@ import 'store.dart';
 import 'keys.dart';
 
 /// Version of this SDK (sent as `sdk: "dart/<version>"` with telemetry and in the User-Agent).
-const String sdkVersion = '0.2.0';
+const String sdkVersion = '0.3.0';
 
 /// WebSocket close code of the edge for an environment that was deleted: the SDK stops reconnecting.
 const int closeEnvironmentDeleted = 4004;

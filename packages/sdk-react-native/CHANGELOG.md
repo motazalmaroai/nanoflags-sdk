@@ -1,8 +1,8 @@
 # Changelog
 
-## 0.4.0 (unreleased)
+## 0.4.0 (2026-11-21)
 
-Built on the `@nanoflags/sdk` 0.8.0 core (compiled into this package). Additive, no breaking changes. Unreleased: TODO release date.
+Built on the `@nanoflags/sdk` 0.8.0 core (compiled into this package). Additive, no breaking changes.
 
 - New condition operators: `semver_eq`, `semver_neq`, `semver_gt`, `semver_gte`, `semver_lt`, `semver_lte` compare
   semantic versions (SemVer 2.0 precedence: `4.10.0` > `4.9.0`, `1.0.0-alpha` < `1.0.0-alpha.1` < `1.0.0-beta` <

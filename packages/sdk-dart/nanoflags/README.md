@@ -17,7 +17,7 @@ keys (`nf_srv_…`) are refused with an `ArgumentError`.
 
 ```yaml
 dependencies:
-  nanoflags: ^0.2.0
+  nanoflags: ^0.3.0
 ```
 
 ## Quickstart

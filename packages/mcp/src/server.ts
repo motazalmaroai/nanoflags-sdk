@@ -5,7 +5,7 @@
 import { ApiClient, ApiError, DEFAULT_BASE_URL, TOKEN_PATTERN } from "./api.js";
 import { TOOLS, ToolInputError, validate, type Tool, type ToolContext } from "./tools.js";
 
-export const VERSION = "0.1.0";
+export const VERSION = "0.2.0";
 export const PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
 
 export const INSTRUCTIONS = [

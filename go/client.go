@@ -21,7 +21,7 @@ import (
 )
 
 // SDKVersion is the version of this SDK, reported to the edge as "go/<version>".
-const SDKVersion = "0.3.0"
+const SDKVersion = "0.4.0"
 
 // SupportedEngineVersion is the newest bundle format (`bundle.engine`) this SDK evaluates.
 // Newer bundles are refused; the configuration in use stays.

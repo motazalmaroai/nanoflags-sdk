@@ -30,7 +30,7 @@ inputs:
   cli:
     description: >-
       Command that runs the NanoFlags CLI. Default: npx @nanoflags/cli (published to npm from
-      motazalmaroai/nanoflags-sdk). Pin a version with e.g. "npx --yes @nanoflags/cli@0.4.0".
+      motazalmaroai/nanoflags-sdk). Pin a version with e.g. "npx --yes @nanoflags/cli@0.5.0".
     required: false
     default: npx --yes @nanoflags/cli@0
 

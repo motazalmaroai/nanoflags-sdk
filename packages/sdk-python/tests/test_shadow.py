@@ -112,7 +112,7 @@ def test_evaluates_the_draft_never_applies_it_and_reports_only_counters(shadow_e
 
         c.flush()
         body = shadow_edge.events[-1]
-        assert body["sdk"] == "python/0.2.0" and body["service"] == "checkout-service"
+        assert body["sdk"] == "python/0.3.0" and body["service"] == "checkout-service"
         assert shadow_of(body) == {
             "sessionId": SESSION, "checksum": DRAFT, "version": "3.1.0",
             "flags": [{"flag": "checkout-v2", "samples": 40, "flips": 30, "pairs": [{"live": "false", "shadow": "true", "count": 30}], "rules": {"default": 30, "1": 10}}],

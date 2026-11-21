@@ -57,7 +57,7 @@ __all__ = [
     "VerifyOptions",
 ]
 
-SDK_VERSION = "0.2.0"
+SDK_VERSION = "0.3.0"
 SUPPORTED_ENGINE_VERSION = ENGINE_VERSION
 #: WebSocket close code of the edge for a deleted environment: the client stops reconnecting.
 CLOSE_ENVIRONMENT_DELETED = 4004

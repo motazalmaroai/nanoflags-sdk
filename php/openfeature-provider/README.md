@@ -56,7 +56,7 @@ The PHP OpenFeature SDK has no provider events; status and errors are on the `Cl
 ## Development
 
 ```sh
-composer config repositories.nanoflags '{"type": "path", "url": "../nanoflags", "options": {"versions": {"nanoflags/nanoflags": "0.2.0"}}}'
+composer config repositories.nanoflags '{"type": "path", "url": "../nanoflags", "options": {"versions": {"nanoflags/nanoflags": "0.3.0"}}}'
 composer install
 vendor/bin/phpunit
 ```

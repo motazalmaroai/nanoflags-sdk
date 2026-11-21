@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.0 (2026-11-21)
+
+- Requires the `nanoflags` gem ~> 0.3 (version and date operators). No code changes.
+
 ## 0.2.0 (2026-11-18)
 
 - Requires the `nanoflags` gem ~> 0.2 (test sessions).

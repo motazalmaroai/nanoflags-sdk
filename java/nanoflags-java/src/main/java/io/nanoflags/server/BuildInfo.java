@@ -20,6 +20,6 @@ final class BuildInfo {
         } catch (Exception ignored) {
             // fall through
         }
-        return "0.2.0";
+        return "0.3.0";
     }
 }

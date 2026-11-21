@@ -83,7 +83,7 @@ version, pass it with `cli`:
       - uses: motazalmaroai/nanoflags-sdk/integrations/github-action@<commit SHA>
         with:
           key: ${{ secrets.NANOFLAGS_CI_KEY }}
-          cli: npx --yes @nanoflags/cli@0.4.0
+          cli: npx --yes @nanoflags/cli@0.5.0
 ```
 
 Inside a checkout of the nanoflags-sdk repository itself, use `uses: ./integrations/github-action`

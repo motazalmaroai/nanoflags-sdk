@@ -1,8 +1,6 @@
 # Changelog
 
-## 0.2.0 (unreleased)
-
-Unreleased: TODO release date.
+## 0.2.0 (2026-11-21)
 
 - `update_draft` lists every condition operator, including the version (`semver_*`) and date (`before` / `after`)
   operators, and says that `gt` / `gte` / `lt` / `lte` compare numbers only (`"4.10"` is 4.1), so agents pick the

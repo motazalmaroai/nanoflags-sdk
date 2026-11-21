@@ -1,8 +1,8 @@
 # Changelog
 
-## 0.5.0 (unreleased)
+## 0.5.0 (2026-11-21)
 
-Additive. Unreleased: TODO release date.
+Additive.
 
 - New condition operators: `semver_eq`, `semver_neq`, `semver_gt`, `semver_gte`, `semver_lt`, `semver_lte` compare
   semantic versions (SemVer 2.0 precedence: `4.10.0` > `4.9.0`, `1.0.0-alpha` < `1.0.0-alpha.1` < `1.0.0-beta` <

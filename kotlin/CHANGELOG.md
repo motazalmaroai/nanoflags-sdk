@@ -1,8 +1,8 @@
 # Changelog
 
-## 0.3.0 — unreleased
+## 0.3.0 — 2026-11-21
 
-Additive, no breaking changes. Unreleased: TODO release date. Applies to `nanoflags-core` and therefore `nanoflags-android` and `nanoflags-openfeature`.
+Additive, no breaking changes. Applies to `nanoflags-core` and therefore `nanoflags-android` and `nanoflags-openfeature`.
 
 - New condition operators: `semver_eq`, `semver_neq`, `semver_gt`, `semver_gte`, `semver_lt`, `semver_lte` compare
   semantic versions (SemVer 2.0 precedence: `4.10.0` > `4.9.0`, `1.0.0-alpha` < `1.0.0-alpha.1` < `1.0.0-beta` <
@@ -16,7 +16,7 @@ Additive, no breaking changes. Unreleased: TODO release date. Applies to `nanofl
 - Earlier releases evaluate conditions with these operators as not matching (they never fail on them): upgrade before
   publishing rules that use them.
 
-## 0.2.0 — unreleased
+## 0.2.0 — 2026-11-20
 
 - Shadow evaluation of drafts (same rules and wire format as `@nanoflags/sdk` 0.7.1): while a change waits for
   approval in an environment with shadow evaluation on, the client fetches the signed shadow bundle announced by
@@ -29,7 +29,7 @@ Additive, no breaking changes. Unreleased: TODO release date. Applies to `nanofl
 - Shadow reports always pass the edge's validation of `POST /v1/events`: flag keys over 63 characters (UTF-16
   code units) are not counted and a flag's counters stop at 10^7 samples until the next report.
 
-## 0.1.0 — unreleased
+## 0.1.0 — 2026-11-14
 
 First release of the Android / Kotlin SDK.
 

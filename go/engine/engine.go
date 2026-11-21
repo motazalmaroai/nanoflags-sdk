@@ -361,6 +361,10 @@ func matchCondition(c Value, ctx Context, segments Value, depth int) (bool, erro
 			return a < b, nil
 		}
 		return a <= b, nil
+	case "semver_eq", "semver_neq", "semver_gt", "semver_gte", "semver_lt", "semver_lte":
+		return matchSemver(op.s, actual, value), nil
+	case "before", "after":
+		return matchDate(op.s, actual, value), nil
 	}
 	return false, nil
 }
@@ -399,6 +403,8 @@ func matchAll(mode, conditions Value, ctx Context, segments Value, depth int) (b
 var opWords = map[string]string{
 	"eq": "=", "neq": "≠", "in": "in", "not_in": "not in", "contains": "contains", "starts_with": "starts with", "ends_with": "ends with",
 	"gt": ">", "gte": "≥", "lt": "<", "lte": "≤", "exists": "exists", "not_exists": "does not exist", "segment": "in segment", "not_segment": "not in segment",
+	"semver_eq": "version =", "semver_neq": "version ≠", "semver_gt": "version >", "semver_gte": "version ≥", "semver_lt": "version <", "semver_lte": "version ≤",
+	"before": "before", "after": "after",
 }
 
 func describeCondition(c Value) (string, error) {

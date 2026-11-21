@@ -197,7 +197,7 @@ export const TOOLS: Tool[] = [
   {
     name: "update_draft",
     title: "Edit a flag's draft",
-    description: `Edit a flag's DRAFT configuration in one environment: on/off, targeting rules, default value (the variation served when no rule matches) and off value. Rules: [{ id, conditions: [{ attribute, op, value }], serve: { type: "fixed", value } | { type: "rollout", percentage, value, otherwise } }]. Only the fields you send change. The draft is not live until a person publishes it. ${GOVERNANCE}`,
+    description: `Edit a flag's DRAFT configuration in one environment: on/off, targeting rules, default value (the variation served when no rule matches) and off value. Rules: [{ id, conditions: [{ attribute, op, value }], serve: { type: "fixed", value } | { type: "rollout", percentage, value, otherwise } }]. op is one of eq, neq, in, not_in (value: list), contains, starts_with, ends_with, gt, gte, lt, lte (numbers only: "4.10" is 4.1), semver_eq, semver_neq, semver_gt, semver_gte, semver_lt, semver_lte (versions such as "4.10.0"; use these for app versions), before, after (dates "2026-12-31", timestamps "2026-12-31T09:00:00Z", or Unix seconds/milliseconds), exists, not_exists, segment, not_segment (value: segment key, attribute ""). Only the fields you send change. The draft is not live until a person publishes it. ${GOVERNANCE}`,
     inputSchema: obj(
       {
         project,

@@ -62,7 +62,7 @@ resource "nanoflags_segment" "pro_customers" {
 
 Required:
 
-- `op` (String) Operator: `eq`, `neq`, `in`, `not_in`, `contains`, `starts_with`, `ends_with`, `gt`, `gte`, `lt`, `lte`, `exists`, `not_exists`, `segment`, `not_segment`.
+- `op` (String) Operator: `eq`, `neq`, `in`, `not_in`, `contains`, `starts_with`, `ends_with`, `gt`, `gte`, `lt`, `lte` (numbers), `semver_eq`, `semver_neq`, `semver_gt`, `semver_gte`, `semver_lt`, `semver_lte` (semantic versions such as `4.10.0`), `before`, `after` (dates: `2026-12-31`, `2026-12-31T09:00:00Z` or a Unix timestamp), `exists`, `not_exists`, `segment`, `not_segment`. SDK releases from before the version and date operators evaluate those conditions as not matching.
 
 Optional:
 

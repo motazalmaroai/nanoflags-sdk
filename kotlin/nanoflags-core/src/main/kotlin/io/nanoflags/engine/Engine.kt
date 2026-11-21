@@ -165,6 +165,8 @@ object Engine {
                     else -> a <= b
                 }
             }
+            "semver_eq", "semver_neq", "semver_gt", "semver_gte", "semver_lt", "semver_lte" -> Operators.matchSemver(op.value, actual, value)
+            "before", "after" -> Operators.matchDate(op.value, actual, value)
             else -> false
         }
     }
@@ -187,6 +189,8 @@ object Engine {
         "eq" to "=", "neq" to "≠", "in" to "in", "not_in" to "not in", "contains" to "contains", "starts_with" to "starts with",
         "ends_with" to "ends with", "gt" to ">", "gte" to "≥", "lt" to "<", "lte" to "≤", "exists" to "exists",
         "not_exists" to "does not exist", "segment" to "in segment", "not_segment" to "not in segment",
+        "semver_eq" to "version =", "semver_neq" to "version ≠", "semver_gt" to "version >", "semver_gte" to "version ≥",
+        "semver_lt" to "version <", "semver_lte" to "version ≤", "before" to "before", "after" to "after",
     )
 
     private fun describeCondition(c: JsonValue): String {

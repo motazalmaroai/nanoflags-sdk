@@ -23,6 +23,8 @@ final class Engine
         'eq' => '=', 'neq' => '≠', 'in' => 'in', 'not_in' => 'not in', 'contains' => 'contains',
         'starts_with' => 'starts with', 'ends_with' => 'ends with', 'gt' => '>', 'gte' => '≥', 'lt' => '<', 'lte' => '≤',
         'exists' => 'exists', 'not_exists' => 'does not exist', 'segment' => 'in segment', 'not_segment' => 'not in segment',
+        'semver_eq' => 'version =', 'semver_neq' => 'version ≠', 'semver_gt' => 'version >', 'semver_gte' => 'version ≥',
+        'semver_lt' => 'version <', 'semver_lte' => 'version ≤', 'before' => 'before', 'after' => 'after',
     ];
 
     /* ---------------------------------------------------------------- hashing */
@@ -229,6 +231,16 @@ final class Engine
                     'lt' => $a < $b,
                     default => $a <= $b,
                 };
+            case 'semver_eq':
+            case 'semver_neq':
+            case 'semver_gt':
+            case 'semver_gte':
+            case 'semver_lt':
+            case 'semver_lte':
+                return Operators::matchSemver($op, $actual, $value);
+            case 'before':
+            case 'after':
+                return Operators::matchDate($op, $actual, $value);
         }
         return false;
     }

@@ -8,6 +8,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringdefault"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	"regexp"
 
 	"github.com/motazalmaroai/terraform-provider-nanoflags/internal/client"
 )
@@ -30,7 +31,7 @@ func conditionBlock() schema.ListNestedBlock {
 					Default:             stringdefault.StaticString(""),
 				},
 				"op": schema.StringAttribute{
-					MarkdownDescription: "Operator: `eq`, `neq`, `in`, `not_in`, `contains`, `starts_with`, `ends_with`, `gt`, `gte`, `lt`, `lte`, `exists`, `not_exists`, `segment`, `not_segment`.",
+					MarkdownDescription: "Operator: `eq`, `neq`, `in`, `not_in`, `contains`, `starts_with`, `ends_with`, `gt`, `gte`, `lt`, `lte` (numbers), `semver_eq`, `semver_neq`, `semver_gt`, `semver_gte`, `semver_lt`, `semver_lte` (semantic versions such as `4.10.0`), `before`, `after` (dates: `2026-12-31`, `2026-12-31T09:00:00Z` or a Unix timestamp), `exists`, `not_exists`, `segment`, `not_segment`. SDK releases from before the version and date operators evaluate those conditions as not matching.",
 					Required:            true,
 					Validators:          []validator.String{stringvalidator.OneOf(conditionOps...)},
 				},
@@ -64,15 +65,43 @@ func validateConditions(conds []conditionModel, base path.Path, diags *diag.Diag
 			if c.Value.IsNull() || jsonKind(c.Value.ValueString()) != "array" {
 				diags.AddAttributeError(p.AtName("value"), "List required", op+" needs a JSON array, e.g. jsonencode([\"a\", \"b\"]).")
 			}
+		case "semver_eq", "semver_neq", "semver_gt", "semver_gte", "semver_lt", "semver_lte":
+			if c.Value.IsNull() || jsonKind(c.Value.ValueString()) != "string" {
+				diags.AddAttributeError(p.AtName("value"), "Version required", op+" needs a version string, e.g. jsonencode(\"4.10.0\").")
+			}
+		case "before", "after":
+			if k := jsonKind(c.Value.ValueString()); c.Value.IsNull() || (k != "string" && k != "number") {
+				diags.AddAttributeError(p.AtName("value"), "Date required", op+" needs a date string, e.g. jsonencode(\"2026-12-31T09:00:00Z\"), or a Unix timestamp number.")
+			}
 		default:
 			if c.Value.IsNull() {
 				diags.AddAttributeError(p.AtName("value"), "Value required", op+" needs a value.")
 			}
 		}
+		if (op == "gt" || op == "gte" || op == "lt" || op == "lte") && !c.Value.IsNull() && looksLikeVersion(c.Value.ValueString(), c.Attribute.ValueString()) {
+			diags.AddAttributeWarning(p.AtName("op"), "Numeric comparison of a version",
+				op+" compares numbers (\"4.10\" is 4.1, \"4.10.0\" is not a number). To compare versions use semver_"+op+".")
+		}
 		if op != "segment" && op != "not_segment" && (c.Attribute.IsNull() || c.Attribute.ValueString() == "") {
 			diags.AddAttributeError(p.AtName("attribute"), "Attribute required", op+" needs the context attribute to compare.")
 		}
 	}
+}
+
+var (
+	versionValue     = regexp.MustCompile(`^"[vV]?[0-9]+(\.[0-9]+){0,2}([-+][0-9A-Za-z.+-]*)?"$`)
+	plainNumber      = regexp.MustCompile(`^"?-?[0-9]+(\.[0-9]+)?"?$`)
+	versionAttribute = regexp.MustCompile(`(?i)version|(^|[^a-z])ver([^a-z]|$)`)
+)
+
+// looksLikeVersion reports whether a numeric condition probably means a version comparison: its JSON value is a
+// version string that is not a plain number ("4.10.0", "v4"), or the attribute is named like a version. Same rule as
+// numericVersionWarning in the evaluation engine. A warning only: the condition stays valid and numeric.
+func looksLikeVersion(jsonValue, attribute string) bool {
+	if versionValue.MatchString(jsonValue) && !plainNumber.MatchString(jsonValue) {
+		return true
+	}
+	return versionAttribute.MatchString(attribute)
 }
 
 func conditionsToAPI(conds []conditionModel) []client.Condition {

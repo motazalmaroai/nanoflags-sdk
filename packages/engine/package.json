@@ -9,7 +9,7 @@
     ".": "./src/index.ts"
   },
   "scripts": {
-    "test": "vitest run && node fixtures/check-parity.mjs",
+    "test": "vitest run && node fixtures/check-parity.mjs && node fixtures/generate-operators.mjs --check",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

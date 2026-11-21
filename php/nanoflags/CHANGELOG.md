@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.3.0 (unreleased)
+
+Additive, no breaking changes. Unreleased: TODO release date.
+
+- New condition operators: `semver_eq`, `semver_neq`, `semver_gt`, `semver_gte`, `semver_lt`, `semver_lte` compare
+  semantic versions (SemVer 2.0 precedence: `4.10.0` > `4.9.0`, `1.0.0-alpha` < `1.0.0-alpha.1` < `1.0.0-beta` <
+  `1.0.0-rc.1` < `1.0.0`, build metadata ignored; leniently, a leading `v` is allowed, missing minor / patch are 0 so
+  `4.10` = `4.10.0`, and leading zeros are ignored); `before` / `after` compare points in time (`YYYY-MM-DD` as
+  00:00 UTC, RFC 3339 timestamps with `Z` or an offset, or Unix time: seconds below 1e12, milliseconds from 1e12).
+  A value that cannot be read on either side makes the condition false; evaluation never throws.
+- `gt` / `gte` / `lt` / `lte` are unchanged (numeric), so existing rules evaluate exactly as before.
+- Verified against the shared conformance vectors (`packages/engine/fixtures/operators.json`, embedded in
+  `parity.json`) that every NanoFlags SDK passes. No bundle-format change (`engine` stays 1).
+- Earlier releases evaluate conditions with these operators as not matching (they never fail on them): upgrade before
+  publishing rules that use them.
+
 ## 0.2.0 (2026-11-18)
 
 - Test sessions: `Client::session($token, $service)` and `Client::sessionFromGlobals()` resolve `x-nanoflags-session`

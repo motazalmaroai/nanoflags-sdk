@@ -71,6 +71,8 @@ describe("protocol", () => {
     const names = res.result.tools.map((t) => t.name);
     expect(names.length).toBeLessThanOrEqual(8);
     expect(names).toEqual(["list_environments", "list_flags", "get_flag", "create_flag", "update_draft", "open_change_request", "get_change_status", "explain_flag"]);
+    const draft = res.result.tools.find((t) => t.name === "update_draft") as unknown as { description: string };
+    for (const op of ["semver_gte", "semver_neq", "before", "after", "gte", "not_segment"]) expect(draft.description).toContain(op);
     for (const n of names) expect(n).not.toMatch(/publish|approve|kill|schedule|delete|archive|token|member/);
     for (const t of res.result.tools) {
       expect(t.inputSchema.type).toBe("object");

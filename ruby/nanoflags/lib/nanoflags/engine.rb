@@ -2,6 +2,7 @@
 
 require_relative "engine/js"
 require_relative "engine/json"
+require_relative "engine/operators"
 
 module NanoFlags
   # The NanoFlags evaluation engine: a port of the TypeScript engine (`@nanoflags/engine`) that the dashboard, the
@@ -33,7 +34,9 @@ module NanoFlags
     OP_WORDS = {
       "eq" => "=", "neq" => "≠", "in" => "in", "not_in" => "not in", "contains" => "contains",
       "starts_with" => "starts with", "ends_with" => "ends with", "gt" => ">", "gte" => "≥", "lt" => "<", "lte" => "≤",
-      "exists" => "exists", "not_exists" => "does not exist", "segment" => "in segment", "not_segment" => "not in segment"
+      "exists" => "exists", "not_exists" => "does not exist", "segment" => "in segment", "not_segment" => "not in segment",
+      "semver_eq" => "version =", "semver_neq" => "version ≠", "semver_gt" => "version >", "semver_gte" => "version ≥",
+      "semver_lt" => "version <", "semver_lte" => "version ≤", "before" => "before", "after" => "after"
     }.freeze
 
     M32 = 0xFFFFFFFF
@@ -165,6 +168,8 @@ module NanoFlags
         when "lt" then a < b
         else a <= b
         end
+      when *Operators::SEMVER_OPS then Operators.match_semver(op, actual, value)
+      when "before", "after" then Operators.match_date(op, actual, value)
       else false
       end
     end

@@ -182,16 +182,20 @@ const eq = (attribute, value) => ({ attribute, op: "eq", value });
     eqLone: flagWith([rule([eq("s", "\udc00")])]),
     eqObjLone: flagWith([rule([eq("s", { k: "\ud800" })])]),
     fallbackish: flagWith([rule([], fixed("\ud800x\u0001\u001f "))]),
+    semverLone: flagWith([rule([{ attribute: "s", op: "semver_gte", value: "0.0.0" }])]),
+    semverLoneValue: flagWith([rule([{ attribute: "s", op: "semver_neq", value: "1.2.3-\ud800" }])]),
+    dateLone: flagWith([rule([{ attribute: "s", op: "before", value: "9999-12-31" }])]),
   };
   const b = addBundle(base(flags));
-  for (const s of ["\ud800", "\udc00", "a\ud800b", "😀", "x😀", "\ud83d", "\ude00", "é", "é", { k: "\ud800" }]) {
+  for (const s of ["\ud800", "\udc00", "a\ud800b", "😀", "x😀", "\ud83d", "\ude00", "é", "é", { k: "\ud800" }, "1.2.3", "1.2.3-\ud800", "1.2.3\ud800", "2026-01-01\ud800", "2026-01-01"]) {
     for (const f of Object.keys(flags)) addCase(`string ${JSON.stringify(s)} ${f}`, b, f, { key: s, s }, "\udfff");
   }
 }
 
 // 6. Seeded fuzz over odd values (property-style coverage of every path).
 {
-  const scalars = [null, true, false, 0, -1, 1, 2.5, 1e21, 1e-7, "", " ", "a", "ab", "10", " 1e1 ", "0x1f", "Infinity", "abc", "😀", "key", "any", "all", "segment", "fixed", "rollout"];
+  const scalars = [null, true, false, 0, -1, 1, 2.5, 1e21, 1e-7, "", " ", "a", "ab", "10", " 1e1 ", "0x1f", "Infinity", "abc", "😀", "key", "any", "all", "segment", "fixed", "rollout",
+    "1.2.3", "v2.0.0-rc.1", "4.10", "2026-01-01", "2026-01-01T00:00:00Z", 1767225600, 1767225600000];
   const anyValue = (d = 0) => {
     const r = rand();
     if (d > 2 || r < 0.6) return pick(scalars);
@@ -200,7 +204,8 @@ const eq = (attribute, value) => ({ attribute, op: "eq", value });
     for (let i = Math.floor(rand() * 3); i > 0; i--) o[pick(["a", "b", "key", "0", "length", "match", "conditions", "value"])] = anyValue(d + 1);
     return o;
   };
-  const ops = ["eq", "neq", "in", "not_in", "contains", "starts_with", "ends_with", "gt", "gte", "lt", "lte", "exists", "not_exists", "segment", "not_segment", "constructor", "x"];
+  const ops = ["eq", "neq", "in", "not_in", "contains", "starts_with", "ends_with", "gt", "gte", "lt", "lte", "exists", "not_exists", "segment", "not_segment", "constructor", "x",
+    "semver_eq", "semver_neq", "semver_gt", "semver_gte", "semver_lt", "semver_lte", "before", "after"];
   const cond = () => (rand() < 0.05 ? anyValue() : { attribute: pick(["a", "b", "key", "", "constructor", "__proto__"]), op: pick(ops), ...(rand() < 0.9 ? { value: rand() < 0.3 ? pick(["s1", "s2", "s3", "0"]) : anyValue() } : {}) });
   const conds = () => (rand() < 0.05 ? anyValue() : Array.from({ length: Math.floor(rand() * 4) }, cond));
   const serve = () => {

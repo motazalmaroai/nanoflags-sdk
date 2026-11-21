@@ -15,6 +15,8 @@ export type Operator =
   | "eq" | "neq" | "in" | "not_in"
   | "contains" | "starts_with" | "ends_with"
   | "gt" | "gte" | "lt" | "lte"
+  | "semver_eq" | "semver_neq" | "semver_gt" | "semver_gte" | "semver_lt" | "semver_lte"
+  | "before" | "after"
   | "exists" | "not_exists"
   | "segment" | "not_segment";
 
@@ -233,6 +235,168 @@ function num(v: JsonValue | undefined): number | null {
   return null;
 }
 
+/* ---------------- versions and dates ---------------- */
+
+/** Longest version or date string the engine parses. Longer values are invalid (the condition is false). */
+export const MAX_VERSION_LENGTH = 256;
+
+/** A parsed semantic version: core numbers as digit strings without leading zeros, and prerelease identifiers. */
+export interface SemVer {
+  major: string;
+  minor: string;
+  patch: string;
+  prerelease: string[];
+}
+
+const isDigit = (c: number) => c >= 48 && c <= 57;
+const isIdentChar = (c: number) => isDigit(c) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 45;
+const stripZeros = (d: string) => d.replace(/^0+(?=.)/, "");
+const allDigits = (s: string) => /^[0-9]+$/.test(s);
+
+/**
+ * Parses a semantic version, leniently: an optional leading `v` or `V`; missing minor / patch read as 0 (`4.10` is
+ * 4.10.0, `4` is 4.0.0); leading zeros are accepted and ignored (`2026.01.05` is 2026.1.5). Then SemVer 2.0: an
+ * optional prerelease (`-` and dot-separated identifiers of `[0-9A-Za-z-]`) and optional build metadata (`+…`, ignored).
+ * Anything else (whitespace, empty identifiers, a fourth number, non-ASCII, longer than 256) is null. Never throws.
+ */
+export function parseSemver(input: unknown): SemVer | null {
+  if (typeof input !== "string" || input.length === 0 || input.length > MAX_VERSION_LENGTH) return null;
+  const s = input;
+  let i = s.charCodeAt(0) === 118 || s.charCodeAt(0) === 86 ? 1 : 0;
+  const core: string[] = [];
+  for (;;) {
+    const start = i;
+    while (i < s.length && isDigit(s.charCodeAt(i))) i++;
+    if (i === start) return null;
+    core.push(stripZeros(s.slice(start, i)));
+    if (core.length < 3 && s.charCodeAt(i) === 46) { i++; continue; }
+    break;
+  }
+  while (core.length < 3) core.push("0");
+  const idents = (from: number, stopAtPlus: boolean): [string[], number] | null => {
+    const out: string[] = [];
+    let j = from;
+    let start = j;
+    for (;;) {
+      const c = j < s.length ? s.charCodeAt(j) : -1;
+      if (c !== -1 && isIdentChar(c)) { j++; continue; }
+      if (j === start) return null;
+      out.push(s.slice(start, j));
+      if (c === 46) { j++; start = j; continue; }
+      if (c === -1 || (stopAtPlus && c === 43)) return [out, j];
+      return null;
+    }
+  };
+  let prerelease: string[] = [];
+  if (s.charCodeAt(i) === 45) {
+    const r = idents(i + 1, true);
+    if (!r) return null;
+    [prerelease, i] = r;
+  }
+  if (s.charCodeAt(i) === 43) {
+    const r = idents(i + 1, false);
+    if (!r) return null;
+    i = r[1];
+  }
+  if (i !== s.length) return null;
+  return { major: core[0]!, minor: core[1]!, patch: core[2]!, prerelease };
+}
+
+/** Compares two digit strings without leading zeros, of any length. */
+function compareDigits(a: string, b: string): number {
+  if (a.length !== b.length) return a.length < b.length ? -1 : 1;
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/** SemVer 2.0 precedence: -1, 0 or 1. Build metadata never matters; numeric prerelease identifiers sort before others. */
+export function compareSemver(a: SemVer, b: SemVer): number {
+  const core = compareDigits(a.major, b.major) || compareDigits(a.minor, b.minor) || compareDigits(a.patch, b.patch);
+  if (core !== 0) return core;
+  const pa = a.prerelease;
+  const pb = b.prerelease;
+  if (pa.length === 0 || pb.length === 0) return pa.length === pb.length ? 0 : pa.length === 0 ? 1 : -1;
+  for (let i = 0; i < pa.length && i < pb.length; i++) {
+    const x = pa[i]!;
+    const y = pb[i]!;
+    const xn = allDigits(x);
+    const yn = allDigits(y);
+    const c = xn && yn ? compareDigits(stripZeros(x), stripZeros(y)) : xn ? -1 : yn ? 1 : x < y ? -1 : x > y ? 1 : 0;
+    if (c !== 0) return c;
+  }
+  return pa.length === pb.length ? 0 : pa.length < pb.length ? -1 : 1;
+}
+
+/** Days since 1970-01-01 of a proleptic Gregorian date (H. Hinnant's days_from_civil). */
+function daysFromCivil(y: number, m: number, d: number): number {
+  y -= m <= 2 ? 1 : 0;
+  const era = Math.floor(y / 400);
+  const yoe = y - era * 400;
+  const doy = Math.floor((153 * (m + (m > 2 ? -3 : 9)) + 2) / 5) + d - 1;
+  const doe = yoe * 365 + Math.floor(yoe / 4) - Math.floor(yoe / 100) + doy;
+  return era * 146097 + doe - 719468;
+}
+
+const DATE_RE = /^([0-9]{4})-([0-9]{2})-([0-9]{2})(?:[Tt ]([0-9]{2}):([0-9]{2})(?::([0-9]{2})(?:\.([0-9]{1,9}))?)?([Zz]|[+-][0-9]{2}:[0-9]{2}))?$/;
+
+/** Epoch seconds below this magnitude, epoch milliseconds from it (1e12 ms is 2001-09-09; 1e12 s is year 33658). */
+export const EPOCH_MS_THRESHOLD = 1e12;
+
+/**
+ * A point in time as Unix epoch milliseconds, or null. Accepts a JSON number (Unix epoch: seconds when its magnitude is
+ * below 1e12, milliseconds otherwise), a date `YYYY-MM-DD` (00:00 UTC) or an RFC 3339 / ISO 8601 timestamp
+ * `YYYY-MM-DDTHH:MM[:SS[.fraction]]` followed by `Z` or `±HH:MM` (required). Calendar-checked (leap years; seconds
+ * 00–59). Fractions beyond milliseconds are truncated. Numeric strings are not timestamps. Never throws.
+ */
+export function parseInstant(input: unknown): number | null {
+  if (typeof input === "number") {
+    if (!Number.isFinite(input)) return null;
+    return Math.abs(input) >= EPOCH_MS_THRESHOLD ? input : input * 1000;
+  }
+  if (typeof input !== "string" || input.length > MAX_VERSION_LENGTH) return null;
+  const m = DATE_RE.exec(input);
+  if (!m) return null;
+  const y = Number(m[1]);
+  const mo = Number(m[2]);
+  const d = Number(m[3]);
+  if (mo < 1 || mo > 12 || d < 1) return null;
+  const leap = y % 4 === 0 && (y % 100 !== 0 || y % 400 === 0);
+  const dim = mo === 2 ? (leap ? 29 : 28) : mo === 4 || mo === 6 || mo === 9 || mo === 11 ? 30 : 31;
+  if (d > dim) return null;
+  let ms = daysFromCivil(y, mo, d) * 86_400_000;
+  if (m[4] === undefined) return ms;
+  const h = Number(m[4]);
+  const mi = Number(m[5]);
+  const sec = m[6] === undefined ? 0 : Number(m[6]);
+  if (h > 23 || mi > 59 || sec > 59) return null;
+  const frac = m[7] === undefined ? 0 : Number((m[7] + "00").slice(0, 3));
+  ms += h * 3_600_000 + mi * 60_000 + sec * 1000 + frac;
+  const z = m[8]!;
+  if (z !== "Z" && z !== "z") {
+    const oh = Number(z.slice(1, 3));
+    const om = Number(z.slice(4, 6));
+    if (oh > 23 || om > 59) return null;
+    ms -= (z[0] === "-" ? -1 : 1) * (oh * 60 + om) * 60_000;
+  }
+  return ms;
+}
+
+const SEMVER_OPS = new Set<string>(["semver_eq", "semver_neq", "semver_gt", "semver_gte", "semver_lt", "semver_lte"]);
+
+function matchSemver(op: string, actual: JsonValue | undefined, expected: JsonValue | undefined): boolean {
+  const a = parseSemver(actual);
+  const b = parseSemver(expected);
+  if (a === null || b === null) return false;
+  const c = compareSemver(a, b);
+  switch (op) {
+    case "semver_eq": return c === 0;
+    case "semver_neq": return c !== 0;
+    case "semver_gt": return c > 0;
+    case "semver_gte": return c >= 0;
+    case "semver_lt": return c < 0;
+    default: return c <= 0;
+  }
+}
+
 export function matchCondition(c: Condition, ctx: Context, segments: Record<string, Segment>, depth = 0): boolean {
   if (c.op === "segment" || c.op === "not_segment") {
     const seg = typeof c.value === "string" ? own(segments, c.value) : undefined;
@@ -269,6 +433,20 @@ export function matchCondition(c: Condition, ctx: Context, segments: Record<stri
       if (a === null || b === null) return false;
       return c.op === "gt" ? a > b : c.op === "gte" ? a >= b : c.op === "lt" ? a < b : a <= b;
     }
+    case "semver_eq":
+    case "semver_neq":
+    case "semver_gt":
+    case "semver_gte":
+    case "semver_lt":
+    case "semver_lte":
+      return matchSemver(c.op, actual, c.value);
+    case "before":
+    case "after": {
+      const a = parseInstant(actual);
+      const b = parseInstant(c.value);
+      if (a === null || b === null) return false;
+      return c.op === "before" ? a < b : a > b;
+    }
     default:
       return false;
   }
@@ -290,6 +468,8 @@ export function describeCondition(c: Condition): string {
   const words: Record<Operator, string> = {
     eq: "=", neq: "≠", in: "in", not_in: "not in", contains: "contains", starts_with: "starts with", ends_with: "ends with",
     gt: ">", gte: "≥", lt: "<", lte: "≤", exists: "exists", not_exists: "does not exist", segment: "in segment", not_segment: "not in segment",
+    semver_eq: "version =", semver_neq: "version ≠", semver_gt: "version >", semver_gte: "version ≥", semver_lt: "version <", semver_lte: "version ≤",
+    before: "before", after: "after",
   };
   if (c.op === "segment" || c.op === "not_segment") return `${words[c.op]} ${v}`;
   if (c.op === "exists" || c.op === "not_exists") return `${c.attribute} ${words[c.op]}`;
@@ -363,7 +543,53 @@ export function valueMatchesType(type: FlagType, v: unknown): boolean {
   return v !== undefined; // json: any JSON value
 }
 
-const OPS: Operator[] = ["eq", "neq", "in", "not_in", "contains", "starts_with", "ends_with", "gt", "gte", "lt", "lte", "exists", "not_exists", "segment", "not_segment"];
+/** Every operator this engine evaluates, in the order editors list them. Conditions with any other operator never match. */
+export const OPERATORS: readonly Operator[] = [
+  "eq", "neq", "in", "not_in", "contains", "starts_with", "ends_with", "gt", "gte", "lt", "lte",
+  "semver_eq", "semver_neq", "semver_gt", "semver_gte", "semver_lt", "semver_lte", "before", "after",
+  "exists", "not_exists", "segment", "not_segment",
+];
+const OPS: readonly Operator[] = OPERATORS;
+
+/** Operators that compare semantic versions. */
+export const isSemverOp = (op: string): boolean => SEMVER_OPS.has(op);
+/** Operators that compare points in time. */
+export const isDateOp = (op: string): boolean => op === "before" || op === "after";
+/** The numeric comparison operators (`gt`, `gte`, `lt`, `lte`). */
+export const isNumericOp = (op: string): boolean => op === "gt" || op === "gte" || op === "lt" || op === "lte";
+
+const VERSION_ATTRIBUTE = /version|(^|[^a-z])ver([^a-z]|$)/i;
+
+/**
+ * True when a numeric operator (`gt`/`gte`/`lt`/`lte`) is probably meant as a version comparison: its value is a version
+ * that is not a number (`"4.10.0"`, `"v4.2"`), or the attribute is named like a version (`appVersion`, `os_version`).
+ * Numeric operators compare numbers (`"4.10"` is 4.1, below 4.9); the version operators compare `4.10` above `4.9`.
+ * A warning only: such a condition is valid and keeps its numeric meaning.
+ */
+export function numericVersionWarning(c: Pick<Condition, "attribute" | "op" | "value">): boolean {
+  if (!isNumericOp(c.op)) return false;
+  const v = c.value;
+  if (typeof v === "string" && num(v) === null && parseSemver(v) !== null) return true;
+  return (typeof v === "string" || typeof v === "number") && typeof c.attribute === "string" && VERSION_ATTRIBUTE.test(c.attribute);
+}
+
+/** Non-blocking advice about a flag configuration (saving and publishing are allowed). Human-readable, English. */
+export function flagWarnings(flagKey: string, flag: Pick<FlagConfig, "rules">): string[] {
+  const out: string[] = [];
+  (flag.rules ?? []).forEach((r, i) => {
+    for (const c of r.conditions ?? []) {
+      if (numericVersionWarning(c)) out.push(`${flagKey}: rule ${String(i + 1).padStart(2, "0")} compares "${c.attribute}" as a number (${c.op}); use a version operator (semver_${c.op}) to compare versions such as 4.10.0.`);
+    }
+  });
+  return out;
+}
+
+/** Problem with a condition's comparison value for the version and date operators, or null. */
+export function conditionValueProblem(c: Pick<Condition, "op" | "value">): "version" | "date" | null {
+  if (isSemverOp(c.op)) return parseSemver(c.value) === null ? "version" : null;
+  if (isDateOp(c.op)) return parseInstant(c.value) === null ? "date" : null;
+  return null;
+}
 
 /** Structural validation run before saving and before publishing. Returns human-readable problems. */
 export function validateFlagConfig(flagKey: string, flag: FlagConfig, segments: Record<string, Segment> = {}): string[] {

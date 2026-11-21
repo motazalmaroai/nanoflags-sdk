@@ -21,7 +21,9 @@ import (
 var keyRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,62}$`)
 
 // Operators of targeting conditions, as the evaluation engine accepts them.
-var conditionOps = []string{"eq", "neq", "in", "not_in", "contains", "starts_with", "ends_with", "gt", "gte", "lt", "lte", "exists", "not_exists", "segment", "not_segment"}
+var conditionOps = []string{"eq", "neq", "in", "not_in", "contains", "starts_with", "ends_with", "gt", "gte", "lt", "lte",
+	"semver_eq", "semver_neq", "semver_gt", "semver_gte", "semver_lt", "semver_lte", "before", "after",
+	"exists", "not_exists", "segment", "not_segment"}
 
 var flagTypes = []string{"boolean", "string", "number", "json"}
 var flagPurposes = []string{"release", "experiment", "operational", "permission"}

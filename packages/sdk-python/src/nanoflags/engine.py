@@ -10,6 +10,7 @@ Inputs are JSON documents as produced by :func:`json.loads` (``dict``, ``list``,
 
 from __future__ import annotations
 
+import math
 import re
 import unicodedata
 from dataclasses import dataclass, field
@@ -222,7 +223,213 @@ def match_condition(c: Any, ctx: Any, segments: Any, depth: int = 0) -> bool:
         if op == "lt":
             return a < b
         return a <= b
+    if op in _SEMVER_OPS:
+        return _match_semver(op, actual, value)
+    if op in ("before", "after"):
+        return _match_date(op, actual, value)
     return False
+
+
+# ---------------- versions and dates ----------------
+# Port of parseSemver / compareSemver / parseInstant. Only ASCII is ever valid, so lone surrogates and other
+# non-ASCII characters make a value invalid exactly as in the TypeScript engine.
+
+_MAX_VERSION_LENGTH = 256
+_SEMVER_OPS = ("semver_eq", "semver_neq", "semver_gt", "semver_gte", "semver_lt", "semver_lte")
+_DIGITS = frozenset("0123456789")
+_IDENT = frozenset("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-")
+
+
+def _strip_zeros(d: str) -> str:
+    s = d.lstrip("0")
+    return s if s else "0"
+
+
+def _all_digits(s: str) -> bool:
+    return s != "" and all(ch in _DIGITS for ch in s)
+
+
+def parse_semver(v: Any) -> Optional[tuple]:
+    """``parseSemver``: ``((major, minor, patch), prerelease)`` with digit strings, or ``None``."""
+    if not isinstance(v, str) or not v or not v.isascii() or len(v) > _MAX_VERSION_LENGTH:
+        return None
+    s, n = v, len(v)
+    i = 1 if s[0] in "vV" else 0
+    core: List[str] = []
+    while True:
+        start = i
+        while i < n and s[i] in _DIGITS:
+            i += 1
+        if i == start:
+            return None
+        core.append(_strip_zeros(s[start:i]))
+        if len(core) < 3 and i < n and s[i] == ".":
+            i += 1
+            continue
+        break
+    while len(core) < 3:
+        core.append("0")
+
+    def idents(start: int, stop_at_plus: bool) -> Optional[tuple]:
+        out: List[str] = []
+        j = start
+        while True:
+            while j < n and s[j] in _IDENT:
+                j += 1
+            if j == start:
+                return None
+            out.append(s[start:j])
+            if j < n and s[j] == ".":
+                j += 1
+                start = j
+                continue
+            if j == n or (stop_at_plus and s[j] == "+"):
+                return out, j
+            return None
+
+    pre: List[str] = []
+    if i < n and s[i] == "-":
+        r = idents(i + 1, True)
+        if r is None:
+            return None
+        pre, i = r
+    if i < n and s[i] == "+":
+        r = idents(i + 1, False)
+        if r is None:
+            return None
+        i = r[1]
+    if i != n:
+        return None
+    return tuple(core), pre
+
+
+def _cmp_digits(a: str, b: str) -> int:
+    if len(a) != len(b):
+        return -1 if len(a) < len(b) else 1
+    return -1 if a < b else (1 if a > b else 0)
+
+
+def compare_semver(a: tuple, b: tuple) -> int:
+    """``compareSemver``: SemVer 2.0 precedence, -1 / 0 / 1."""
+    for x, y in zip(a[0], b[0]):
+        c = _cmp_digits(x, y)
+        if c:
+            return c
+    pa, pb = a[1], b[1]
+    if not pa or not pb:
+        return 0 if len(pa) == len(pb) else (1 if not pa else -1)
+    for x, y in zip(pa, pb):
+        xn, yn = _all_digits(x), _all_digits(y)
+        if xn and yn:
+            c = _cmp_digits(_strip_zeros(x), _strip_zeros(y))
+        elif xn:
+            c = -1
+        elif yn:
+            c = 1
+        else:
+            c = -1 if x < y else (1 if x > y else 0)
+        if c:
+            return c
+    return 0 if len(pa) == len(pb) else (-1 if len(pa) < len(pb) else 1)
+
+
+def _days_from_civil(y: int, m: int, d: int) -> int:
+    y -= 1 if m <= 2 else 0
+    era = y // 400
+    yoe = y - era * 400
+    doy = (153 * (m + (-3 if m > 2 else 9)) + 2) // 5 + d - 1
+    doe = yoe * 365 + yoe // 4 - yoe // 100 + doy
+    return era * 146097 + doe - 719468
+
+
+def _digits_at(s: str, i: int, n: int) -> Optional[int]:
+    part = s[i:i + n]
+    if len(part) != n or not all(ch in _DIGITS for ch in part):
+        return None
+    return int(part)
+
+
+def parse_instant(v: Any) -> Optional[float]:
+    """``parseInstant``: Unix epoch milliseconds, or ``None``."""
+    if is_number(v):
+        f = js_to_number(v)
+        if f != f or f in (math.inf, -math.inf):
+            return None
+        return f if abs(f) >= 1e12 else f * 1000
+    if not isinstance(v, str) or not v.isascii() or len(v) > _MAX_VERSION_LENGTH:
+        return None
+    s, n = v, len(v)
+    y, mo, d = _digits_at(s, 0, 4), _digits_at(s, 5, 2), _digits_at(s, 8, 2)
+    if y is None or mo is None or d is None or s[4] != "-" or s[7] != "-":
+        return None
+    if mo < 1 or mo > 12 or d < 1:
+        return None
+    leap = y % 4 == 0 and (y % 100 != 0 or y % 400 == 0)
+    dim = (29 if leap else 28) if mo == 2 else (30 if mo in (4, 6, 9, 11) else 31)
+    if d > dim:
+        return None
+    ms = _days_from_civil(y, mo, d) * 86400000
+    if n == 10:
+        return float(ms)
+    if s[10] not in "Tt ":
+        return None
+    h, mi = _digits_at(s, 11, 2), _digits_at(s, 14, 2)
+    if h is None or mi is None or s[13:14] != ":":
+        return None
+    i, sec, frac = 16, 0, 0
+    if i < n and s[i] == ":":
+        sec = _digits_at(s, i + 1, 2)
+        if sec is None:
+            return None
+        i += 3
+        if i < n and s[i] == ".":
+            j = i + 1
+            while j < n and s[j] in _DIGITS:
+                j += 1
+            if j == i + 1 or j - i - 1 > 9:
+                return None
+            frac = int((s[i + 1:j] + "00")[:3])
+            i = j
+    if h > 23 or mi > 59 or sec > 59 or i >= n:
+        return None
+    ms += h * 3600000 + mi * 60000 + sec * 1000 + frac
+    z = s[i]
+    if z in "Zz" and i + 1 == n:
+        return float(ms)
+    if z in "+-" and i + 6 == n and s[i + 3] == ":":
+        oh, om = _digits_at(s, i + 1, 2), _digits_at(s, i + 4, 2)
+        if oh is None or om is None or oh > 23 or om > 59:
+            return None
+        off = (oh * 60 + om) * 60000
+        return float(ms + off if z == "-" else ms - off)
+    return None
+
+
+def _match_semver(op: str, actual: Any, expected: Any) -> bool:
+    a = parse_semver(actual)
+    b = parse_semver(expected)
+    if a is None or b is None:
+        return False
+    c = compare_semver(a, b)
+    if op == "semver_eq":
+        return c == 0
+    if op == "semver_neq":
+        return c != 0
+    if op == "semver_gt":
+        return c > 0
+    if op == "semver_gte":
+        return c >= 0
+    if op == "semver_lt":
+        return c < 0
+    return c <= 0
+
+
+def _match_date(op: str, actual: Any, expected: Any) -> bool:
+    a = parse_instant(actual)
+    b = parse_instant(expected)
+    if a is None or b is None:
+        return False
+    return a < b if op == "before" else a > b
 
 
 def _match_all(mode: Any, conditions: Any, ctx: Any, segments: Any, depth: int = 0) -> bool:
@@ -241,6 +448,8 @@ _WORDS = {
     "eq": "=", "neq": "≠", "in": "in", "not_in": "not in", "contains": "contains", "starts_with": "starts with",
     "ends_with": "ends with", "gt": ">", "gte": "≥", "lt": "<", "lte": "≤", "exists": "exists",
     "not_exists": "does not exist", "segment": "in segment", "not_segment": "not in segment",
+    "semver_eq": "version =", "semver_neq": "version ≠", "semver_gt": "version >", "semver_gte": "version ≥",
+    "semver_lt": "version <", "semver_lte": "version ≤", "before": "before", "after": "after",
 }
 
 

@@ -4,6 +4,7 @@
   "description": "See NanoFlags feature flags where they are used: hovers with per-environment status, flag key completion, unknown and archived flag warnings, and a flag explorer.",
   "version": "0.1.0",
   "publisher": "nanoflags",
+  "icon": "media/icon.png",
   "license": "Apache-2.0",
   "private": true,
   "homepage": "https://nanoflags.io/docs",

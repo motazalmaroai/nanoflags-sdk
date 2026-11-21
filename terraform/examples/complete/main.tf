@@ -4,7 +4,7 @@
 terraform {
   required_providers {
     nanoflags = {
-      source  = "nanoflags/nanoflags"
+      source  = "registry.nanoflags.io/nanoflags/nanoflags"
       version = "~> 0.1"
     }
   }

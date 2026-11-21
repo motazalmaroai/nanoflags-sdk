@@ -22,7 +22,7 @@ func main() {
 	flag.Parse()
 
 	err := providerserver.Serve(context.Background(), provider.New(version), providerserver.ServeOpts{
-		Address: "registry.terraform.io/nanoflags/nanoflags",
+		Address: "registry.nanoflags.io/nanoflags/nanoflags",
 		Debug:   debug,
 	})
 	if err != nil {

@@ -1,5 +1,14 @@
 # Publishing the Terraform provider
 
+> **Where it is distributed (2026-11-21).** Customers install the provider from NanoFlags' own registry,
+> `source = "registry.nanoflags.io/nanoflags/nanoflags"`. That registry is a Worker in the private monorepo, and it serves
+> the signed GitHub releases of `nanoflags/terraform-provider-nanoflags` directly, so a release appears there within
+> about 5 minutes and needs no other step. The provider is also submitted to the OpenTofu Registry
+> (`registry.opentofu.org/nanoflags/nanoflags`, opentofu/registry issues 6622 and 6624), which indexes new releases
+> automatically. registry.terraform.io is not used for now: publishing there needs an HCP Terraform organization,
+> which the account could not create. The steps below about registry.terraform.io (step 5) are kept for when that is
+> resolved. Signing key: RSA 4096, fingerprint `571CC43E83063DA47D90D85C2B03963035F920A4`.
+
 The Terraform Registry only publishes providers from a **public GitHub repository named
 `terraform-provider-<name>`**, from GitHub releases on **`v<semver>` tags** that carry the zipped binaries, a
 `SHA256SUMS` file, its detached GPG signature and the registry manifest. The provider lives in `terraform/` of this

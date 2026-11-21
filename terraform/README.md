@@ -6,7 +6,7 @@ Manage NanoFlags feature flags, per-environment targeting, segments and publishi
 ```hcl
 terraform {
   required_providers {
-    nanoflags = { source = "nanoflags/nanoflags", version = "~> 0.1" }
+    nanoflags = { source = "registry.nanoflags.io/nanoflags/nanoflags", version = "~> 0.1" }
   }
 }
 
@@ -71,7 +71,7 @@ TF_ACC=1 NANOFLAGS_API_TOKEN=nf_api_… NANOFLAGS_ACC_PROJECT=sandbox NANOFLAGS_
   go test ./internal/provider -run TestAcc -v
 ```
 
-Try a local build with a `dev_overrides` block in `~/.terraformrc` pointing `nanoflags/nanoflags` at the directory of
+Try a local build with a `dev_overrides` block in `~/.terraformrc` pointing `registry.nanoflags.io/nanoflags/nanoflags` at the directory of
 `go build -o <dir>/terraform-provider-nanoflags .`.
 
 Releases: see [PUBLISHING.md](PUBLISHING.md).

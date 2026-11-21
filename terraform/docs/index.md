@@ -44,7 +44,7 @@ cannot be deleted, only archived: destroying a `nanoflags_flag` archives it.
 terraform {
   required_providers {
     nanoflags = {
-      source  = "nanoflags/nanoflags"
+      source  = "registry.nanoflags.io/nanoflags/nanoflags"
       version = "~> 0.1"
     }
   }

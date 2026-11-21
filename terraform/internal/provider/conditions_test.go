@@ -40,6 +40,16 @@ func TestVersionAndDateConditions(t *testing.T) {
 			t.Errorf("%s: %d errors, %d warnings; want %d, %d", tc.name, errs, warns, tc.errs, tc.warns)
 		}
 	}
+	for _, a := range []string{"conversions", "conversion_rate", "totalConversions", "versionCode", "version_code", "server"} {
+		if versionLikeAttribute(a) {
+			t.Errorf("%s should not look like a version", a)
+		}
+	}
+	for _, a := range []string{"version", "appVersion", "OSVersion", "os_version", "os-version", "build.version", "app.ver"} {
+		if !versionLikeAttribute(a) {
+			t.Errorf("%s should look like a version", a)
+		}
+	}
 	for _, op := range []string{"semver_eq", "semver_neq", "semver_gt", "semver_gte", "semver_lt", "semver_lte", "before", "after"} {
 		found := false
 		for _, o := range conditionOps {

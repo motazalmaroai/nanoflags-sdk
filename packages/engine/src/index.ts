@@ -558,7 +558,28 @@ export const isDateOp = (op: string): boolean => op === "before" || op === "afte
 /** The numeric comparison operators (`gt`, `gte`, `lt`, `lte`). */
 export const isNumericOp = (op: string): boolean => op === "gt" || op === "gte" || op === "lt" || op === "lte";
 
-const VERSION_ATTRIBUTE = /version|(^|[^a-z])ver([^a-z]|$)/i;
+/**
+ * Words of an attribute name: split at camelCase humps, `_`, `-`, `.`, spaces and other separators, lower-cased
+ * (`appVersion` → app, version; `OSVersion` → os, version; `os_ver` → os, ver).
+ */
+export function attributeWords(name: string): string[] {
+  return name
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
+    .split(/[^A-Za-z0-9]+/)
+    .filter(Boolean)
+    .map((w) => w.toLowerCase());
+}
+
+/**
+ * An attribute named like a version: a word `version` or `ver` (`appVersion`, `os_ver`, `build.version`), but not a
+ * version code (`versionCode`, `version_code`: Android's integer, compared numerically on purpose). Words containing
+ * "ver" (`conversions`, `totalConversions`, `server`) do not count.
+ */
+export function versionLikeAttribute(name: string): boolean {
+  const w = attributeWords(name);
+  return w.some((x) => x === "version" || x === "ver") && !w.includes("code");
+}
 
 /**
  * True when a numeric operator (`gt`/`gte`/`lt`/`lte`) is probably meant as a version comparison: its value is a version
@@ -570,7 +591,7 @@ export function numericVersionWarning(c: Pick<Condition, "attribute" | "op" | "v
   if (!isNumericOp(c.op)) return false;
   const v = c.value;
   if (typeof v === "string" && num(v) === null && parseSemver(v) !== null) return true;
-  return (typeof v === "string" || typeof v === "number") && typeof c.attribute === "string" && VERSION_ATTRIBUTE.test(c.attribute);
+  return (typeof v === "string" || typeof v === "number") && typeof c.attribute === "string" && versionLikeAttribute(c.attribute);
 }
 
 /** Non-blocking advice about a flag configuration (saving and publishing are allowed). Human-readable, English. */

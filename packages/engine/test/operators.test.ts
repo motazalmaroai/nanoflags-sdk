@@ -130,6 +130,10 @@ describe("advice", () => {
     expect(numericVersionWarning({ attribute: "os_ver", op: "lte", value: "17" })).toBe(true);
     expect(numericVersionWarning({ attribute: "age", op: "gt", value: "18" })).toBe(false);
     expect(numericVersionWarning({ attribute: "server", op: "gt", value: 3 })).toBe(false);
+    for (const attribute of ["conversions", "conversion_rate", "totalConversions", "versionCode", "version_code", "app.versionCode", "reverse", "overVoltage"])
+      expect([attribute, numericVersionWarning({ attribute, op: "gt", value: 3 })]).toEqual([attribute, false]);
+    for (const attribute of ["version", "appVersion", "OSVersion", "os_version", "os-version", "build.version", "app.ver", "VERSION", "versionName"])
+      expect([attribute, numericVersionWarning({ attribute, op: "gt", value: 3 })]).toEqual([attribute, true]);
     expect(numericVersionWarning({ attribute: "appVersion", op: "semver_gt", value: "4.10.0" })).toBe(false);
     expect(flagWarnings("f", { rules: [{ id: "r", match: "all", conditions: [{ attribute: "build", op: "gt", value: "4.10.0" }], serve: { type: "fixed", value: true } }] }))
       .toEqual(['f: rule 01 compares "build" as a number (gt); use a version operator (semver_gt) to compare versions such as 4.10.0.']);

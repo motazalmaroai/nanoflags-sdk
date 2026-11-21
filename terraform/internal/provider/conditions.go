@@ -9,6 +9,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"regexp"
+	"strings"
 
 	"github.com/motazalmaroai/terraform-provider-nanoflags/internal/client"
 )
@@ -89,10 +90,38 @@ func validateConditions(conds []conditionModel, base path.Path, diags *diag.Diag
 }
 
 var (
-	versionValue     = regexp.MustCompile(`^"[vV]?[0-9]+(\.[0-9]+){0,2}([-+][0-9A-Za-z.+-]*)?"$`)
-	plainNumber      = regexp.MustCompile(`^"?-?[0-9]+(\.[0-9]+)?"?$`)
-	versionAttribute = regexp.MustCompile(`(?i)version|(^|[^a-z])ver([^a-z]|$)`)
+	versionValue = regexp.MustCompile(`^"[vV]?[0-9]+(\.[0-9]+){0,2}([-+][0-9A-Za-z.+-]*)?"$`)
+	plainNumber  = regexp.MustCompile(`^"?-?[0-9]+(\.[0-9]+)?"?$`)
+	lowerUpper   = regexp.MustCompile(`([a-z0-9])([A-Z])`)
+	acronymWord  = regexp.MustCompile(`([A-Z]+)([A-Z][a-z])`)
+	nonWord      = regexp.MustCompile(`[^A-Za-z0-9]+`)
 )
+
+// attributeWords splits an attribute name at camelCase humps and separators, lower-cased (attributeWords in the
+// evaluation engine): appVersion → app, version; OSVersion → os, version; os_ver → os, ver.
+func attributeWords(name string) []string {
+	s := acronymWord.ReplaceAllString(lowerUpper.ReplaceAllString(name, "$1 $2"), "$1 $2")
+	var out []string
+	for _, w := range nonWord.Split(s, -1) {
+		if w != "" {
+			out = append(out, strings.ToLower(w))
+		}
+	}
+	return out
+}
+
+// versionLikeAttribute: a word "version" or "ver", but not a version code (versionCode is Android's integer).
+// Words merely containing "ver" (conversions, server) do not count. Same rule as the evaluation engine.
+func versionLikeAttribute(name string) bool {
+	found := false
+	for _, w := range attributeWords(name) {
+		if w == "code" {
+			return false
+		}
+		found = found || w == "version" || w == "ver"
+	}
+	return found
+}
 
 // looksLikeVersion reports whether a numeric condition probably means a version comparison: its JSON value is a
 // version string that is not a plain number ("4.10.0", "v4"), or the attribute is named like a version. Same rule as
@@ -101,7 +130,7 @@ func looksLikeVersion(jsonValue, attribute string) bool {
 	if versionValue.MatchString(jsonValue) && !plainNumber.MatchString(jsonValue) {
 		return true
 	}
-	return versionAttribute.MatchString(attribute)
+	return versionLikeAttribute(attribute)
 }
 
 func conditionsToAPI(conds []conditionModel) []client.Condition {

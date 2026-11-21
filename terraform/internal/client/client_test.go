@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/motazalmaroai/terraform-provider-nanoflags/internal/client"
-	"github.com/motazalmaroai/terraform-provider-nanoflags/internal/fakeapi"
+	"github.com/nanoflags/terraform-provider-nanoflags/internal/client"
+	"github.com/nanoflags/terraform-provider-nanoflags/internal/fakeapi"
 )
 
 func newClient(t *testing.T) (*client.Client, *fakeapi.Server) {

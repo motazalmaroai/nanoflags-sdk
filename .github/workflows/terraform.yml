@@ -3,7 +3,7 @@ name: Terraform provider
 # Builds and tests terraform/ (terraform-provider-nanoflags) on pull requests and pushes. It publishes only on a tag
 # terraform-v<version> (e.g. terraform-v0.1.0), never on a branch:
 #   1. tests again, then checks that terraform/CHANGELOG.md has a "## <version>" entry;
-#   2. splits terraform/ into the mirror repository (default motazalmaroai/terraform-provider-nanoflags; repository
+#   2. splits terraform/ into the mirror repository (default nanoflags/terraform-provider-nanoflags; repository
 #      variable TERRAFORM_PROVIDER_REPO overrides it) and tags it v<version>, because the Terraform Registry only reads
 #      repositories named terraform-provider-<name> with v<semver> tags;
 #   3. runs GoReleaser in that mirror checkout: signed SHA256SUMS + manifest on a GitHub release of the mirror, which the
@@ -92,7 +92,7 @@ jobs:
     timeout-minutes: 30
     environment: terraform-registry
     env:
-      MIRROR: ${{ vars.TERRAFORM_PROVIDER_REPO || 'motazalmaroai/terraform-provider-nanoflags' }}
+      MIRROR: ${{ vars.TERRAFORM_PROVIDER_REPO || 'nanoflags/terraform-provider-nanoflags' }}
     steps:
       - uses: actions/checkout@v4
         with:

@@ -14,7 +14,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
-	"github.com/motazalmaroai/terraform-provider-nanoflags/internal/client"
+	"github.com/nanoflags/terraform-provider-nanoflags/internal/client"
 )
 
 // apiTokenRE is the shape of a Management API token (the same check as the NanoFlags CLI).

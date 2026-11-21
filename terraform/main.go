@@ -8,7 +8,7 @@ import (
 
 	"github.com/hashicorp/terraform-plugin-framework/providerserver"
 
-	"github.com/motazalmaroai/terraform-provider-nanoflags/internal/provider"
+	"github.com/nanoflags/terraform-provider-nanoflags/internal/provider"
 )
 
 // version is set by GoReleaser at release time.

@@ -20,7 +20,7 @@ Until the secrets below exist, the tag only runs the tests and leaves a notice. 
 
 ## One-time setup (founder)
 
-1. **Create the mirror repository** `motazalmaroai/terraform-provider-nanoflags` (public, empty, no README). Its
+1. **Create the mirror repository** `nanoflags/terraform-provider-nanoflags` (public, empty, no README). Its
    description can say "Generated from nanoflags-sdk/terraform; open issues and pull requests there". Another owner
    or name works if it starts with `terraform-provider-`: set the repository variable `TERRAFORM_PROVIDER_REPO`
    (e.g. `nanoflags/terraform-provider-nanoflags`) in this repository. If the owner changes, also change the module

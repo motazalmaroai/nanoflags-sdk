@@ -1,4 +1,4 @@
-module github.com/motazalmaroai/terraform-provider-nanoflags
+module github.com/nanoflags/terraform-provider-nanoflags
 
 go 1.25.8
 

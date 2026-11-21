@@ -16,7 +16,7 @@ import (
 	tfresource "github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
 
-	"github.com/motazalmaroai/terraform-provider-nanoflags/internal/fakeapi"
+	"github.com/nanoflags/terraform-provider-nanoflags/internal/fakeapi"
 )
 
 var protoV6 = map[string]func() (tfprotov6.ProviderServer, error){

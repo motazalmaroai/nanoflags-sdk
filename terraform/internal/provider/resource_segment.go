@@ -13,7 +13,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
-	"github.com/motazalmaroai/terraform-provider-nanoflags/internal/client"
+	"github.com/nanoflags/terraform-provider-nanoflags/internal/client"
 )
 
 var (

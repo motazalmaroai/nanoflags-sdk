@@ -8,7 +8,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/datasource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
-	"github.com/motazalmaroai/terraform-provider-nanoflags/internal/client"
+	"github.com/nanoflags/terraform-provider-nanoflags/internal/client"
 )
 
 type baseDataSource struct{ c *client.Client }

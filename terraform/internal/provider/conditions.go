@@ -11,7 +11,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/motazalmaroai/terraform-provider-nanoflags/internal/client"
+	"github.com/nanoflags/terraform-provider-nanoflags/internal/client"
 )
 
 type conditionModel struct {

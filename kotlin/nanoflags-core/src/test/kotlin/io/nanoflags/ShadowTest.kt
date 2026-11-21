@@ -162,6 +162,27 @@ class ShadowTest {
         }
     }
 
+    /** Regression: the shadow fetch can finish before the live bundle's verification pins the environment. */
+    @Test
+    fun aShadowBundleWaitsForTheLiveEnvironmentBeforeItIsChecked() = runBlocking {
+        val otherEnv = "6f0c7c1e-0000-4000-8000-000000000999"
+        val c = client()
+        val errors = errorsOf(c)
+        assertTrue(c.waitUntilReady())
+        assertEquals(ENV, c.pinned)
+        announce(response = { edge.shadowResponse(draft(), SESSION, DRAFT, env = otherEnv, markerEnv = otherEnv) })
+        c.pinnedEnvironment = null // as if the first live verification were still running
+        c.shadow.note("$SESSION.$DRAFT")
+        eventually(what = "shadow fetch") { edge.shadowRequests.get() >= 1 }
+        Thread.sleep(300)
+        assertFalse(c.shadow.active) // waiting, not accepted
+        assertTrue(errors.isEmpty())
+        c.pinnedEnvironment = ENV
+        settleRejected(errors)
+        assertFalse(c.shadow.active)
+        assertEquals(listOf(ErrorCode.SHADOW), errors.map { it.code })
+    }
+
     @Test
     fun aShadowBundleIsNeverAppliedAsConfiguration() = runBlocking {
         val c = client()

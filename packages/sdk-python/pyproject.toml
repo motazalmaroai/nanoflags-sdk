@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "nanoflags"
-version = "0.3.0"
+version = "0.3.1"
 description = "NanoFlags server SDK for Python: local, deterministic feature-flag evaluation with signed live updates."
 readme = "README.md"
 requires-python = ">=3.9"

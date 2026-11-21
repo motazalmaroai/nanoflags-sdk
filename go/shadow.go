@@ -585,9 +585,15 @@ func (c *Client) fetchShadow(want shadowID) {
 		reject("it is not signed.")
 		return
 	}
+	// Bound to the environment of the verified live configuration. The announcement also comes with a /v1/bundle
+	// answer that failed verification (nothing pinned): then the shadow bundle is not used (the fetch runs right
+	// after the sync, so a verified answer has always pinned by now). Without verification nothing is ever pinned.
 	c.mu.Lock()
 	pinned := c.pinnedEnvironment
 	c.mu.Unlock()
+	if c.verifier != nil && pinned == "" {
+		return // no verified live configuration yet: a later announcement retries
+	}
 	if pinned != "" && pinned != envID {
 		reject("it was signed for a different environment.")
 		return

@@ -156,6 +156,48 @@ describe("shadow evaluation", () => {
     expect(errors[0]!.code).toBe("shadow");
   });
 
+  it("waits for the live bundle's verification before checking the shadow bundle's environment (no race)", async () => {
+    // The live /v1/bundle body arrives late, so its verification (which pins the environment) finishes after the
+    // shadow fetch. A shadow bundle validly signed for another environment must still be refused.
+    const live = makeBundle(3);
+    const otherEnv = "6f0c7c1e-0000-4000-8000-000000000999";
+    const edge = mockRoutes({
+      "/v1/bundle": await liveResponse(signer, live),
+      "/v1/shadow": await shadowResponse(signer, draftOf(live), { environmentId: otherEnv, marker: marker({ environmentId: otherEnv }) }),
+      "/v1/events": new Response("{}", { status: 202 }),
+    });
+    let shadowDone = false;
+    const slow: typeof fetch = async (input, init) => {
+      const res = await edge.fetch(input, init);
+      const path = new URL(String(input instanceof Request ? input.url : input)).pathname;
+      if (path === "/v1/shadow") {
+        const text = await res.text();
+        shadowDone = true;
+        return new Response(text, { status: res.status, headers: res.headers });
+      }
+      if (path !== "/v1/bundle") return res;
+      const text = await res.text();
+      const body = new ReadableStream<Uint8Array>({
+        async start(ctrl) {
+          for (let i = 0; i < 200 && !shadowDone; i++) await new Promise((r) => setTimeout(r, 5));
+          await new Promise((r) => setTimeout(r, 20));
+          ctrl.enqueue(new TextEncoder().encode(text));
+          ctrl.close();
+        },
+      });
+      return new Response(body, { status: res.status, headers: res.headers });
+    };
+    const c = client({ fetch: slow, shadow: { sampleRate: 1 } });
+    const errors = errorsOf(c);
+    await c.ready();
+    expect(shadowDone).toBe(true); // the shadow answer was in before the live bundle was verified
+    await settle();
+    c.boolean("checkout-v2", true, { region: "DE" });
+    await c.flush();
+    expect(shadowOf(edge.last("/v1/events")!.body)).toBeUndefined();
+    expect(errors.map((e) => e.code)).toEqual(["shadow"]);
+  });
+
   it("a shadow bundle is never applied as configuration, even when served (validly signed) as a bundle", async () => {
     const live = makeBundle(3);
     const draft = { ...draftOf(makeBundle(4)), shadow: marker() } as unknown as Bundle;

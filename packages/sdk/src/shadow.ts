@@ -55,6 +55,8 @@ export const MAX_SHADOW_FLAG_KEY = 63;
 export const SHADOW_FLUSH_MS = 60_000;
 /** A failed shadow fetch is not retried for the same announcement before this. */
 export const SHADOW_RETRY_MS = 60_000;
+/** How long a shadow bundle waits for the live configuration's first verification to pin the environment. */
+export const SHADOW_PIN_WAIT_MS = 10_000;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const CHECKSUM = /^[0-9a-f]{32}$/;

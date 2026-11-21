@@ -35,6 +35,9 @@ const Duration shadowFlushInterval = Duration(minutes: 1);
 /// A failed shadow fetch is not retried for the same announcement before this.
 const Duration shadowRetryInterval = Duration(minutes: 1);
 
+/// How long a shadow bundle waits for the live configuration's first verification to pin the environment.
+const Duration shadowPinWait = Duration(seconds: 10);
+
 /// Reported instead of a value that did not come from a bundle: the application's own fallback.
 const String fallbackToken = '<fallback>';
 

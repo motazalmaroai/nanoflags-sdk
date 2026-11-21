@@ -130,6 +130,30 @@ class NanoFlagsClient {
   SignatureInfo? _sig;
   String? _rawText;
   String? _pinnedEnvironment;
+  /// Shadow fetches waiting for the first verification to pin the environment ([_awaitPinnedEnvironment]).
+  final List<Completer<void>> _pinWaiters = [];
+
+  void _pin(String environmentId) {
+    _pinnedEnvironment = environmentId;
+    for (final w in _pinWaiters) {
+      if (!w.isCompleted) w.complete();
+    }
+    _pinWaiters.clear();
+  }
+
+  /// The environment the live configuration was verified for, waiting up to [timeout] for the first verification.
+  Future<String?> _awaitPinnedEnvironment([Duration timeout = shadowPinWait]) async {
+    if (_pinnedEnvironment != null || _closed) return _pinnedEnvironment;
+    final w = Completer<void>();
+    _pinWaiters.add(w);
+    final timer = Timer(timeout, () {
+      _pinWaiters.remove(w);
+      if (!w.isCompleted) w.complete();
+    });
+    await w.future;
+    timer.cancel();
+    return _pinnedEnvironment;
+  }
   NanoFlagsStatus _status = NanoFlagsStatus.notReady;
   int _version = 0;
   bool _closed = false;
@@ -371,6 +395,10 @@ class NanoFlagsClient {
     if (_closed) return;
     final last = _flush(shadowNow: true);
     _closed = true;
+    for (final w in _pinWaiters) {
+      if (!w.isCompleted) w.complete();
+    }
+    _pinWaiters.clear();
     _pollTimer?.cancel();
     _flushTimer?.cancel();
     _liveTimer?.cancel();
@@ -563,7 +591,7 @@ class NanoFlagsClient {
       }
       _sig = sig;
       _rawText = raw;
-      if (sig != null) _pinnedEnvironment ??= sig.environmentId;
+      if (sig != null && _pinnedEnvironment == null) _pin(sig.environmentId);
       final etag = p['etag'], checksum = p['checksum'];
       // A restored bundle is usable but not known to be current: stale until the edge confirms it.
       _adopt(b, etag: etag is String ? etag : null, checksum: checksum is String ? checksum : null, status: NanoFlagsStatus.stale, source: UpdateSource.store);
@@ -643,7 +671,7 @@ class NanoFlagsClient {
     }
     // The edge embeds the stored bundle text byte-for-byte: that exact text is what was signed.
     if (!await verifyBundleText(keys, info, raw)) throw reject('its signature does not verify.');
-    _pinnedEnvironment = environmentId;
+    _pin(environmentId);
     return _Checked(bundle, info, raw);
   }
 
@@ -893,7 +921,7 @@ class NanoFlagsClient {
       if (_checksum == null || _checksum == pushedChecksum) _setStatus(NanoFlagsStatus.ready);
       return;
     }
-    if (info != null) _pinnedEnvironment = info.environmentId;
+    if (info != null) _pin(info.environmentId);
     _sig = info;
     _rawText = text;
     _liveRevision = revision;
@@ -1247,7 +1275,13 @@ class NanoFlagsClient {
       final kid = res.headers['x-nanoflags-key-id'];
       final environmentId = res.headers['x-nanoflags-environment-id'];
       if (signature == null || signature.isEmpty || environmentId == null || environmentId.isEmpty || raw == null) return reject('it is not signed.');
-      if (_pinnedEnvironment != null && _pinnedEnvironment != environmentId) return reject('it was signed for a different environment.');
+      // Bound to the environment of the verified live configuration. The announcement comes with a /v1/bundle answer
+      // whose own verification (which pins the environment) may still be running: wait for it rather than skip the
+      // check. Without verification nothing is ever pinned.
+      final pinned = _verify != null ? await _awaitPinnedEnvironment() : _pinnedEnvironment;
+      if (_closed) return;
+      if (_verify != null && pinned == null) return; // no verified live configuration yet: the next announcement retries
+      if (pinned != null && pinned != environmentId) return reject('it was signed for a different environment.');
       var ok = false;
       try {
         ok = await verifyShadowText(await _shadowKeys(kid),

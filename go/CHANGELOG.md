@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.1 — 2026-11-21
+
+Security fix to the integrity of shadow reports; served flag values are not affected (shadow bundles are
+never applied as configuration).
+
+- A shadow bundle is only used once the environment of a verified live bundle is known, and only when it was signed
+  for that environment. Before, a shadow bundle checked while no environment was pinned yet (the /v1/bundle answer
+  that announced it failed verification) was not bound to an environment, so one validly signed for another
+  environment of the same project could feed the shadow counters reported for change approvals. Without signature
+  verification configured, nothing changes.
+
 ## 0.4.0 — 2026-11-21
 
 Additive, no breaking changes.

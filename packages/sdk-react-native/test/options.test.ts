@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createClient, type NanoFlagsError, type ReactNativeClient, type ReactNativeClientOptions } from "../src/index";
 import { AppState } from "./react-native-shim";
 import { BASE, CLIENT_KEY, FakeEdge, FakeSocket, makeBundle, makeSigner, waitFor } from "./helpers";
+import { sha256Hex, shadowCanonicalString } from "../../sdk/src/verify";
 
 // Options of the core client that the React Native client passes through (0.3.0): shadow evaluation (with
 // serviceVersion), verifyLog, coSignerKeys / allowEmergencyWithoutCosign and experiments.
@@ -46,6 +47,49 @@ type ShadowReport = { sessionId: string; checksum: string; version?: string; fla
 const shadowOf = (body: unknown) => (body as { shadow?: ShadowReport }).shadow;
 
 describe("shadow evaluation", () => {
+  it("refuses a shadow bundle signed for another environment even when it arrives before the live bundle is verified", async () => {
+    const otherEnv = "6f0c7c1e-0000-4000-8000-000000000999";
+    let shadowServed = false;
+    const { client, edge, errors } = await setup({ shadow: { sampleRate: 1 } }, async (e) => {
+      const live = e.bundle;
+      const draft = { ...live, flags: { ...live.flags, accent: { ...live.flags.accent!, default: "green" } } };
+      const text = JSON.stringify({ ...draft, shadow: { sessionId: SESSION, checksum: DRAFT, environmentId: otherEnv, baseRevision: live.revision } });
+      const signature = await e.signer.sign(shadowCanonicalString(otherEnv, SESSION, DRAFT, await sha256Hex(text)));
+      e.bundleHeaders["X-NanoFlags-Shadow"] = `${SESSION}.${DRAFT}`;
+      e.routes["/v1/shadow"] = () => {
+        shadowServed = true;
+        return new Response(`{"sessionId":"${SESSION}","checksum":"${DRAFT}","baseRevision":${live.revision},"bundle":${text}}`, {
+          status: 200,
+          headers: { "Content-Type": "application/json", "X-NanoFlags-Signed": "true", "X-NanoFlags-Signature": signature, "X-NanoFlags-Key-Id": e.kid, "X-NanoFlags-Environment-Id": otherEnv },
+        });
+      };
+      // The live bundle's body arrives only after the shadow answer: its verification pins the environment late.
+      const inner = e.fetch;
+      e.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const res = await inner(input, init);
+        if (new URL(String(input)).pathname !== "/v1/bundle") return res;
+        const body = await res.text();
+        const stream = new ReadableStream<Uint8Array>({
+          async start(ctrl) {
+            for (let i = 0; i < 200 && !shadowServed; i++) await new Promise((r) => setTimeout(r, 5));
+            await new Promise((r) => setTimeout(r, 20));
+            ctrl.enqueue(new TextEncoder().encode(body));
+            ctrl.close();
+          },
+        });
+        return new Response(stream, { status: res.status, headers: res.headers });
+      }) as typeof fetch;
+    });
+    await client.ready();
+    expect(shadowServed).toBe(true);
+    await new Promise((r) => setTimeout(r, 50));
+    client.string("accent", "fallback");
+    await client.flush();
+    const events = edge.calls.filter((c) => c.path === "/v1/events").at(-1);
+    expect(shadowOf(events?.body)).toBeUndefined();
+    expect(errors.map((e) => e.code)).toEqual(["shadow"]);
+  });
+
   it("is on by default when events are on: the draft is loaded, but the app keeps the live value", async () => {
     const { client, edge, errors } = await setup({}, withDraft);
     await client.ready();
@@ -64,7 +108,7 @@ describe("shadow evaluation", () => {
     client.boolean("new-checkout", false); // unchanged by the draft: not shadowed
     await client.flush();
     const body = edge.last("/v1/events")!.body as { sdk: string };
-    expect(body.sdk).toBe("react-native/0.4.0");
+    expect(body.sdk).toBe("react-native/0.4.1");
     expect(shadowOf(body)).toEqual({
       sessionId: SESSION,
       checksum: DRAFT,

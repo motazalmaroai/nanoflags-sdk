@@ -791,3 +791,42 @@ func TestServiceVersionIsTrimmedAndBounded(t *testing.T) {
 		t.Fatal(utf16Len(cfg.serviceVersion))
 	}
 }
+
+// Regression: the shadow bundle announced with a live answer that failed verification (nothing pinned yet) must not be
+// used, even when it is validly signed: it may be signed for another environment.
+func TestShadowNotUsedBeforeALiveBundleVerified(t *testing.T) {
+	const otherEnv = "6f0c7c1e-0000-4000-8000-000000000999"
+	e := newFakeEdge(t)
+	e.set(3, liveText)
+	m := e.marker()
+	m.EnvironmentID = otherEnv
+	e.setShadow(draftText, m, shadowServe{environment: otherEnv})
+	e.mu.Lock()
+	e.corrupt = true
+	e.mu.Unlock()
+	opts := e.options(WithEvents(EventsOptions{SampleRate: -1, FlushInterval: time.Hour}), WithShadow(ShadowOptions{SampleRate: 1}),
+		WithService("checkout-service"), WithServiceVersion("3.1.0"), WithStreaming(false))
+	c := must(t)(New(testKey, opts...))
+	r := record(c)
+	eventually(t, "the shadow fetch after the rejected live bundle", func() bool { return e.count("/v1/shadow") >= 1 })
+	settle(c)
+	e.mu.Lock()
+	e.corrupt = false
+	e.mu.Unlock()
+	if err := c.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if c.Revision() != 3 {
+		t.Fatalf("revision %d", c.Revision())
+	}
+	c.BoolVariation("checkout-v2", Context{"region": "DE"}, true)
+	flush(t, c)
+	if e.lastShadow(t) != nil {
+		t.Fatal("a shadow bundle signed for another environment was used before the environment was pinned")
+	}
+	for _, code := range r.codes() {
+		if code != ErrSignature && code != ErrShadow {
+			t.Fatalf("unexpected error %s", code)
+		}
+	}
+}

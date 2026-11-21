@@ -57,7 +57,7 @@ __all__ = [
     "VerifyOptions",
 ]
 
-SDK_VERSION = "0.3.0"
+SDK_VERSION = "0.3.1"
 SUPPORTED_ENGINE_VERSION = ENGINE_VERSION
 #: WebSocket close code of the edge for a deleted environment: the client stops reconnecting.
 CLOSE_ENVIRONMENT_DELETED = 4004
@@ -1370,7 +1370,13 @@ class NanoFlags:
         environment_id = res.headers.get("X-NanoFlags-Environment-Id")
         if not signature or not environment_id or raw is None:
             return reject("it is not signed.")
-        if self._pinned_env is not None and self._pinned_env != environment_id:
+        # Bound to the environment of the verified live configuration. The announcement also comes with a /v1/bundle
+        # answer that failed verification (nothing pinned): then the shadow bundle is not used (the fetch runs right
+        # after the sync, so a verified answer has always pinned by now). Without verification nothing is pinned.
+        pinned = self._pinned_env
+        if self._verify and pinned is None:
+            return None  # no verified live configuration yet: a later announcement retries
+        if pinned is not None and pinned != environment_id:
             return reject("it was signed for a different environment.")
         try:
             ok = verify_shadow_text(self._shadow_verify_keys(kid), signature, kid, environment_id, want["sessionId"], want["checksum"], raw)

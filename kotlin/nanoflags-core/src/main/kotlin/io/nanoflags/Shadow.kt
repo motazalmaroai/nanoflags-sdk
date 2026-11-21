@@ -42,6 +42,9 @@ internal object ShadowWire {
     const val FLUSH_MS = 60_000L
     /** A failed shadow fetch is not retried for the same announcement before this. */
     const val RETRY_MS = 60_000L
+
+    /** How long a shadow bundle waits for the live configuration's first verification to pin the environment. */
+    const val PIN_WAIT_MS = 10_000L
     /** Reported instead of a value that did not come from a bundle: the application's own default. */
     const val FALLBACK_TOKEN = "<fallback>"
 
@@ -296,6 +299,16 @@ internal class ShadowEvaluator(private val client: NanoFlags, private val opts: 
     }
 
     /** `X-NanoFlags-Shadow` of a fresh `/v1/bundle` answer (200 or 304): fetch the announced shadow bundle, or drop the one in use. */
+    /** The environment the live configuration was verified for, waiting up to [timeoutMs] for the first verification. */
+    internal suspend fun awaitPinnedEnvironment(timeoutMs: Long = ShadowWire.PIN_WAIT_MS): String? {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (true) {
+            client.pinned?.let { return it }
+            if (client.isClosed || System.currentTimeMillis() >= deadline) return null
+            kotlinx.coroutines.delay(20)
+        }
+    }
+
     fun note(header: String?) {
         if (!enabled || client.isClosed) return
         val want = ShadowWire.parseHeader(header) ?: return drop()
@@ -345,7 +358,11 @@ internal class ShadowEvaluator(private val client: NanoFlags, private val opts: 
             val kid = headers["X-NanoFlags-Key-Id"]
             val environmentId = headers["X-NanoFlags-Environment-Id"]
             if (signature.isNullOrEmpty() || environmentId.isNullOrEmpty() || raw == null) return reject("it is not signed.")
-            val pinned = client.pinned
+            // Bound to the environment of the verified live configuration. The announcement comes with a /v1/bundle
+            // answer whose own verification (which pins the environment) may still be running: wait for it rather
+            // than skip the check. Without verification nothing is ever pinned.
+            val pinned = if (client.verifier != null) awaitPinnedEnvironment() ?: return else client.pinned
+            if (client.isClosed) return
             if (pinned != null && pinned != environmentId) return reject("it was signed for a different environment.")
             val ok = try {
                 Signatures.verifyShadow(keysFor(kid), signature, kid, environmentId, want.sessionId, want.checksum, raw)

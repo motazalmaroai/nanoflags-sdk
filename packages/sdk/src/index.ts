@@ -16,7 +16,7 @@ import { OFFICIAL_EDGE_URL, OFFICIAL_SIGNING_KEYS } from "./keys.js";
 import { defaultStore, type Store } from "./store.js";
 import { readSse } from "./sse.js";
 import { importPublicKeys, isPublicEd25519Jwk, rawMember, verifyBundleText, verifyShadowText, type ImportedKey, type SignatureCrypto, type SignatureInfo, type VerifyOptions } from "./verify.js";
-import { changedFlags, isShadowMarker, parseShadowHeader, ShadowCounters, SHADOW_FLUSH_MS, SHADOW_RETRY_MS, type ShadowBundle, type ShadowOptions } from "./shadow.js";
+import { changedFlags, isShadowMarker, parseShadowHeader, ShadowCounters, SHADOW_FLUSH_MS, SHADOW_PIN_WAIT_MS, SHADOW_RETRY_MS, type ShadowBundle, type ShadowOptions } from "./shadow.js";
 import { checkEvidence, decodeEvidence, isLogEvidence, isTreeHead, onlyTurnsFlagsOff, verifyConsistency, verifyHead, type LogEvidence, type TreeHead } from "./log.js";
 
 export type { Bundle, Context, Evaluation, ExperimentMeta, JsonValue, Reason } from "@nanoflags/engine";
@@ -27,7 +27,7 @@ export type { ShadowOptions, ShadowReport } from "./shadow.js";
 export { headText, leafHash, onlyTurnsFlagsOff, parseLeaf, verifyConsistency, verifyInclusion, type LogEvidence, type LogLeaf, type TreeHead } from "./log.js";
 export { OFFICIAL_EDGE_URL, OFFICIAL_SIGNING_KEYS } from "./keys.js";
 
-export const SDK_VERSION = "0.8.0";
+export const SDK_VERSION = "0.8.1";
 
 /** Newest bundle format (`bundle.engine`) this SDK can evaluate. Newer bundles are refused; the previous one stays in use. */
 export const SUPPORTED_ENGINE_VERSION = ENGINE_VERSION;
@@ -530,6 +530,29 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
   let keysFetchedAt = 0;
   let keysFetching: Promise<void> | null = null;
   let pinnedEnvironment: string | null = null;
+  /** Shadow fetches waiting for the first verification to pin the environment (`awaitPinnedEnvironment`). */
+  let pinWaiters: Array<() => void> = [];
+  function pin(environmentId: string) {
+    pinnedEnvironment = environmentId;
+    const waiting = pinWaiters;
+    pinWaiters = [];
+    for (const w of waiting) w();
+  }
+  /** The environment the live configuration was verified for, waiting up to `ms` for the first verification. */
+  function awaitPinnedEnvironment(ms = SHADOW_PIN_WAIT_MS): Promise<string | null> {
+    if (pinnedEnvironment !== null || closed) return Promise.resolve(pinnedEnvironment);
+    return new Promise((resolve) => {
+      const done = () => {
+        clearTimeout(timer);
+        resolve(pinnedEnvironment);
+      };
+      const timer = setTimeout(() => {
+        pinWaiters = pinWaiters.filter((w) => w !== done);
+        resolve(null);
+      }, ms);
+      pinWaiters.push(done);
+    });
+  }
   let sig: SignatureInfo | null = null;
   let rawText: string | null = null;
   const sessions = new Map<string, { promise: Promise<SessionState | null>; until: number }>();
@@ -671,7 +694,7 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
       }
       sig = restoredSig;
       rawText = restoredRaw;
-      if (restoredSig) pinnedEnvironment ??= restoredSig.environmentId;
+      if (restoredSig && pinnedEnvironment === null) pin(restoredSig.environmentId);
       // A restored bundle is usable but not known to be current: stale until the edge confirms it.
       adopt(restored, { etag: p.etag ?? null, checksum: p.checksum ?? null, status: "stale", source: "store" });
     } catch {
@@ -776,11 +799,11 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
       if (raw !== null && raw !== again && (await verifyBundleText(keys, info, raw, cryptoImpl))) {
         const parsed: unknown = JSON.parse(raw);
         if (isBundle(parsed) && parsed.revision === revision) {
-          pinnedEnvironment = environmentId;
+          pin(environmentId);
           return { bundle: parsed, sig: info, raw };
         }
       } else if (await verifyBundleText(keys, info, again, cryptoImpl)) {
-        pinnedEnvironment = environmentId;
+        pin(environmentId);
         return { bundle: body.bundle, sig: info, raw: null };
       }
     } catch (e) {
@@ -1144,7 +1167,7 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
       cosignInUse = trusted.cosign;
     }
     failures = 0;
-    if (info) pinnedEnvironment = info.environmentId;
+    if (info) pin(info.environmentId);
     sig = info;
     rawText = info && JSON.stringify(parsed) !== text ? text : null;
     liveRevision = revision;
@@ -1658,7 +1681,13 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
       const kid = res.headers.get("X-NanoFlags-Key-Id");
       const environmentId = res.headers.get("X-NanoFlags-Environment-Id");
       if (!signature || !environmentId || raw === null) return reject("it is not signed.");
-      if (pinnedEnvironment !== null && pinnedEnvironment !== environmentId) return reject("it was signed for a different environment.");
+      // Bound to the environment of the verified live configuration. The announcement comes with a /v1/bundle answer
+      // whose own verification (which pins the environment) may still be running: wait for it rather than skip the
+      // check. Without verification nothing is ever pinned.
+      const pinned = verifyOpt ? await awaitPinnedEnvironment() : pinnedEnvironment;
+      if (closed) return;
+      if (verifyOpt && pinned === null) return; // no verified live configuration yet: the next announcement retries
+      if (pinned !== null && pinned !== environmentId) return reject("it was signed for a different environment.");
       let ok = false;
       try {
         ok = await verifyShadowText(await shadowVerifyKeys(kid), { signature, kid, environmentId, sessionId: want.sessionId, checksum: want.checksum }, raw, cryptoImpl);
@@ -1899,6 +1928,7 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
       void flush(true); // best effort
       void flushExperiments();
       closed = true;
+      for (const w of pinWaiters.splice(0)) w();
       if (pollTimer) clearTimeout(pollTimer);
       if (flushTimer) clearTimeout(flushTimer);
       if (experimentTimer) clearTimeout(experimentTimer);

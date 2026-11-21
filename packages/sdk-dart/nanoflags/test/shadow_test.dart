@@ -179,6 +179,26 @@ void main() {
     }
   });
 
+  test('a shadow bundle is bound to the environment of the first verified live bundle, even when it arrives first', () async {
+    // The first live bundle fails verification, so nothing is pinned while the shadow bundle (validly signed, but
+    // for another environment) is checked. It must wait for a verified live bundle and then be refused.
+    await edge.publish(live(), signWith: await SigningKey.generate('t1'));
+    await edge.serveShadow(draft(), sessionId: session, checksum: draftSum, env: '6f0c7c1e-0000-4000-8000-000000000999',
+        markerEnv: '6f0c7c1e-0000-4000-8000-000000000999');
+    final c = client();
+    final errors = errorsOf(c);
+    await until(() => edge.shadowRequests >= 1 && errors.any((e) => e.code == NanoFlagsErrorCode.signature));
+    await Future<void>.delayed(const Duration(milliseconds: 100));
+    await edge.publish(live());
+    await c.refresh();
+    await c.ready();
+    await until(() => errors.any((e) => e.code == NanoFlagsErrorCode.shadow));
+    c.boolVariation('checkout-v2', true, context: free());
+    await c.flush();
+    expect(edge.lastShadow, isNull);
+    expect(errors.where((e) => e.code == NanoFlagsErrorCode.shadow), hasLength(1));
+  });
+
   test('a shadow bundle is never applied as configuration, even when served (validly signed) as a bundle', () async {
     final c = client();
     final errors = errorsOf(c);

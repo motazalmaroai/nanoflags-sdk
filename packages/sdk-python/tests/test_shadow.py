@@ -112,7 +112,7 @@ def test_evaluates_the_draft_never_applies_it_and_reports_only_counters(shadow_e
 
         c.flush()
         body = shadow_edge.events[-1]
-        assert body["sdk"] == "python/0.3.0" and body["service"] == "checkout-service"
+        assert body["sdk"] == "python/0.3.1" and body["service"] == "checkout-service"
         assert shadow_of(body) == {
             "sessionId": SESSION, "checksum": DRAFT, "version": "3.1.0",
             "flags": [{"flag": "checkout-v2", "samples": 40, "flips": 30, "pairs": [{"live": "false", "shadow": "true", "count": 30}], "rules": {"default": 30, "1": 10}}],
@@ -496,3 +496,30 @@ def test_service_version_is_trimmed_and_bounded(edge: FakeEdge) -> None:
         assert c._service_version == "9" * 40
     with client(edge, service_version="   ", start=False) as c:
         assert c._service_version is None
+
+
+def test_a_shadow_bundle_is_not_used_before_a_live_bundle_verified(edge: FakeEdge) -> None:
+    """Regression: the shadow bundle announced with a live answer that failed verification (nothing pinned yet) is not
+    used, even though it is validly signed: it may be signed for another environment."""
+    live = live_bundle()
+    edge.set_bundle(live)
+    good = edge.signature
+    with edge.lock:
+        edge.signature = edge.sign(edge.text + " ", edge.revision, edge.checksum)  # does not verify
+    edge.set_shadow(draft_of(live), marker(environmentId=OTHER_ENV), environment_id=OTHER_ENV)
+    errors: List[NanoFlagsError] = []
+    with client(edge, on_error=errors.append) as c:
+        deadline = time.time() + 5
+        while edge.count("/v1/shadow") < 1 and time.time() < deadline:
+            time.sleep(0.01)
+        assert edge.count("/v1/shadow") >= 1
+        with c._sync_mutex:
+            pass
+        with edge.lock:
+            edge.signature = good
+        c.refresh()
+        assert c.revision == 3
+        c.bool_variation("checkout-v2", True, {"region": "DE"})
+        c.flush()
+        assert shadow_of(edge.events[-1]) is None
+        assert {e.code for e in errors} <= {"signature", "shadow"}

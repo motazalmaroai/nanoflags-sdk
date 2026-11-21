@@ -142,7 +142,7 @@ Optionally, add a matrix job to `ci.yml` so every pull request runs the Python t
 2. Check that `version` in `packages/sdk-python/pyproject.toml` is the version to release and that `SDK_VERSION` in
    `src/nanoflags/client.py` matches it. Both are `0.2.0` now.
 3. `git tag python-v0.2.0 && git push origin python-v0.2.0`, then approve the `pypi` environment deployment.
-4. Check the result: `pip install nanoflags==0.3.0 && python -c "import nanoflags; print(nanoflags.__version__)"`.
+4. Check the result: `pip install nanoflags==0.3.1 && python -c "import nanoflags; print(nanoflags.__version__)"`.
 
 After the first upload the pending publisher becomes a normal trusted publisher on the project. Later releases only
 repeat step 4.

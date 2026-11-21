@@ -4,9 +4,9 @@ Nothing has been published. The three artifacts go to Maven Central under the na
 
 | Coordinates | Packaging |
 | --- | --- |
-| `io.nanoflags:nanoflags-core:0.3.0` | jar (+ sources, javadoc) |
-| `io.nanoflags:nanoflags-android:0.3.0` | aar (+ sources, javadoc) |
-| `io.nanoflags:nanoflags-openfeature:0.3.0` | jar (+ sources, javadoc) |
+| `io.nanoflags:nanoflags-core:0.3.1` | jar (+ sources, javadoc) |
+| `io.nanoflags:nanoflags-android:0.3.1` | aar (+ sources, javadoc) |
+| `io.nanoflags:nanoflags-openfeature:0.3.1` | jar (+ sources, javadoc) |
 
 Releases go out from the public mirror [motazalmaroai/nanoflags-sdk](https://github.com/motazalmaroai/nanoflags-sdk)
 through the **Sonatype Central Portal** (central.sonatype.com; the legacy OSSRH / s01 hosts are retired). The build

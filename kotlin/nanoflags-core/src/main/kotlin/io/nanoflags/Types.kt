@@ -8,7 +8,7 @@ import io.nanoflags.engine.TraceStep
 /** SDK release information. */
 object BuildInfo {
     /** This SDK's version (also in the User-Agent and in telemetry as `kotlin/<version>` / `android/<version>`). */
-    const val VERSION: String = "0.3.0"
+    const val VERSION: String = "0.3.1"
 }
 
 /** What kind of problem a [NanoFlagsException] reports. */

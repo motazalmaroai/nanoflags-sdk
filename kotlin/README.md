@@ -17,7 +17,7 @@ and only the segments those flags reference). Server keys (`nf_srv_…`) are ref
 ```kotlin
 // build.gradle.kts
 dependencies {
-    implementation("io.nanoflags:nanoflags-android:0.3.0")
+    implementation("io.nanoflags:nanoflags-android:0.3.1")
 }
 ```
 
@@ -139,7 +139,7 @@ ignored (`ErrorCode.SHADOW`). Client keys receive the client view of the draft (
 ## OpenFeature
 
 ```kotlin
-implementation("io.nanoflags:nanoflags-openfeature:0.3.0")
+implementation("io.nanoflags:nanoflags-openfeature:0.3.1")
 
 OpenFeatureAPI.setProviderAndWait(NanoFlagsProvider(flags), initialContext = ImmutableContext("user-42"))
 val on = OpenFeatureAPI.getClient().getBooleanValue("new-checkout", false)

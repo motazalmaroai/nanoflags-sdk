@@ -1,6 +1,6 @@
 {
   "name": "@nanoflags/react-native",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "NanoFlags React Native SDK: local, synchronous flag evaluation with signed, live-updated configuration, offline-first persistence, app-lifecycle awareness, React hooks and an OpenFeature provider.",
   "keywords": [
     "feature-flags",

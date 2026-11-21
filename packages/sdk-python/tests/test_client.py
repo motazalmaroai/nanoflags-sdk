@@ -249,7 +249,7 @@ def test_events_and_service_report(edge: FakeEdge) -> None:
     c.bool_variation("new-checkout", False, {"key": "u1", "plan": "beta", "email": "secret@example.com"})
     assert wait_for(lambda: any(e["events"] for e in edge.events))
     batch = next(e for e in edge.events if e["events"])
-    assert batch["service"] == "py-test" and batch["sdk"] == "python/0.3.0" and batch["revision"] == 1
+    assert batch["service"] == "py-test" and batch["sdk"] == "python/0.3.1" and batch["revision"] == 1
     ev = batch["events"][0]
     assert ev["flagKey"] == "new-checkout" and ev["reason"] == "rule_match" and ev["ruleIndex"] == 0
     # Only names and types of attributes the rules use leave the process — never values.

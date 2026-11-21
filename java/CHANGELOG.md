@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.0 — unreleased
+
+- `NanoFlagsOptions.Builder.onError(Consumer<NanoFlagsException>)` attaches an error listener before the client starts
+  loading, so it also receives the errors of the first load and the configuration errors reported while the client is
+  created (for example an invalid bootstrap bundle), which a listener added afterwards with `NanoFlagsClient.onError`
+  can miss. It can be called more than once; builder listeners run in the order added, before those added later.
+
 ## 0.2.0 — 2026-11-18
 
 - Test sessions (`x-nanoflags-session`), as in the JS and Python SDKs: `NanoFlagsClient.session(token[, service])` /

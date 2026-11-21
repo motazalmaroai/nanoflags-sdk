@@ -501,6 +501,43 @@ class ClientTest {
     }
 
     @Test
+    void builderErrorListenerSeesErrorsRaisedWhileTheClientIsCreated() {
+        List<NanoFlagsException> early = new CopyOnWriteArrayList<>();
+        List<NanoFlagsException> late = new CopyOnWriteArrayList<>();
+        edge.bundleStatus = 503;
+        NanoFlagsClient c = client(opts().live(false).streaming(false).pollInterval(Duration.ZERO).bootstrapJson("{nope").onError(early::add));
+        c.onError(late::add);
+        await("bootstrap error", 5_000, () -> early.stream().anyMatch(e -> e.code() == ErrorCode.INVALID_BUNDLE));
+        assertFalse(c.waitForReady(Duration.ofSeconds(10)));
+        await("first load error", 5_000, () -> early.stream().anyMatch(e -> e.httpStatus() == 503));
+        assertTrue(late.stream().noneMatch(e -> e.code() == ErrorCode.INVALID_BUNDLE), "a listener added after create misses the constructor's errors");
+    }
+
+    @Test
+    void builderErrorListenerSeesTheFirstLoadFailure() {
+        List<String> calls = new CopyOnWriteArrayList<>();
+        NanoFlagsOptions o = opts().live(false).streaming(false).pollInterval(Duration.ZERO)
+            .onError(e -> calls.add("a:" + e.code()))
+            .onError(e -> { throw new IllegalStateException("boom"); })
+            .onError(e -> calls.add("b:" + e.code()))
+            .build();
+        NanoFlagsClient c = NanoFlagsClient.create("bad-key", o);
+        clients.add(c);
+        c.onError(e -> calls.add("c:" + e.code()));
+        assertFalse(c.waitForReady(Duration.ofSeconds(10)));
+        await("listeners", 5_000, () -> calls.size() >= 2);
+        assertEquals("a:" + ErrorCode.UNAUTHORIZED, calls.get(0));
+        assertEquals("b:" + ErrorCode.UNAUTHORIZED, calls.get(1), "in order, and a throwing listener does not stop the others");
+        // The same options can create another client; it gets the listeners too.
+        NanoFlagsClient again = NanoFlagsClient.create("bad-key", o);
+        clients.add(again);
+        int before = calls.size();
+        assertFalse(again.waitForReady(Duration.ofSeconds(10)));
+        await("second client", 5_000, () -> calls.size() >= before + 2);
+        assertThrows(NullPointerException.class, () -> NanoFlagsOptions.builder().onError(null));
+    }
+
+    @Test
     void closeIsIdempotentAndEvaluationsKeepWorking() {
         NanoFlagsClient c = client(opts());
         assertTrue(c.waitForReady(Duration.ofSeconds(10)));

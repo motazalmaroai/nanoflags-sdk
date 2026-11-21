@@ -70,6 +70,16 @@ result     Returned true — Inside the 25% allocation.
 - Events (handlers run one at a time, in order, on a thread of the client; a throwing handler never breaks the client):
   `Changed` (`ChangeEvent`: `Revision`, `PreviousRevision`, `Source` network/store/bootstrap, `Transport` live/stream/poll,
   `Latency` from the database commit for pushed revisions), `Error` (`NanoFlagsException` with `Code`), `StatusChanged`.
+- Errors of the first load: the client starts loading as soon as it is created, so a handler added afterwards to
+  `Error` can miss them (and configuration errors such as an invalid `BootstrapJson`). Set `OnError` in the options
+  instead; it is attached before the client starts:
+
+  ```csharp
+  var flags = NanoFlagsClient.Create(key, new NanoFlagsOptions
+  {
+      OnError = (_, e) => logger.LogWarning("nanoflags: {Code} {Message}", e.Code, e.Message),
+  });
+  ```
 - `Status` — `NotReady`, `Ready` or `Stale` (a configuration is in use but is not known to be current). `Revision`,
   `Transport`, `Bundle`.
 - `RefreshAsync()`, `FlushAsync()`, `CloseAsync()` / `Dispose()` (idempotent; evaluations keep working on the last

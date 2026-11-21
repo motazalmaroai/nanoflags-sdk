@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.0 — unreleased
+
+- `NanoFlagsOptions.OnError` (`EventHandler<NanoFlagsException>`) is attached before the client starts loading, so it
+  also receives the errors of the first load and the configuration errors reported while the client is created (for
+  example an invalid `BootstrapJson`), which a handler added afterwards to `NanoFlagsClient.Error` can miss. Combine
+  several with `+=`; they run before handlers added to the event later.
+
 ## 0.2.0 — 2026-11-18
 
 - Test sessions (`x-nanoflags-session`), as in the JS and Python SDKs: `NanoFlagsClient.SessionAsync(token, service?)` /

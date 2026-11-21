@@ -114,6 +114,8 @@ namespace NanoFlags
             _id = Evaluator.Murmur3(cfg.BaseUrl + "|" + sdkKey).ToString("x8", CultureInfo.InvariantCulture);
             _browserKey = sdkKey.StartsWith("nf_pub_", StringComparison.Ordinal);
             Dispatcher = new Dispatcher();
+            // The options' handler first: it must see the configuration errors below and the first load.
+            if (cfg.OnError != null) Error += cfg.OnError;
             var cfgErrors = new List<NanoFlagsException>();
             Verifier = Verifier.Create(this, cfgErrors);
             Events = new EventQueue(this);
@@ -220,7 +222,11 @@ namespace NanoFlags
         /// <summary>Every newly adopted configuration. Handlers run one at a time, in order, on a thread of the client.</summary>
         public event EventHandler<ChangeEvent>? Changed;
 
-        /// <summary>Background errors (failed requests, rejected signatures, …). They never change the configuration in use.</summary>
+        /// <summary>
+        /// Background errors (failed requests, rejected signatures, …). They never change the configuration in use. A
+        /// handler added here can miss errors of the first load, which starts when the client is created; use
+        /// <see cref="NanoFlagsOptions.OnError"/> to receive those too.
+        /// </summary>
         public event EventHandler<NanoFlagsException>? Error;
 
         /// <summary>Status changes.</summary>

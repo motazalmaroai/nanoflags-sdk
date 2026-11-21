@@ -3,10 +3,12 @@ package io.nanoflags.server;
 import io.nanoflags.server.engine.Bundle;
 import java.net.http.HttpClient;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.function.Consumer;
 import java.util.function.DoubleSupplier;
 import java.util.function.Function;
 
@@ -39,6 +41,7 @@ public final class NanoFlagsOptions {
     final Duration liveConnectTimeout;
     final System.Logger logger;
     final DoubleSupplier random;
+    final List<Consumer<NanoFlagsException>> errorListeners;
 
     private NanoFlagsOptions(Builder b) {
         this.baseUrl = b.baseUrl;
@@ -58,6 +61,7 @@ public final class NanoFlagsOptions {
         this.liveConnectTimeout = b.liveConnectTimeout;
         this.logger = b.logger;
         this.random = b.random;
+        this.errorListeners = Collections.unmodifiableList(new ArrayList<>(b.errorListeners));
     }
 
     public static Builder builder() { return new Builder(); }
@@ -87,6 +91,7 @@ public final class NanoFlagsOptions {
         private Duration liveConnectTimeout = Duration.ofSeconds(10);
         private System.Logger logger;
         private DoubleSupplier random = Math::random;
+        private final List<Consumer<NanoFlagsException>> errorListeners = new ArrayList<>();
 
         private Builder() {}
 
@@ -192,6 +197,18 @@ public final class NanoFlagsOptions {
         /** Logger for background activity (default {@code System.getLogger("io.nanoflags.server")}, debug level only). */
         public Builder logger(System.Logger logger) {
             this.logger = logger;
+            return this;
+        }
+
+        /**
+         * Registers {@code listener} for background errors before the client starts, so that errors of the first load
+         * (and configuration errors reported while the client is created, such as an invalid bootstrap bundle) reach it
+         * too. {@link NanoFlagsClient#onError} registers a listener only once the client exists and may miss them. Can be
+         * called more than once; listeners run in the order added, before those added later with
+         * {@link NanoFlagsClient#onError}, and stay registered for the client's lifetime.
+         */
+        public Builder onError(Consumer<NanoFlagsException> listener) {
+            this.errorListeners.add(Objects.requireNonNull(listener, "listener"));
             return this;
         }
 

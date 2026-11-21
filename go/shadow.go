@@ -515,6 +515,16 @@ func (c *Client) noteShadow(header string) {
 	if f != nil && f.id == id && time.Since(f.at) < shadowRetryInterval {
 		return
 	}
+	// No verified live configuration yet (the answer that announced it failed verification): not an attempt, so
+	// nothing is fetched or recorded and the next announcement retries at once.
+	if c.verifier != nil {
+		c.mu.Lock()
+		pinned := c.pinnedEnvironment
+		c.mu.Unlock()
+		if pinned == "" {
+			return
+		}
+	}
 	c.fetchShadow(want)
 	c.shadow.mu.Lock()
 	c.shadow.fetch = &shadowFetchEntry{id: id, at: time.Now()}
@@ -592,7 +602,7 @@ func (c *Client) fetchShadow(want shadowID) {
 	pinned := c.pinnedEnvironment
 	c.mu.Unlock()
 	if c.verifier != nil && pinned == "" {
-		return // no verified live configuration yet: a later announcement retries
+		return // no verified live configuration (noteShadow checks this before fetching)
 	}
 	if pinned != "" && pinned != envID {
 		reject("it was signed for a different environment.")

@@ -546,10 +546,12 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
         clearTimeout(timer);
         resolve(pinnedEnvironment);
       };
-      const timer = setTimeout(() => {
-        pinWaiters = pinWaiters.filter((w) => w !== done);
-        resolve(null);
-      }, ms);
+      const timer = unref(
+        setTimeout(() => {
+          pinWaiters = pinWaiters.filter((w) => w !== done);
+          resolve(null);
+        }, ms),
+      );
       pinWaiters.push(done);
     });
   }
@@ -1647,10 +1649,15 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
     if (shadowFetch && shadowFetch.id === id && (shadowFetch.running || Date.now() - shadowFetch.at < SHADOW_RETRY_MS)) return;
     const entry = { id, at: Date.now(), running: true };
     shadowFetch = entry;
-    void fetchShadow(want).finally(() => {
-      entry.running = false;
-      entry.at = Date.now();
-    });
+    void fetchShadow(want)
+      .then((skipped) => {
+        // Skipped (no verified live configuration yet): not an attempt, so the next announcement retries at once.
+        if (skipped === true && shadowFetch === entry) shadowFetch = null;
+      })
+      .finally(() => {
+        entry.running = false;
+        entry.at = Date.now();
+      });
   }
 
   /** Keys a shadow bundle is checked with: the configured ones, or (verification off for this edge) `/v1/keys`. */
@@ -1664,7 +1671,8 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
   }
 
   /** Loads and verifies a shadow bundle. Only a bundle signed for this session, with a matching marker inside, is used. */
-  async function fetchShadow(want: { sessionId: string; checksum: string }): Promise<void> {
+  /** Loads and checks an announced shadow bundle. Resolves `true` when it was skipped (no verified live configuration). */
+  async function fetchShadow(want: { sessionId: string; checksum: string }): Promise<boolean | void> {
     const reject = (why: string) =>
       emitError(new NanoFlagsError(`The shadow bundle of session ${want.sessionId} was ignored: ${why} Nothing changes for the app (shadow bundles are never applied).`, "shadow"));
     try {
@@ -1686,7 +1694,7 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
       // check. Without verification nothing is ever pinned.
       const pinned = verifyOpt ? await awaitPinnedEnvironment() : pinnedEnvironment;
       if (closed) return;
-      if (verifyOpt && pinned === null) return; // no verified live configuration yet: the next announcement retries
+      if (verifyOpt && pinned === null) return true; // no verified live configuration yet: the next announcement retries
       if (pinned !== null && pinned !== environmentId) return reject("it was signed for a different environment.");
       let ok = false;
       try {

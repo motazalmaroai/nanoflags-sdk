@@ -1332,6 +1332,10 @@ class NanoFlags:
             f = self._shadow_fetch
             if f is not None and f["id"] == sid and time.monotonic() - f["at"] < SHADOW_RETRY_INTERVAL:
                 return
+            if self._verify and self._pinned_env is None:
+                # No verified live configuration yet (the answer that announced it failed verification): not an
+                # attempt, so nothing is fetched or recorded and the next announcement retries at once.
+                return
             try:
                 self._fetch_shadow(want)
             finally:
@@ -1375,7 +1379,7 @@ class NanoFlags:
         # after the sync, so a verified answer has always pinned by now). Without verification nothing is pinned.
         pinned = self._pinned_env
         if self._verify and pinned is None:
-            return None  # no verified live configuration yet: a later announcement retries
+            return None  # no verified live configuration (_note_shadow checks this before fetching)
         if pinned is not None and pinned != environment_id:
             return reject("it was signed for a different environment.")
         try:

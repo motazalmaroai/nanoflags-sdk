@@ -793,7 +793,8 @@ func TestServiceVersionIsTrimmedAndBounded(t *testing.T) {
 }
 
 // Regression: the shadow bundle announced with a live answer that failed verification (nothing pinned yet) must not be
-// used, even when it is validly signed: it may be signed for another environment.
+// used, even when it is validly signed: it may be signed for another environment. Not fetching it then is not an
+// attempt: the next (verified) announcement fetches and checks it at once.
 func TestShadowNotUsedBeforeALiveBundleVerified(t *testing.T) {
 	const otherEnv = "6f0c7c1e-0000-4000-8000-000000000999"
 	e := newFakeEdge(t)
@@ -808,8 +809,11 @@ func TestShadowNotUsedBeforeALiveBundleVerified(t *testing.T) {
 		WithService("checkout-service"), WithServiceVersion("3.1.0"), WithStreaming(false))
 	c := must(t)(New(testKey, opts...))
 	r := record(c)
-	eventually(t, "the shadow fetch after the rejected live bundle", func() bool { return e.count("/v1/shadow") >= 1 })
+	eventually(t, "the rejected live bundle", func() bool { return len(r.codes()) >= 1 })
 	settle(c)
+	if n := e.count("/v1/shadow"); n != 0 {
+		t.Fatalf("shadow bundle fetched %d times before a live bundle verified", n)
+	}
 	e.mu.Lock()
 	e.corrupt = false
 	e.mu.Unlock()
@@ -819,14 +823,16 @@ func TestShadowNotUsedBeforeALiveBundleVerified(t *testing.T) {
 	if c.Revision() != 3 {
 		t.Fatalf("revision %d", c.Revision())
 	}
+	if n := e.count("/v1/shadow"); n != 1 {
+		t.Fatalf("the verified announcement fetched the shadow bundle %d times, want 1 (no retry delay)", n)
+	}
 	c.BoolVariation("checkout-v2", Context{"region": "DE"}, true)
 	flush(t, c)
 	if e.lastShadow(t) != nil {
-		t.Fatal("a shadow bundle signed for another environment was used before the environment was pinned")
+		t.Fatal("a shadow bundle signed for another environment was used")
 	}
-	for _, code := range r.codes() {
-		if code != ErrSignature && code != ErrShadow {
-			t.Fatalf("unexpected error %s", code)
-		}
-	}
+	eventually(t, "shadow error", func() bool {
+		codes := r.codes()
+		return len(codes) >= 2 && codes[len(codes)-1] == ErrShadow
+	})
 }

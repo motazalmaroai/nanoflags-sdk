@@ -1280,7 +1280,11 @@ class NanoFlagsClient {
       // check. Without verification nothing is ever pinned.
       final pinned = _verify != null ? await _awaitPinnedEnvironment() : _pinnedEnvironment;
       if (_closed) return;
-      if (_verify != null && pinned == null) return; // no verified live configuration yet: the next announcement retries
+      if (_verify != null && pinned == null) {
+        // Skipped (no verified live configuration yet): not an attempt, so the next announcement retries at once.
+        if (_shadowFetch?.id == '$sessionId.$checksum') _shadowFetch = null;
+        return;
+      }
       if (pinned != null && pinned != environmentId) return reject('it was signed for a different environment.');
       var ok = false;
       try {

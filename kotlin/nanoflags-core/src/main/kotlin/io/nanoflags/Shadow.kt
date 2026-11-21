@@ -298,7 +298,6 @@ internal class ShadowEvaluator(private val client: NanoFlags, private val opts: 
         }
     }
 
-    /** `X-NanoFlags-Shadow` of a fresh `/v1/bundle` answer (200 or 304): fetch the announced shadow bundle, or drop the one in use. */
     /** The environment the live configuration was verified for, waiting up to [timeoutMs] for the first verification. */
     internal suspend fun awaitPinnedEnvironment(timeoutMs: Long = ShadowWire.PIN_WAIT_MS): String? {
         val deadline = System.currentTimeMillis() + timeoutMs
@@ -309,6 +308,7 @@ internal class ShadowEvaluator(private val client: NanoFlags, private val opts: 
         }
     }
 
+    /** `X-NanoFlags-Shadow` of a fresh `/v1/bundle` answer (200 or 304): fetch the announced shadow bundle, or drop the one in use. */
     fun note(header: String?) {
         if (!enabled || client.isClosed) return
         val want = ShadowWire.parseHeader(header) ?: return drop()
@@ -361,7 +361,16 @@ internal class ShadowEvaluator(private val client: NanoFlags, private val opts: 
             // Bound to the environment of the verified live configuration. The announcement comes with a /v1/bundle
             // answer whose own verification (which pins the environment) may still be running: wait for it rather
             // than skip the check. Without verification nothing is ever pinned.
-            val pinned = if (client.verifier != null) awaitPinnedEnvironment() ?: return else client.pinned
+            val pinned = if (client.verifier != null) {
+                awaitPinnedEnvironment() ?: run {
+                    // Skipped (no verified live configuration yet): not an attempt, so the next announcement retries at once.
+                    val id = "${want.sessionId}.${want.checksum}"
+                    synchronized(lock) { if (fetch?.id == id) fetch = null }
+                    return
+                }
+            } else {
+                client.pinned
+            }
             if (client.isClosed) return
             if (pinned != null && pinned != environmentId) return reject("it was signed for a different environment.")
             val ok = try {

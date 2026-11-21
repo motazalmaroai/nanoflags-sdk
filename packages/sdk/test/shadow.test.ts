@@ -198,6 +198,57 @@ describe("shadow evaluation", () => {
     expect(errors.map((e) => e.code)).toEqual(["shadow"]);
   });
 
+  it("after a live answer that failed verification, the shadow bundle waits for a verified one and is then checked", async () => {
+    const live = makeBundle(3);
+    const otherEnv = "6f0c7c1e-0000-4000-8000-000000000999";
+    const good = await liveResponse(signer, live);
+    const badHeaders = new Headers(good.headers);
+    badHeaders.set("X-NanoFlags-Signature", (await liveResponse(other, live)).headers.get("X-NanoFlags-Signature")!);
+    badHeaders.set("X-NanoFlags-Key-Id", signer.kid);
+    const bad = new Response(await good.clone().text(), { status: 200, headers: badHeaders });
+    const edge = mockRoutes({
+      "/v1/bundle": bad,
+      "/v1/shadow": await shadowResponse(signer, draftOf(live), { environmentId: otherEnv, marker: marker({ environmentId: otherEnv }) }),
+      "/v1/events": new Response("{}", { status: 202 }),
+    });
+    const c = client({ fetch: edge.fetch, shadow: { sampleRate: 1 } });
+    const errors = errorsOf(c);
+    for (let i = 0; i < 100 && edge.count("/v1/shadow") === 0; i++) await tick();
+    await settle();
+    expect(edge.count("/v1/shadow")).toBe(1);
+    expect(errors.map((e) => e.code)).toEqual(["signature"]); // the shadow bundle is waiting, not yet checked
+    edge.routes["/v1/bundle"] = good;
+    await c.refresh();
+    await settle();
+    expect(c.revision).toBe(3);
+    c.boolean("checkout-v2", true, { region: "DE" });
+    await c.flush();
+    expect(shadowOf(edge.last("/v1/events")!.body)).toBeUndefined();
+    expect(errors.map((e) => e.code)).toEqual(["signature", "shadow"]);
+  });
+
+  it("close() during the wait for a verified live bundle ends the shadow fetch quietly", async () => {
+    const live = makeBundle(3);
+    const good = await liveResponse(signer, live);
+    const headers = new Headers(good.headers);
+    headers.set("X-NanoFlags-Signature", (await liveResponse(other, live)).headers.get("X-NanoFlags-Signature")!);
+    const edge = mockRoutes({
+      "/v1/bundle": new Response(await good.text(), { status: 200, headers }),
+      "/v1/shadow": await shadowResponse(signer, draftOf(live)),
+      "/v1/events": new Response("{}", { status: 202 }),
+    });
+    const c = client({ fetch: edge.fetch, shadow: { sampleRate: 1 } });
+    const errors = errorsOf(c);
+    for (let i = 0; i < 100 && edge.count("/v1/shadow") === 0; i++) await tick();
+    await settle();
+    expect(edge.count("/v1/shadow")).toBe(1);
+    const started = Date.now();
+    c.close();
+    await settle();
+    expect(Date.now() - started).toBeLessThan(1000); // not the 10 s pin wait
+    expect(errors.map((e) => e.code)).toEqual(["signature"]);
+  });
+
   it("a shadow bundle is never applied as configuration, even when served (validly signed) as a bundle", async () => {
     const live = makeBundle(3);
     const draft = { ...draftOf(makeBundle(4)), shadow: marker() } as unknown as Bundle;

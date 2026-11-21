@@ -500,7 +500,8 @@ def test_service_version_is_trimmed_and_bounded(edge: FakeEdge) -> None:
 
 def test_a_shadow_bundle_is_not_used_before_a_live_bundle_verified(edge: FakeEdge) -> None:
     """Regression: the shadow bundle announced with a live answer that failed verification (nothing pinned yet) is not
-    used, even though it is validly signed: it may be signed for another environment."""
+    used, even though it is validly signed: it may be signed for another environment. Not fetching it then is not an
+    attempt: the next (verified) announcement fetches and checks it at once."""
     live = live_bundle()
     edge.set_bundle(live)
     good = edge.signature
@@ -510,16 +511,18 @@ def test_a_shadow_bundle_is_not_used_before_a_live_bundle_verified(edge: FakeEdg
     errors: List[NanoFlagsError] = []
     with client(edge, on_error=errors.append) as c:
         deadline = time.time() + 5
-        while edge.count("/v1/shadow") < 1 and time.time() < deadline:
+        while not errors and time.time() < deadline:
             time.sleep(0.01)
-        assert edge.count("/v1/shadow") >= 1
         with c._sync_mutex:
             pass
+        assert [e.code for e in errors] == ["signature"]
+        assert edge.count("/v1/shadow") == 0
         with edge.lock:
             edge.signature = good
         c.refresh()
         assert c.revision == 3
+        assert edge.count("/v1/shadow") == 1  # retried at once, not after the retry interval
         c.bool_variation("checkout-v2", True, {"region": "DE"})
         c.flush()
         assert shadow_of(edge.events[-1]) is None
-        assert {e.code for e in errors} <= {"signature", "shadow"}
+        assert [e.code for e in errors] == ["signature", "shadow"]

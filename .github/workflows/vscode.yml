@@ -80,4 +80,6 @@ jobs:
           OVSX_PAT: ${{ secrets.OVSX_PAT }}
         run: |
           if [ -z "$OVSX_PAT" ]; then echo "::notice title=OVSX_PAT missing::Not published to Open VSX (vscode/PUBLISHING.md)."; exit 0; fi
+          # The namespace must exist before the first publish; creating one that already exists fails harmlessly.
+          npx ovsx create-namespace nanoflags || echo "namespace nanoflags exists (or could not be created; publish will say)"
           npx ovsx publish vscode-nanoflags.vsix --skip-duplicate

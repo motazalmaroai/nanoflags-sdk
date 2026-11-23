@@ -4,6 +4,12 @@
 
 **Agents propose, people approve.** The server runs with an *AI-agent token*. NanoFlags enforces in its database that an agent token can never publish, approve, schedule a publish, use the kill switch, or change policies, permissions, tokens, members or billing. Every change an agent makes is recorded in the audit log as "via agent &lt;label&gt;", and on Team and above work proposed by an agent always needs an independent approval by a person before it can be published. Read more: <https://nanoflags.io/docs/ai-agents>.
 
+## Hosted server (no install)
+
+NanoFlags also runs this server for you at `https://mcp.nanoflags.io/mcp` (Streamable HTTP with OAuth). Add that URL as a connector in ChatGPT, Claude or any MCP client that supports remote servers; you sign in to NanoFlags and approve the connection, and the app gets an AI-agent token with exactly the limits below. Claude Code: `claude mcp add --transport http nanoflags https://mcp.nanoflags.io/mcp`. Read more: <https://nanoflags.io/docs/ai-agents#connect-remote>.
+
+The rest of this page is about running the server locally with a token you create yourself.
+
 ## 1. Create an agent token
 
 An owner or admin opens **Settings → API tokens → AI agents** in the NanoFlags dashboard, names the agent (for example `Claude Code on laptop-x`), optionally limits it to one project, and copies the token (`nf_api_…`). It is shown once and expires within 90 days. Revoke it there at any time.

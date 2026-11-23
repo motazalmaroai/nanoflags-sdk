@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.0 (2026-11-23)
+
+- MCP 2026-07-28: the server is dual-era. Requests that carry their protocol version in `_meta` are served statelessly
+  (`server/discover`, `resultType`, server identity in `_meta`, `ttlMs` / `cacheScope` on `tools/list`, -32022 for an
+  unsupported version); clients that start with `initialize` (2025-11-25 and earlier) work as before.
+- The protocol and tools moved to a transport-independent core (`src/core.ts`), shared with NanoFlags' hosted remote
+  server at `https://mcp.nanoflags.io/mcp` (connect ChatGPT, Claude and other apps with OAuth, no token to copy).
+- Tool input schemas declare the JSON types of value parameters (`initialValue`, `default`, `off`); the rule format
+  moved from the `update_draft` description to its `rules` parameter; descriptions state facts only.
+- `mcpName` (`io.github.motazalmaroai/nanoflags`) and `server.json` for the official MCP Registry.
+
 ## 0.2.0 (2026-11-21)
 
 - `update_draft` lists every condition operator, including the version (`semver_*`) and date (`before` / `after`)

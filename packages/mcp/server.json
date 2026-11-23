@@ -1,0 +1,53 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.motazalmaroai/nanoflags",
+  "title": "NanoFlags",
+  "description": "Feature flags for AI agents: create flags, edit drafts, open change requests. People approve.",
+  "version": "0.3.0",
+  "websiteUrl": "https://nanoflags.io/docs/ai-agents",
+  "repository": {
+    "url": "https://github.com/motazalmaroai/nanoflags-sdk",
+    "source": "github",
+    "subfolder": "packages/mcp"
+  },
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "@nanoflags/mcp",
+      "version": "0.3.0",
+      "runtimeHint": "npx",
+      "transport": { "type": "stdio" },
+      "environmentVariables": [
+        {
+          "name": "NANOFLAGS_API_TOKEN",
+          "description": "AI-agent token (nf_api_…) from Settings → API tokens → AI agents in the NanoFlags dashboard.",
+          "isRequired": true,
+          "isSecret": true,
+          "format": "string"
+        },
+        {
+          "name": "NANOFLAGS_PROJECT",
+          "description": "Default project key. Not needed when the token is limited to one project.",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
+        },
+        {
+          "name": "NANOFLAGS_BASE_URL",
+          "description": "Management API origin.",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string",
+          "default": "https://edge.nanoflags.io"
+        }
+      ]
+    }
+  ],
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://mcp.nanoflags.io/mcp"
+    }
+  ]
+}

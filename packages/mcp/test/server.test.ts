@@ -1,7 +1,7 @@
 import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import { ApiClient } from "../src/api";
-import { configFromEnv, createServer, serveStdio, PROTOCOL_VERSIONS } from "../src/server";
+import { configFromEnv, createServer, serveStdio, PROTOCOL_VERSIONS, SUPPORTED_PROTOCOL_VERSIONS } from "../src/server";
 import { TOOLS, validate } from "../src/tools";
 
 const TOKEN = "nf_api_" + "ab".repeat(24);
@@ -55,7 +55,7 @@ describe("protocol", () => {
     expect(res.result.protocolVersion).toBe("2025-03-26");
     expect(res.result.capabilities).toEqual({ tools: { listChanged: false } });
     expect(res.result.serverInfo).toMatchObject({ name: "nanoflags" });
-    expect(String(res.result.instructions)).toMatch(/cannot publish, approve/);
+    expect(String(res.result.instructions)).toMatch(/not available through this server/);
     const unknown = (await server.handle({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "1999-01-01" } })) as { result: { protocolVersion: string } };
     expect(unknown.result.protocolVersion).toBe(PROTOCOL_VERSIONS[0]);
     expect(await server.handle({ jsonrpc: "2.0", method: "notifications/initialized" })).toBeNull();
@@ -71,8 +71,8 @@ describe("protocol", () => {
     const names = res.result.tools.map((t) => t.name);
     expect(names.length).toBeLessThanOrEqual(8);
     expect(names).toEqual(["list_environments", "list_flags", "get_flag", "create_flag", "update_draft", "open_change_request", "get_change_status", "explain_flag"]);
-    const draft = res.result.tools.find((t) => t.name === "update_draft") as unknown as { description: string };
-    for (const op of ["semver_gte", "semver_neq", "before", "after", "gte", "not_segment"]) expect(draft.description).toContain(op);
+    const draft = res.result.tools.find((t) => t.name === "update_draft") as unknown as { description: string; inputSchema: { properties: { rules: { description: string } } } };
+    for (const op of ["semver_gte", "semver_neq", "before", "after", "gte", "not_segment"]) expect(draft.inputSchema.properties.rules.description).toContain(op);
     for (const n of names) expect(n).not.toMatch(/publish|approve|kill|schedule|delete|archive|token|member/);
     for (const t of res.result.tools) {
       expect(t.inputSchema.type).toBe("object");
@@ -279,5 +279,72 @@ describe("argument validation", () => {
     expect(validate(s, { n: 4 })).toBe("arguments.n must be at most 3.");
     expect(validate(s, { n: 1, e: "b" })).toBe('arguments.e must be one of "a".');
     expect(validate(s, { n: 1, l: ["x1", "y"] })).toBe("arguments.l[1] has an invalid format.");
+  });
+});
+
+describe("MCP Registry metadata", () => {
+  it("server.json names the npm package and the remote endpoint, and matches package.json (mcpName, version)", async () => {
+    const { readFileSync } = await import("node:fs");
+    const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+    const server = JSON.parse(readFileSync(new URL("../server.json", import.meta.url), "utf8"));
+    expect(server.name).toBe(pkg.mcpName);
+    expect(server.name).toMatch(/^[a-zA-Z0-9.-]+\/[a-zA-Z0-9._-]+$/);
+    expect(server.description.length).toBeLessThanOrEqual(100);
+    expect(server.version).toBe(pkg.version);
+    expect(server.packages[0]).toMatchObject({ registryType: "npm", identifier: pkg.name, version: pkg.version, transport: { type: "stdio" } });
+    expect(server.remotes).toEqual([{ type: "streamable-http", url: "https://mcp.nanoflags.io/mcp" }]);
+    const { VERSION } = await import("../src/core");
+    expect(VERSION).toBe(pkg.version);
+  });
+});
+
+describe("modern protocol (2026-07-28, per-request _meta)", () => {
+  const meta = (v = "2026-07-28") => ({ _meta: { "io.modelcontextprotocol/protocolVersion": v, "io.modelcontextprotocol/clientInfo": { name: "t", version: "1" }, "io.modelcontextprotocol/clientCapabilities": {} } });
+
+  it("answers server/discover with every supported version, capabilities and identity", async () => {
+    const { api, calls } = mockApi(() => undefined);
+    const res = (await createServer({ api }).handle({ jsonrpc: "2.0", id: "d", method: "server/discover", params: meta() })) as { result: Record<string, unknown> };
+    expect(res.result).toMatchObject({ resultType: "complete", capabilities: { tools: { listChanged: false } }, _meta: { "io.modelcontextprotocol/serverInfo": { name: "nanoflags" } } });
+    expect(res.result.supportedVersions).toEqual(SUPPORTED_PROTOCOL_VERSIONS);
+    expect(SUPPORTED_PROTOCOL_VERSIONS[0]).toBe("2026-07-28");
+    expect(String(res.result.instructions)).toMatch(/not available through this server/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("refuses an unsupported version with -32022 and the supported list", async () => {
+    const { api } = mockApi(() => undefined);
+    const res = await createServer({ api }).handle({ jsonrpc: "2.0", id: 1, method: "tools/list", params: meta("1900-01-01") });
+    expect(res).toMatchObject({ error: { code: -32022, data: { requested: "1900-01-01", supported: SUPPORTED_PROTOCOL_VERSIONS } } });
+  });
+
+  it("marks results complete, adds cache hints to tools/list and drops removed methods", async () => {
+    const { api } = mockApi((c) => (c.path === "/projects/commerce/environments" ? { body: envs } : undefined));
+    const server = createServer({ api, defaultProject: "commerce" });
+    const list = (await server.handle({ jsonrpc: "2.0", id: 1, method: "tools/list", params: meta() })) as { result: Record<string, unknown> };
+    expect(list.result).toMatchObject({ resultType: "complete", ttlMs: 3_600_000, cacheScope: "public" });
+    expect((list.result.tools as unknown[]).length).toBe(8);
+    const callRes = (await server.handle({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "list_environments", arguments: {}, ...meta() } })) as { result: Record<string, unknown> };
+    expect(callRes.result).toMatchObject({ resultType: "complete", isError: false });
+    expect(await server.handle({ jsonrpc: "2.0", id: 3, method: "ping", params: meta() })).toMatchObject({ error: { code: -32601 } });
+  });
+
+  it("uses the transport's hints for credential and project problems", async () => {
+    const { api } = mockApi(() => ({ status: 401, body: { error: { code: "UNAUTHORIZED", message: "Unknown or revoked API token." } } }));
+    const hints = { scope: "S", unauthorized: "Reconnect NanoFlags in your AI app.", project: "Pass `project`." };
+    const server = createServer({ api, hints });
+    expect((await call(server, "list_flags", {})).content[0]!.text).toBe("Pass `project`.");
+    expect((await call(server, "list_flags", { project: "commerce" })).content[0]!.text).toContain("Reconnect NanoFlags in your AI app.");
+  });
+});
+
+describe("schemas for directories", () => {
+  it("every value parameter declares its JSON types, and no description tells the model how to behave", async () => {
+    const { TOOLS } = await import("../src/tools");
+    for (const t of TOOLS) {
+      expect(t.description).not.toMatch(/\b(you must|you should|do not|don't|never try|work around)\b/i);
+      for (const [k, v] of Object.entries((t.inputSchema as { properties: Record<string, { type?: unknown }> }).properties)) {
+        expect(v.type, `${t.name}.${k}`).toBeDefined();
+      }
+    }
   });
 });

@@ -1,6 +1,7 @@
 {
   "name": "@nanoflags/mcp",
-  "version": "0.2.0",
+  "version": "0.3.0",
+  "mcpName": "io.github.motazalmaroai/nanoflags",
   "description": "NanoFlags MCP server: lets coding agents create flags, edit drafts and open change requests through the Management API. Agents propose; people approve and publish.",
   "keywords": [
     "nanoflags",

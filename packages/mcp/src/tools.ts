@@ -13,6 +13,8 @@ export interface ToolContext {
   defaultProject?: string;
   /** Lazily resolved project of the token (token.get), cached. */
   tokenProject?: () => Promise<string | null>;
+  /** What to say when no project is known (the transport's own words). */
+  projectHint?: string;
 }
 
 export interface ToolResult {
@@ -32,12 +34,14 @@ export interface Tool {
 export class ToolInputError extends Error {}
 
 const KEY = { type: "string", pattern: "^[a-z0-9][a-z0-9_-]{0,62}$" };
-const project = { type: "string", description: "Project key. Default: NANOFLAGS_PROJECT, or the project the token is limited to." };
+const project = { type: "string", description: "Project key. Default: the project the connection or token is limited to (or NANOFLAGS_PROJECT for the local server)." };
 const environment = { type: "string", description: "Environment key, e.g. development, staging, production." };
 const obj = (properties: Record<string, JsonSchema>, required: string[] = []): JsonSchema => ({ type: "object", properties, required, additionalProperties: false });
 
 const GOVERNANCE =
-  "Agents propose, people approve: this server can create flags, edit drafts and open change requests, but publishing, approving, scheduling and the kill switch are done by a person in the NanoFlags dashboard.";
+  "Publishing, approving, scheduling and the kill switch are not available through this server; they are done by a person in the NanoFlags dashboard.";
+/** A flag value: boolean, number, string or JSON, matching the flag's type. */
+const VALUE: JsonSchema = { type: ["boolean", "number", "string", "object", "array"] };
 
 /** Validates the subset of JSON Schema the tools use: object, required, additionalProperties false, type, enum, pattern, items, bounds. */
 export function validate(schema: JsonSchema, value: unknown, path = "arguments"): string | null {
@@ -77,7 +81,7 @@ async function projectOf(args: Record<string, unknown>, ctx: ToolContext): Promi
   if (ctx.defaultProject) return ctx.defaultProject;
   const p = ctx.tokenProject ? await ctx.tokenProject() : null;
   if (p) return p;
-  throw new ToolInputError("Name the project: pass `project` (a project key) or set NANOFLAGS_PROJECT in the MCP server configuration.");
+  throw new ToolInputError(ctx.projectHint ?? "Name the project: pass `project` (a project key) or set NANOFLAGS_PROJECT in the MCP server configuration.");
 }
 
 const P = (p: string) => `/projects/${seg(p)}`;
@@ -179,7 +183,7 @@ export const TOOLS: Tool[] = [
         name: { type: "string", maxLength: 120 },
         description: { type: "string", maxLength: 2000 },
         type: { type: "string", enum: ["boolean", "string", "number", "json"], description: "Default boolean." },
-        initialValue: { description: "Value served before any rule (required for non-boolean flags)." },
+        initialValue: { ...VALUE, description: "Value served before any rule (required for non-boolean flags)." },
         purpose: { type: "string", enum: ["release", "experiment", "operational", "permission"] },
       },
       ["key"],
@@ -197,16 +201,16 @@ export const TOOLS: Tool[] = [
   {
     name: "update_draft",
     title: "Edit a flag's draft",
-    description: `Edit a flag's DRAFT configuration in one environment: on/off, targeting rules, default value (the variation served when no rule matches) and off value. Rules: [{ id, conditions: [{ attribute, op, value }], serve: { type: "fixed", value } | { type: "rollout", percentage, value, otherwise } }]. op is one of eq, neq, in, not_in (value: list), contains, starts_with, ends_with, gt, gte, lt, lte (numbers only: "4.10" is 4.1), semver_eq, semver_neq, semver_gt, semver_gte, semver_lt, semver_lte (versions such as "4.10.0"; use these for app versions), before, after (dates "2026-12-31", timestamps "2026-12-31T09:00:00Z", or Unix seconds/milliseconds), exists, not_exists, segment, not_segment (value: segment key, attribute ""). Only the fields you send change. The draft is not live until a person publishes it. ${GOVERNANCE}`,
+    description: `Edit a flag's draft configuration in one environment: on/off, targeting rules, default value (the variation served when no rule matches) and off value. Only the fields you send change. The draft is not live until a person publishes it. ${GOVERNANCE}`,
     inputSchema: obj(
       {
         project,
         flag: { ...KEY, description: "Flag key." },
         environment,
         enabled: { type: "boolean" },
-        rules: { type: "array", maxItems: 200, items: { type: "object" } },
-        default: { description: "Value served when the flag is on and no rule matches." },
-        off: { description: "Value served when the flag is off." },
+        rules: { type: "array", maxItems: 200, items: { type: "object" }, description: 'Targeting rules, replacing the current list: [{ id, conditions: [{ attribute, op, value }], serve: { type: "fixed", value } | { type: "rollout", percentage, value, otherwise } }]. op is one of eq, neq, in, not_in (value: list), contains, starts_with, ends_with, gt, gte, lt, lte (numbers only: "4.10" is 4.1), semver_eq, semver_neq, semver_gt, semver_gte, semver_lt, semver_lte (versions such as "4.10.0"; use these for app versions), before, after (dates "2026-12-31", timestamps "2026-12-31T09:00:00Z", or Unix seconds/milliseconds), exists, not_exists, segment, not_segment (value: segment key, attribute "").' },
+        default: { ...VALUE, description: "Value served when the flag is on and no rule matches." },
+        off: { ...VALUE, description: "Value served when the flag is off." },
       },
       ["flag", "environment"],
     ),

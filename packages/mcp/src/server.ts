@@ -1,127 +1,15 @@
 /**
- * A Model Context Protocol server over stdio (newline-delimited JSON-RPC 2.0), without dependencies: initialize,
- * ping, tools/list and tools/call. Logs go to stderr only; stdout carries protocol messages.
+ * The stdio transport of the NanoFlags MCP server (newline-delimited JSON-RPC 2.0) and its environment configuration.
+ * The protocol itself (initialize / server/discover, tools/list, tools/call) lives in core.ts, shared with the hosted
+ * Streamable HTTP server (workers/mcp). Logs go to stderr only; stdout carries protocol messages.
  */
-import { ApiClient, ApiError, DEFAULT_BASE_URL, TOKEN_PATTERN } from "./api.js";
-import { TOOLS, ToolInputError, validate, type Tool, type ToolContext } from "./tools.js";
+import { DEFAULT_BASE_URL, TOKEN_PATTERN } from "./api.js";
+import { rpcError, type McpServer, type Message } from "./core.js";
 
-export const VERSION = "0.2.0";
-export const PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
-
-export const INSTRUCTIONS = [
-  "NanoFlags feature flags. You act through an AI-agent token: you can read flags and environments, create flags, edit drafts (targeting rules, default and off values) and open change requests.",
-  "You cannot publish, approve, schedule, use the kill switch or change settings: a person does that in the NanoFlags dashboard after reviewing your change. Do not try to work around it.",
-  "Typical flow: explain_flag or get_flag, then create_flag / update_draft, then open_change_request with a clear title and reason, then get_change_status.",
-].join(" ");
-
-type Id = string | number | null;
-interface Request { jsonrpc: "2.0"; id?: Id; method: string; params?: Record<string, unknown> }
-type Message = Record<string, unknown>;
-
-export interface ServerOptions {
-  api: ApiClient;
-  defaultProject?: string;
-  tools?: Tool[];
-  log?: (line: string) => void;
-}
-
-const rpcError = (id: Id, code: number, message: string): Message => ({ jsonrpc: "2.0", id, error: { code, message } });
-const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
-
-/** Text an agent can act on for an API refusal. */
-export function explainError(e: unknown): string {
-  if (e instanceof ToolInputError) return e.message;
-  if (!(e instanceof ApiError)) return `Unexpected error: ${e instanceof Error ? e.message : String(e)}`;
-  const base = `NanoFlags refused (${e.code}): ${e.message}`;
-  switch (e.code) {
-    case "AGENT_FORBIDDEN":
-      return `${base}\nThis is a governance rule, not a bug: AI agents propose, people approve and publish. Open a change request instead and ask a person to review it in the dashboard.`;
-    case "INSUFFICIENT_SCOPE":
-      return `${base}\nThe token in NANOFLAGS_API_TOKEN lacks that scope. Ask an owner or admin for an AI-agent token (Settings → API tokens → AI agents).`;
-    case "UNAUTHORIZED":
-      return `${base}\nCheck NANOFLAGS_API_TOKEN: the token may be revoked or expired. Ask an owner or admin for a new AI-agent token.`;
-    case "FORBIDDEN":
-      return `${base}\nThe person who owns this token does not have that permission in this project or environment.`;
-    case "PLAN_REQUIRED":
-      return `${base}\nThe organization's plan does not include this.`;
-    default:
-      return base;
-  }
-}
-
-export function createServer(o: ServerOptions) {
-  const tools = o.tools ?? TOOLS;
-  let tokenProject: Promise<string | null> | null = null;
-  const ctx: ToolContext = {
-    api: o.api,
-    defaultProject: o.defaultProject,
-    tokenProject: () =>
-      (tokenProject ??= o.api.get<{ projectKey: string | null }>("/token").then(
-        (t) => t.projectKey ?? null,
-        () => null,
-      )),
-  };
-
-  async function callTool(params: Record<string, unknown>): Promise<Message> {
-    const tool = tools.find((t) => t.name === params.name);
-    if (!tool) throw Object.assign(new Error(`Unknown tool: ${String(params.name)}`), { rpc: -32602 });
-    const args = params.arguments === undefined ? {} : params.arguments;
-    if (!isObject(args)) return { content: [{ type: "text", text: "Arguments must be an object." }], isError: true };
-    const invalid = validate(tool.inputSchema, args);
-    if (invalid) return { content: [{ type: "text", text: invalid }], isError: true };
-    try {
-      const r = await tool.run(args, ctx);
-      return { content: [{ type: "text", text: r.text }], ...(r.data !== undefined && isObject(r.data) ? { structuredContent: r.data } : {}), isError: false };
-    } catch (e) {
-      if (!(e instanceof ApiError) && !(e instanceof ToolInputError)) o.log?.(`tool ${tool.name} failed: ${e instanceof Error ? e.message : String(e)}`);
-      return { content: [{ type: "text", text: explainError(e) }], isError: true, ...(e instanceof ApiError ? { structuredContent: { error: { code: e.code, message: e.message, status: e.status } } } : {}) };
-    }
-  }
-
-  /** Handles one message; returns the response, or null for notifications. */
-  async function handle(raw: unknown): Promise<Message | null> {
-    if (!isObject(raw) || raw.jsonrpc !== "2.0" || typeof raw.method !== "string") {
-      return isObject(raw) && ("result" in raw || "error" in raw) ? null : rpcError(isObject(raw) && (typeof raw.id === "string" || typeof raw.id === "number") ? raw.id : null, -32600, "Invalid request.");
-    }
-    const req = raw as unknown as Request;
-    const notification = req.id === undefined;
-    const id: Id = req.id ?? null;
-    const params = isObject(req.params) ? req.params : {};
-    try {
-      let result: unknown;
-      switch (req.method) {
-        case "initialize": {
-          const asked = typeof params.protocolVersion === "string" ? params.protocolVersion : "";
-          result = {
-            protocolVersion: PROTOCOL_VERSIONS.includes(asked) ? asked : PROTOCOL_VERSIONS[0],
-            capabilities: { tools: { listChanged: false } },
-            serverInfo: { name: "nanoflags", title: "NanoFlags", version: VERSION },
-            instructions: INSTRUCTIONS,
-          };
-          break;
-        }
-        case "ping":
-          result = {};
-          break;
-        case "tools/list":
-          result = { tools: tools.map((t) => ({ name: t.name, title: t.title, description: t.description, inputSchema: t.inputSchema, annotations: { title: t.title, ...t.annotations } })) };
-          break;
-        case "tools/call":
-          result = await callTool(params);
-          break;
-        default:
-          if (notification) return null; // notifications/initialized, notifications/cancelled, …
-          return rpcError(id, -32601, `Method not found: ${req.method}`);
-      }
-      return notification ? null : { jsonrpc: "2.0", id, result };
-    } catch (e) {
-      const code = isObject(e) && typeof e.rpc === "number" ? e.rpc : -32603;
-      return notification ? null : rpcError(id, code, e instanceof Error ? e.message : "Internal error.");
-    }
-  }
-
-  return { handle, tools };
-}
+export {
+  INSTRUCTIONS, MODERN_PROTOCOL_VERSIONS, PROTOCOL_VERSIONS, STDIO_HINTS, SUPPORTED_PROTOCOL_VERSIONS, VERSION,
+  createServer, explainError, type Hints, type McpServer, type ServerOptions,
+} from "./core.js";
 
 export interface Streams {
   input: NodeJS.ReadableStream;
@@ -129,7 +17,7 @@ export interface Streams {
 }
 
 /** Reads newline-delimited JSON-RPC from `input`, writes answers to `output`. Resolves when input ends. */
-export function serveStdio(server: ReturnType<typeof createServer>, s: Streams): Promise<void> {
+export function serveStdio(server: McpServer, s: Streams): Promise<void> {
   return new Promise((resolve) => {
     let buffer = "";
     let pending = Promise.resolve();

@@ -9,8 +9,9 @@ name: Release
 #   workflow_call (input `package`) from auto-release.yml, which runs on every push to main
 #   workflow_dispatch (input `package`: sdk | openfeature | cli | react-native | mcp) -> the version currently in that package.json
 # A tag's version must equal the package.json version. A version that is already on npm is skipped with a notice.
-# Publish the SDK before a provider release that needs a new SDK version (the provider's peer range on
-# @nanoflags/sdk is written from the workspace version by `pnpm pack`).
+# Publish the SDK before a provider release that needs a new SDK version. The OpenFeature provider's peer range on
+# @nanoflags/sdk is explicit in packages/openfeature/package.json (tested versions only): a new SDK minor needs a
+# provider release that widens it.
 # @nanoflags/engine is private: it is bundled into the SDK and the CLI and never published.
 # Requires the repository secret NPM_TOKEN.
 

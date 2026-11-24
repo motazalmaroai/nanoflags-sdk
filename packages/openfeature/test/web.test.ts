@@ -1,5 +1,5 @@
 /** The same surface through the real OpenFeature web SDK (synchronous evaluation, static context). */
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ErrorCode, OpenFeature, ProviderEvents, ProviderStatus, StandardResolutionReasons } from "@openfeature/web-sdk";
 import { NanoFlagsWebProvider } from "../src/web";
 import { bundleResponse, makeBundle, offline, scripted, tick } from "./helpers";
@@ -65,6 +65,22 @@ describe("web provider", () => {
     expect(of.providerStatus).toBe(ProviderStatus.READY);
     expect(of.getStringValue("str", "fb")).toBe("v8");
     expect(seen).toEqual([ProviderEvents.Stale, ProviderEvents.Ready, ProviderEvents.ConfigurationChanged]);
+  });
+
+  it("track() uses the static context", async () => {
+    const { of, client } = await setup(bundleResponse(makeBundle(7)), { targetingKey: "u1", plan: "vip" });
+    const spy = vi.spyOn(client, "track");
+    of.track("checkout_completed", { value: 9.99 });
+    of.track("opened");
+    expect(spy.mock.calls).toEqual([
+      ["checkout_completed", 9.99, { key: "u1", plan: "vip" }],
+      ["opened", undefined, { key: "u1", plan: "vip" }],
+    ]);
+  });
+
+  it("version and date operators", async () => {
+    const { of } = await setup(bundleResponse(makeBundle(7)), { targetingKey: "u1", appVersion: "v4.10" });
+    expect(of.getBooleanDetails("new-app", false)).toMatchObject({ value: true, reason: StandardResolutionReasons.TARGETING_MATCH });
   });
 
   it("no configuration: ERROR status and default values", async () => {

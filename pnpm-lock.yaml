@@ -68,6 +68,12 @@ importers:
       '@openfeature/web-sdk':
         specifier: ^1.10.0
         version: 1.10.0(@openfeature/core@1.12.0)
+      sdk-0.8.0:
+        specifier: npm:@nanoflags/sdk@0.8.0
+        version: '@nanoflags/sdk@0.8.0(react@19.3.1)'
+      sdk-0.8.1:
+        specifier: npm:@nanoflags/sdk@0.8.1
+        version: '@nanoflags/sdk@0.8.1(react@19.3.1)'
       tsdown:
         specifier: ^0.23.7
         version: 0.23.7(typescript@7.0.2)
@@ -440,6 +446,24 @@ packages:
 
   '@jridgewell/trace-mapping@0.3.31':
     resolution: {integrity: sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==}
+
+  '@nanoflags/sdk@0.8.0':
+    resolution: {integrity: sha512-dBM48E9sVbuYELkhDGjdsT0Roao7XNfL6BkSAiIWPy1HGVPDK1B6nj8eC8dBUarlCsUsdaxUWobTiWTpizCQNQ==}
+    engines: {node: '>=18'}
+    peerDependencies:
+      react: '>=18'
+    peerDependenciesMeta:
+      react:
+        optional: true
+
+  '@nanoflags/sdk@0.8.1':
+    resolution: {integrity: sha512-uEs4pXc9JOUvdb+12xuxSAFHFtmrONxUYITZt3PEOjTThKbsz0Np3B0IVoP4TNCjALg3VlO5DiHTnlw26F4x3w==}
+    engines: {node: '>=18'}
+    peerDependencies:
+      react: '>=18'
+    peerDependenciesMeta:
+      react:
+        optional: true
 
   '@napi-rs/wasm-runtime@1.2.6':
     resolution: {integrity: sha512-mRyDmEw9/fCDXCGfL1sbgIw/GUK0PVxRW4YwgPN61F3LQ+fSyoBFarJVzgGyhF6kRzEQZ0FejDqm4WLXSeqQmw==}
@@ -2582,6 +2606,14 @@ snapshots:
     dependencies:
       '@jridgewell/resolve-uri': 3.1.2
       '@jridgewell/sourcemap-codec': 1.6.0
+
+  '@nanoflags/sdk@0.8.0(react@19.3.1)':
+    optionalDependencies:
+      react: 19.3.1
+
+  '@nanoflags/sdk@0.8.1(react@19.3.1)':
+    optionalDependencies:
+      react: 19.3.1
 
   '@napi-rs/wasm-runtime@1.2.6(@emnapi/core@2.0.0-beta.2)(@emnapi/runtime@2.0.0-beta.2)':
     dependencies:

@@ -10,7 +10,20 @@ npm install @nanoflags/openfeature-provider @nanoflags/sdk @openfeature/server-s
 ```
 
 ESM and CommonJS, types included, Node 18 or newer. `@nanoflags/sdk`, `@openfeature/core` and the
-OpenFeature SDK you use are peer dependencies. Releases are published to npm from
+OpenFeature SDK you use are peer dependencies.
+
+## Compatibility
+
+| Provider | `@nanoflags/sdk` | OpenFeature |
+| --- | --- | --- |
+| 0.2.x | `^0.8.0` (0.8.0 and 0.8.1 tested) | `@openfeature/core` `^1.12.0` with `@openfeature/server-sdk` `^1.17.0` or `@openfeature/web-sdk` `^1.4.0` |
+| 0.1.0 | `^0.3.0` only | same |
+
+The range on `@nanoflags/sdk` only covers SDK versions the test suite runs against (the SDK sources and the published
+0.8.0 and 0.8.1); it is widened in a provider release when a new SDK minor has been tested. 0.8.0 is the first SDK with
+the version (`semver_*`) and date (`before` / `after`) operators. With `@openfeature/server-sdk` 1.17.x, the
+`errorMessage` of an error the provider returns (for example `FLAG_NOT_FOUND`) is not passed on to the evaluation
+details; 1.18.0 and newer pass it on. The error code is the same. Releases are published to npm from
 [motazalmaroai/nanoflags-sdk](https://github.com/motazalmaroai/nanoflags-sdk) by its release workflow
 (`.github/workflows/release.yml`, tag `openfeature-v<version>`).
 
@@ -58,7 +71,8 @@ for example to the current request's test session:
 | `variant` | The id of the matching rule, when a rule matched. Otherwise absent. |
 | `flagMetadata` | `{ revision }` — the revision the value came from. |
 | Errors (the caller's default value is returned, `reason: ERROR`) | `FLAG_NOT_FOUND` — the flag is not in the loaded configuration (unknown, archived, or server-only with a browser key) · `TYPE_MISMATCH` — the flag's value has another type than requested · `GENERAL` — malformed configuration · `PROVIDER_NOT_READY` — no configuration has been loaded yet. |
-| Provider status and events | `READY` when a current bundle is in use · `STALE` when the bundle in use is not known to be current (failed revalidation, restored from storage, edge serving last-known-good) — evaluations continue · `ERROR` when initialization ends without any configuration; `READY` follows as soon as one arrives · `CONFIGURATION_CHANGED` for every new revision, with `metadata.revision`. |
+| Provider status and events | `READY` when a current bundle is in use · `STALE` when the bundle in use is not known to be current (failed revalidation, restored from storage, edge serving last-known-good) — evaluations continue · `ERROR` when initialization ends without any configuration (every further client error is an `ERROR` event until one arrives); `READY` follows as soon as one arrives · `CONFIGURATION_CHANGED` for every new revision, with `metadata.revision`. With a configuration in use, client errors (failed revalidation, rejected signature, ...) are not provider events: they stay the SDK's, logged by it unless you attach `client.on("error", …)`. |
+| `track(name, context, details)` | `client.track(name, value, ctx)` of the SDK: an experiment metric event. `details.value` (a finite number) is the metric value; the context is mapped as for evaluations. Other details are not sent (NanoFlags only sends a hash of the unit). Always goes to the client, not to `evaluator`. |
 | Web SDK context changes | Evaluation is local, so a new context applies to the next evaluation without a network round trip; the SDK emits its usual context-changed events. |
 | Hooks, domains, global/client/invocation context merging, evaluation details | Provided by the OpenFeature SDK and unaffected. |
 
@@ -68,8 +82,8 @@ for example to the current request's test session:
   and is absent for `DEFAULT` and `DISABLED`.
 - **`flagsChanged`** on `CONFIGURATION_CHANGED`: the event says that a new revision is in use, not
   which flags differ.
-- **Tracking** (`track`) is not implemented; calls are ignored by the SDK. NanoFlags' own sampled
-  evaluation telemetry is configured on the `@nanoflags/sdk` client.
+- **Tracking details other than `value`** are not sent. NanoFlags' own sampled evaluation telemetry, exposures and
+  `events: false` / `experiments` are configured on the `@nanoflags/sdk` client.
 - **Provider hooks**, **`PROVIDER_FATAL`** and **`RECONCILING`**: not emitted. A revoked or wrong SDK
   key surfaces as `ERROR` (no configuration) or `STALE` (a configuration was already loaded).
 - **Reasons `STATIC`, `CACHED`, `TARGETING_KEY_MISSING`**: not used. A rollout evaluated without a

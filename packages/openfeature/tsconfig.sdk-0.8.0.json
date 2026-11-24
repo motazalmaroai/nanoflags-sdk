@@ -1,0 +1,8 @@
+// Type-checks the provider and its tests against the published declarations of @nanoflags/sdk 0.8.0, the oldest
+// version of the peer range (tsconfig.json checks them against the SDK sources).
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "paths": { "@nanoflags/sdk": ["./node_modules/sdk-0.8.0/dist/index.d.ts"] }
+  }
+}

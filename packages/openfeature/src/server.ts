@@ -1,6 +1,6 @@
 /** OpenFeature provider for the server SDK (`@openfeature/server-sdk`). */
-import { OpenFeatureEventEmitter, ProviderEvents, type EvaluationContext, type JsonValue, type Provider, type ResolutionDetails } from "@openfeature/server-sdk";
-import { bridge, resolve, type NanoFlagsProviderOptions } from "./index.js";
+import { OpenFeatureEventEmitter, ProviderEvents, type EvaluationContext, type JsonValue, type Provider, type ResolutionDetails, type TrackingEventDetails } from "@openfeature/server-sdk";
+import { bridge, resolve, track, type NanoFlagsProviderOptions } from "./index.js";
 
 export type { NanoFlagsProviderOptions } from "./index.js";
 
@@ -25,6 +25,11 @@ export class NanoFlagsProvider implements Provider {
     if (client.status === "not-ready") throw new Error("NanoFlags could not load a configuration. Evaluations return their default values until one arrives.");
     // The SDK emits READY when this method resolves; a stale bundle is reported right after.
     if (client.status === "stale") setTimeout(() => client.status === "stale" && this.events.emit(ProviderEvents.Stale, { message: "The configuration in use is not known to be current." }), 0);
+  }
+
+  /** OpenFeature tracking → NanoFlags `client.track()` (experiment metrics). `trackingEventDetails.value` is the metric value. */
+  track(trackingEventName: string, context: EvaluationContext, trackingEventDetails: TrackingEventDetails): void {
+    track(this.options, trackingEventName, context, trackingEventDetails);
   }
 
   async onClose(): Promise<void> {

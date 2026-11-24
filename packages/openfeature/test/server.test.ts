@@ -2,7 +2,7 @@
  * Conformance-style tests: the provider is exercised through the real OpenFeature server SDK,
  * so what is asserted is what an application sees.
  */
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ErrorCode, OpenFeature, ProviderEvents, ProviderStatus, StandardResolutionReasons } from "@openfeature/server-sdk";
 import { bucketOf } from "../../engine/src/index";
 import { NanoFlagsProvider } from "../src/server";
@@ -118,6 +118,26 @@ describe("resolution", () => {
     expect(toNanoFlagsContext(undefined)).toEqual({});
   });
 
+  it("version and date operators: string versions and Date attributes reach the SDK's semver_* / before / after", async () => {
+    const { of } = await setup(bundleResponse(makeBundle(7)));
+    expect(await of.getBooleanDetails("new-app", false, { targetingKey: "u1", appVersion: "4.10.0" })).toMatchObject({ value: true, reason: StandardResolutionReasons.TARGETING_MATCH, variant: "v4-10" });
+    expect(await of.getBooleanValue("new-app", false, { targetingKey: "u1", appVersion: "4.9.3" })).toBe(false); // 4.10 > 4.9: not a string comparison
+    expect(await of.getBooleanValue("new-app", false, { targetingKey: "u1", appVersion: "4.10.0-rc.1" })).toBe(false);
+    expect(await of.getBooleanValue("late-signup", false, { targetingKey: "u1", signedUp: new Date("2026-03-04T00:00:00Z") })).toBe(true);
+    expect(await of.getBooleanValue("late-signup", false, { targetingKey: "u1", signedUp: new Date("2025-12-31T23:59:59Z") })).toBe(false);
+    // An unreadable value makes the condition false; it is not an error.
+    expect(await of.getBooleanDetails("new-app", false, { targetingKey: "u1", appVersion: "not a version" })).toMatchObject({ value: false, reason: StandardResolutionReasons.DEFAULT });
+  });
+
+  it("the caller's default value is the SDK fallback (what the SDK's telemetry and trace see)", async () => {
+    const { of, client } = await setup(bundleResponse(makeBundle(7)));
+    const spy = vi.spyOn(client, "evaluate");
+    await of.getStringValue("nope", "fb");
+    await of.getObjectValue("nope", { a: 1 });
+    expect(spy.mock.calls.map((c) => c[1])).toEqual(["fb", { a: 1 }]);
+    expect(spy.mock.results.map((r) => (r.value as { value: unknown }).value)).toEqual(["fb", { a: 1 }]);
+  });
+
   it("global, client and invocation context are merged by the SDK before they reach the provider", async () => {
     const { of } = await setup(bundleResponse(makeBundle(7)));
     of.setContext({ plan: "vip" });
@@ -131,6 +151,38 @@ describe("resolution", () => {
     const provider = new NanoFlagsProvider({ client, evaluator: () => ({ evaluate: (key, fallback, ctx) => client.evaluate(key, fallback, { ...ctx, plan: "vip" }) }) });
     await OpenFeature.setProviderAndWait("evaluator", provider);
     expect(await OpenFeature.getClient("evaluator").getBooleanValue("bool-fixed", false, { targetingKey: "u1" })).toBe(true);
+  });
+});
+
+describe("tracking", () => {
+  it("track() → client.track(name, value, mapped context)", async () => {
+    const { of, client } = await setup(bundleResponse(makeBundle(7)));
+    const spy = vi.spyOn(client, "track");
+    of.track("checkout_completed", { targetingKey: "u1", plan: "vip" }, { value: 42.5, currency: "EUR" });
+    of.track("signed_up", { targetingKey: "u2" });
+    of.track("bad_value", { targetingKey: "u3" }, { value: Number.NaN });
+    expect(spy.mock.calls).toEqual([
+      ["checkout_completed", 42.5, { key: "u1", plan: "vip" }],
+      ["signed_up", undefined, { key: "u2" }],
+      ["bad_value", undefined, { key: "u3" }],
+    ]);
+  });
+
+  it("the client context set on OpenFeature is merged into tracking calls", async () => {
+    const { of, client } = await setup(bundleResponse(makeBundle(7)));
+    const spy = vi.spyOn(client, "track");
+    of.setContext({ targetingKey: "u9" });
+    of.track("viewed");
+    expect(spy.mock.calls).toEqual([["viewed", undefined, { key: "u9" }]]);
+  });
+
+  it("a client without track() is accepted; tracking is then ignored", async () => {
+    const { client } = scripted(bundleResponse(makeBundle(7)));
+    closers.push(() => client.close());
+    const { track: _ignored, ...rest } = client;
+    const partial = Object.defineProperties(rest, { status: { get: () => client.status }, revision: { get: () => client.revision } });
+    await OpenFeature.setProviderAndWait("no-track", new NanoFlagsProvider({ client: partial }));
+    expect(() => OpenFeature.getClient("no-track").track("x", { targetingKey: "u1" })).not.toThrow();
   });
 });
 
@@ -182,6 +234,50 @@ describe("status and events", () => {
     expect(details[0]).toMatchObject({ metadata: { revision: 8 } });
     expect(of.providerStatus).toBe(ProviderStatus.READY);
     expect(await of.getStringDetails("str", "fb")).toMatchObject({ value: "v8", flagMetadata: { revision: 8 } });
+  });
+
+  it("client errors while a bundle is in use stay the SDK's: not swallowed by the provider, no ERROR event", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { of, seen, client, edge } = await setup(bundleResponse(makeBundle(7)));
+      edge.next = offline();
+      await client.refresh();
+      await tick();
+      expect(of.providerStatus).toBe(ProviderStatus.STALE);
+      expect(seen).toEqual([ProviderEvents.Ready, ProviderEvents.Stale]);
+      // No error listener of the application: the SDK reports the error itself (once per code).
+      expect(warn.mock.calls.some((c) => String(c[0]).startsWith("[nanoflags] network:"))).toBe(true);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("while no configuration is loaded, every client error is an ERROR event; listening stops once a bundle is in use", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { of, seen, client, edge } = await setup(offline());
+      const messages: unknown[] = [];
+      of.addHandler(ProviderEvents.Error, (d) => messages.push(d?.message));
+      messages.length = 0; // (a handler added in the ERROR state is called right away)
+      await client.refresh(); // fails again
+      await tick();
+      expect(messages).toEqual(["Could not reach the NanoFlags edge: offline"]);
+      expect(of.providerStatus).toBe(ProviderStatus.ERROR);
+      edge.next = bundleResponse(makeBundle(8));
+      await client.refresh();
+      await tick();
+      expect(of.providerStatus).toBe(ProviderStatus.READY);
+      warn.mockClear();
+      edge.next = new Response("nope", { status: 500 });
+      await client.refresh();
+      await tick();
+      expect(messages).toHaveLength(1); // no ERROR event with a bundle in use
+      expect(of.providerStatus).toBe(ProviderStatus.STALE);
+      expect(warn.mock.calls.some((c) => String(c[0]).startsWith("[nanoflags] http:"))).toBe(true);
+      expect(seen.filter((e) => e === ProviderEvents.Error)).toHaveLength(2); // initialization + the failed retry
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("a client that starts on a stale bundle is READY, then STALE", async () => {

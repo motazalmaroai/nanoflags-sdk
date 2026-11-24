@@ -1,6 +1,6 @@
 {
   "name": "@nanoflags/openfeature-provider",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "OpenFeature provider for NanoFlags (JavaScript server and web SDKs): local, synchronous evaluation through @nanoflags/sdk.",
   "keywords": [
     "openfeature",
@@ -60,6 +60,7 @@
   "files": [
     "dist",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE",
     "NOTICE"
   ],
@@ -72,11 +73,11 @@
   "scripts": {
     "build": "tsdown",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.sdk-0.8.0.json",
     "prepublishOnly": "pnpm run build && pnpm run typecheck && pnpm run test"
   },
   "peerDependencies": {
-    "@nanoflags/sdk": "workspace:^",
+    "@nanoflags/sdk": "^0.8.0",
     "@openfeature/core": "^1.12.0",
     "@openfeature/server-sdk": "^1.17.0",
     "@openfeature/web-sdk": "^1.4.0"
@@ -94,6 +95,8 @@
     "@openfeature/core": "^1.12.0",
     "@openfeature/server-sdk": "^1.23.0",
     "@openfeature/web-sdk": "^1.10.0",
+    "sdk-0.8.0": "npm:@nanoflags/sdk@0.8.0",
+    "sdk-0.8.1": "npm:@nanoflags/sdk@0.8.1",
     "tsdown": "^0.23.7",
     "typescript": "^7.0.2",
     "vitest": "^4.1.12"

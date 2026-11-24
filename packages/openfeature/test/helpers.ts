@@ -15,6 +15,9 @@ export function makeBundle(revision: number, over: Partial<Bundle["flags"]> = {}
       num: { type: "number", enabled: true, default: 20, off: 0, rules: [] },
       obj: { type: "json", enabled: true, default: { columns: 3 }, off: null, rules: [] },
       "by-date": { type: "string", enabled: true, default: "no", off: "off", rules: [{ id: "since", match: "all", conditions: [{ attribute: "signedUp", op: "eq", value: "2026-01-02T03:04:05.000Z" }], serve: { type: "fixed", value: "yes" } }] },
+      // Version and date operators (@nanoflags/sdk 0.8.0+; earlier SDKs evaluate them as not matching).
+      "new-app": { type: "boolean", enabled: true, default: false, off: false, rules: [{ id: "v4-10", match: "all", conditions: [{ attribute: "appVersion", op: "semver_gte", value: "4.10.0" }], serve: { type: "fixed", value: true } }] },
+      "late-signup": { type: "boolean", enabled: true, default: false, off: false, rules: [{ id: "since-2026", match: "all", conditions: [{ attribute: "signedUp", op: "after", value: "2026-01-01" }], serve: { type: "fixed", value: true } }] },
       ...over,
     } as Bundle["flags"],
   };

@@ -39,6 +39,9 @@ resource "nanoflags_environment_publish" "dev" {
 }
 ```
 
+With OpenTofu, the same provider is also listed in the OpenTofu Registry, so `source = "nanoflags/nanoflags"` works there
+as well as the full `registry.nanoflags.io/nanoflags/nanoflags` address. Both serve the same signed release.
+
 ## What it manages
 
 | Management API | Terraform |

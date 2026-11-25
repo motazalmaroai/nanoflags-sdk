@@ -1,7 +1,7 @@
 # NanoFlags for Android and Kotlin
 
 Feature flags evaluated **on the device**, kept current by a **live WebSocket**, verified with **Ed25519 signatures**
-and stored for an **offline-first** start. Version 0.2.0, Apache-2.0.
+and stored for an **offline-first** start. Version 0.3.1, Apache-2.0.
 
 | Artifact | What it is |
 | --- | --- |
@@ -121,7 +121,7 @@ revalidates. The bundle is persisted after every update and re-verified when loa
 ## Telemetry
 
 Like the other SDKs: a service report ("this app runs revision N") and sampled evaluation events (10 %) to
-`POST /v1/events`, reported as `android/0.2.0` (or `kotlin/0.2.0`). Events carry the **names of the attributes the
+`POST /v1/events`, reported as `android/<version>` (or `kotlin/<version>`). Events carry the **names of the attributes the
 flag's rules use and the type of their values — never values**. Sent only while the app is in the foreground and
 online, every 30 s when events are queued, otherwise one report per minute. Opt out with `events { enabled = false }`.
 

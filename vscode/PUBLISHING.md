@@ -5,6 +5,12 @@
 `vscode/package.json`, to the Visual Studio Marketplace (secret `VSCE_PAT`) and to Open VSX (secret `OVSX_PAT`). Each
 registry is skipped with a notice while its secret is missing.
 
+> **Status (checked 2026-11-25).** 0.1.0 is live on both registries from the `vscode-v0.1.0` tag run: Visual Studio
+> Marketplace `nanoflags.vscode-nanoflags` (publisher `nanoflags`; domain not verified) and Open VSX
+> `nanoflags/vscode-nanoflags` (namespace `nanoflags` exists but is **not verified**; no namespace-claim issue found
+> yet). Both secrets and the `vscode-marketplace` environment are therefore set up; the one-time steps still open are
+> Marketplace domain verification (step 4) and the Open VSX namespace claim (step 3).
+
 ## Release
 
 1. Bump `version` in `vscode/package.json` and date the entry in `vscode/CHANGELOG.md`; merge.

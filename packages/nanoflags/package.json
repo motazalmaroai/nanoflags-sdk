@@ -1,0 +1,46 @@
+{
+  "name": "nanoflags",
+  "version": "0.6.0",
+  "description": "The NanoFlags command line under its short name: runs @nanoflags/cli (npx nanoflags init).",
+  "keywords": [
+    "nanoflags",
+    "feature-flags",
+    "cli"
+  ],
+  "license": "Apache-2.0",
+  "homepage": "https://nanoflags.io/docs",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/motazalmaroai/nanoflags-sdk.git",
+    "directory": "packages/nanoflags"
+  },
+  "bugs": {
+    "url": "https://github.com/motazalmaroai/nanoflags-sdk/issues"
+  },
+  "type": "module",
+  "bin": {
+    "nanoflags": "./bin.js"
+  },
+  "exports": {
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "bin.js",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "test": "node --test test/launcher.test.js"
+  },
+  "dependencies": {
+    "@nanoflags/cli": "workspace:*"
+  },
+  "author": "Alibtekarat Althkiya Company for Trading & Marketing (Intinovate) <support@nanoflags.io>"
+}

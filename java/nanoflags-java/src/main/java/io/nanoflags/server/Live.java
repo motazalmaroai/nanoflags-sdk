@@ -412,8 +412,7 @@ final class Live {
             if (cur != null && revision < cur.bundle.revision()) return;
             if (cur != null && revision == cur.bundle.revision()) {
                 // Already in use: the push only confirms that it is current. With verification the signed messages must be
-                // equal (a signature binds environment, revision, checksum and the bundle's bytes); equal revision numbers
-                // and checksum text alone are not enough.
+                // equal (a signature binds environment, revision, checksum and the bundle's bytes).
                 boolean same = info != null ? cur.sig != null && cur.sig.signature.equals(info.signature) : cur.checksum.isEmpty() || cur.checksum.equals(checksum);
                 if (same) c.setStatus(Status.READY);
                 return;

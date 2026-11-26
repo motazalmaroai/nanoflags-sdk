@@ -382,7 +382,7 @@ namespace NanoFlags.Tests
             _edge.BundleStatus = 503;
             await Assert.ThrowsAsync<NanoFlagsException>(() => c.RefreshAsync());
             Assert.Equal(Status.Stale, c.Status);
-            // Validly signed, same revision, same checksum text, other bytes: not the same bundle.
+            // Same revision number, other content.
             _edge.BundleText = genuine.Replace("\"default\":\"v3\"", "\"default\":\"other\"");
             await _edge.PushAsync();
             await Task.Delay(400);

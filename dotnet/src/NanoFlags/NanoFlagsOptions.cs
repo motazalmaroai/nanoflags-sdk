@@ -22,7 +22,6 @@ namespace NanoFlags
         /// <summary>
         /// <c>https://EDGE.nanoflags.io:443/</c>, a trailing dot or trailing slashes are the official edge (<see cref="OfficialEdgeUrl"/>);
         /// anything else (another host, another scheme or port, a path, user info, a query) is left as given (trailing slashes removed).
-        /// The official edge turns signature verification on by default, so a harmless spelling of its address must not switch it off.
         /// </summary>
         internal static string NormalizeBaseUrl(string? raw)
         {

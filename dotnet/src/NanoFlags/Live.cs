@@ -392,8 +392,7 @@ namespace NanoFlags
                 if (cur != null && revision == cur.Bundle.Revision)
                 {
                     // Already in use: the push only confirms that it is current. With verification the signed messages must be
-                    // equal (a signature binds environment, revision, checksum and the bundle's bytes); equal revision numbers
-                    // and checksum text alone are not enough.
+                    // equal (a signature binds environment, revision, checksum and the bundle's bytes).
                     bool same = info != null ? cur.Sig != null && cur.Sig.Signature == info.Signature : cur.Checksum.Length == 0 || cur.Checksum == checksum;
                     if (same) _c.SetStatus(Status.Ready);
                     return;

@@ -345,7 +345,7 @@ class RevisionOrderTest {
         edge.bundleStatus = 503;
         assertThrows(NanoFlagsException.class, c::refresh);
         assertEquals(Status.STALE, c.status());
-        // Validly signed, same revision, same checksum text, other bytes: not the same bundle.
+        // Same revision number, other content.
         edge.bundleText = genuine.replace("\"default\":\"v3\"", "\"default\":\"other\"");
         edge.push();
         Thread.sleep(400);

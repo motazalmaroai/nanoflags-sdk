@@ -27,7 +27,6 @@ public final class NanoFlagsOptions {
     /**
      * {@code https://EDGE.nanoflags.io:443/}, a trailing dot or trailing slashes are the official edge ({@link #OFFICIAL_EDGE_URL});
      * anything else (another host, another scheme or port, a path, user info, a query) is left as given (trailing slashes removed).
-     * The official edge turns signature verification on by default, so a harmless spelling of its address must not switch it off.
      */
     static String normalizeBaseUrl(String raw) {
         String u = raw;

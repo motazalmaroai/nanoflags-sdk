@@ -66,14 +66,26 @@ Other MCP clients: run `npx -y @nanoflags/mcp` as a stdio server with the variab
 
 | Tool | What it does |
 | --- | --- |
-| `list_environments` | Environments of a project and their publishing policy. |
+| `list_environments` | Environments of a project and their publishing policy (paged). |
 | `list_flags` | Flags of a project (paged). |
-| `get_flag` | A flag's definition and its draft configuration per environment. |
+| `get_flag` | A flag's definition and its draft configuration per environment, with each draft's `draftVersion`. |
 | `explain_flag` | What a flag is, its live and draft state in every environment, and where it is evaluated (services, SDKs, served values) from usage insights. |
-| `create_flag` | Create a flag. It starts off in every draft. |
-| `update_draft` | Edit one environment's draft: on/off, targeting rules, default and off values. |
+| `create_flag` | Create a flag. Every draft serves the initial value (false for booleans) until a person publishes. |
+| `update_draft` | Edit one environment's draft: on/off, targeting rules, default and off values. Pass `expectedVersion` (the `draftVersion` from `get_flag`) so an edit made in the meantime is not overwritten. Rules are checked strictly (unknown keys, operators, rollouts) before anything is sent. |
 | `open_change_request` | Open a change for edited flags and submit it for review. |
 | `get_change_status` | Status and approvals of a change. |
+| `get_profile` | The account the connection acts for: a stable opaque id, the person's name, the agent label and project. Read-only. |
+| `preview_change` | What publishing an environment's draft would change: the diff against the published revision, the rules it touches, scenario checks on this draft and strict validation. It does not estimate how many users a change affects. Read-only. |
+| `find_stale_flags` | Flags suggested for cleanup, with the reasons. Read-only. |
+| `get_removal_readiness` | Whether a flag can be removed (safe, caution or blocked), with the evidence: purpose, permanence, recent usage, code references, published values. Read-only. |
+| `get_effective_policy` | The environment's publishing policy and what this connection may do. Read-only. |
+| `get_flag_usage` | Sampled usage of one flag in one environment. Read-only. |
+
+Lists take `limit` (and `cursor` where they continue), and every answer is held to 64 KB; a shortened answer says so (`truncated`).
+
+The write tools accept optional `sessionId` and `taskRef`; with the client's name and the transport they are recorded in the audit log for the person reviewing the change. They never change what the connection may do.
+
+Every tool declares `readOnlyHint`, `destructiveHint` and `openWorldHint` explicitly. `update_draft` is marked destructive because it overwrites the draft's rules and values; nothing is live until a person publishes.
 
 There is no tool to publish, approve or kill, by design. If an agent asks the API for one of those anyway, NanoFlags answers `403 AGENT_FORBIDDEN` and the server tells the agent to open a change request instead.
 

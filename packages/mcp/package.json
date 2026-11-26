@@ -46,6 +46,7 @@
     "prepublishOnly": "pnpm run build && pnpm run typecheck && pnpm run test"
   },
   "devDependencies": {
+    "@nanoflags/engine": "workspace:*",
     "@types/node": "^22.20.5",
     "tsup": "^9.0.0",
     "typescript": "~5.9.3",

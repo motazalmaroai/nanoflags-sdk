@@ -11,7 +11,9 @@
  * Tools are identical in both eras and on both transports.
  */
 import { ApiClient, ApiError } from "./api.js";
-import { TOOLS, ToolInputError, validate, type Tool, type ToolContext } from "./tools.js";
+import { capResult } from "./limits.js";
+import { provenanceHeaders } from "./provenance.js";
+import { TOOLS, ToolInputError, validate, type TokenInfo, type Tool, type ToolContext } from "./tools.js";
 
 export const VERSION = "0.3.0";
 /** Handshake-based revisions answered by `initialize`, preferred first. */
@@ -22,6 +24,8 @@ export const SUPPORTED_PROTOCOL_VERSIONS = [...MODERN_PROTOCOL_VERSIONS, ...PROT
 
 export const META_PROTOCOL_VERSION = "io.modelcontextprotocol/protocolVersion";
 export const META_SERVER_INFO = "io.modelcontextprotocol/serverInfo";
+/** OpenAI Apps SDK: WWW-Authenticate challenges on a tool result, which make ChatGPT offer (re)linking. */
+export const META_WWW_AUTHENTICATE = "mcp/www_authenticate";
 
 /** JSON-RPC error codes this server uses (MCP 2026-07-28 "Error Codes"). */
 export const RPC = {
@@ -37,7 +41,7 @@ export const RPC = {
 export const INSTRUCTIONS = [
   "NanoFlags feature flags. This server acts through an AI-agent token: it reads flags and environments, creates flags, edits drafts (targeting rules, default and off values) and opens change requests.",
   "Publishing, approving, scheduling, the kill switch and settings are not available through this server: a person does them in the NanoFlags dashboard after reviewing the change.",
-  "The tools fit together as: explain_flag or get_flag, then create_flag / update_draft, then open_change_request, then get_change_status.",
+  "The tools fit together as: explain_flag or get_flag, then create_flag / update_draft, then open_change_request, then get_change_status. get_profile names the connected account.",
 ].join(" ");
 
 /** How to fix a credential or configuration problem, in the words of the transport (env vars for stdio, sign-in for remote). */
@@ -68,7 +72,26 @@ export interface ServerOptions {
   hints?: Hints;
   /** Shown as serverInfo.name/title; defaults to nanoflags / NanoFlags. */
   serverInfo?: { name: string; title: string; version: string };
+  /**
+   * Per-tool auth policy advertised in tools/list (OpenAI Apps SDK `securitySchemes`, top level and mirrored in
+   * `_meta.securitySchemes`). Only the OAuth-protected remote server sets it; the stdio server (an env token) omits it.
+   */
+  securitySchemes?: SecurityScheme[];
+  /**
+   * WWW-Authenticate challenges for a tool call the API refused as UNAUTHORIZED (connection revoked or expired),
+   * returned as `_meta["mcp/www_authenticate"]` so the client can offer to reconnect. Remote server only.
+   */
+  authChallenge?: (error: { code: string; description: string }) => string[];
+  /** How this server is reached, recorded with agent actions (provenance, migration 0189). */
+  transport?: "stdio" | "streamable-http";
+  /** Client name when the client does not tell (the remote server knows the connected app from the OAuth grant). */
+  clientName?: string;
 }
+
+/** Where a client names itself: `initialize` params (legacy) or per-request `_meta` (2026-07-28). */
+export const META_CLIENT_INFO = "io.modelcontextprotocol/clientInfo";
+
+export type SecurityScheme = { type: "noauth" } | { type: "oauth2"; scopes: string[] };
 
 export const rpcError = (id: Id, code: number, message: string, data?: unknown): Message =>
   ({ jsonrpc: "2.0", id, error: { code, message, ...(data === undefined ? {} : { data }) } });
@@ -97,6 +120,10 @@ export function explainError(e: unknown, hints: Hints = STDIO_HINTS): string {
       return `${base}\nThe person who owns this token does not have that permission in this project or environment.`;
     case "PLAN_REQUIRED":
       return `${base}\nThe organization's plan does not include this.`;
+    case "DRAFT_CONFLICT": {
+      const v = typeof e.details.currentVersion === "number" ? e.details.currentVersion : null;
+      return `${base}\nThis draft changed after you read it, so nothing was written. Call get_flag again to see the current draft${v ? ` (draftVersion ${v})` : ""}, reapply your edit to it, and call update_draft with expectedVersion${v ? ` ${v}` : " set to the new draftVersion"}.`;
+    }
     default:
       return base;
   }
@@ -106,20 +133,40 @@ export function createServer(o: ServerOptions) {
   const tools = o.tools ?? TOOLS;
   const hints = o.hints ?? STDIO_HINTS;
   const serverInfo = o.serverInfo ?? { name: "nanoflags", title: "NanoFlags", version: VERSION };
-  let tokenProject: Promise<string | null> | null = null;
+  let tokenInfo: Promise<TokenInfo> | null = null;
+  /** clientInfo from initialize (stdio: one client per process; remote: per request, stateless). */
+  let clientInfo: { name?: unknown; version?: unknown } | null = o.clientName ? { name: o.clientName } : null;
+  const token = () => {
+    tokenInfo ??= o.api.get<TokenInfo>("/token");
+    // A failure is not cached: the next call asks again.
+    tokenInfo.catch(() => (tokenInfo = null));
+    return tokenInfo;
+  };
   const ctx: ToolContext = {
     api: o.api,
     defaultProject: o.defaultProject,
     projectHint: hints.project,
-    tokenProject: () =>
-      (tokenProject ??= o.api.get<{ projectKey: string | null }>("/token").then(
-        (t) => t.projectKey ?? null,
-        () => null,
-      )),
+    token,
+    tokenProject: () => token().then((t) => t.projectKey ?? null, () => null),
   };
-  const toolList = () => tools.map((t) => ({ name: t.name, title: t.title, description: t.description, inputSchema: t.inputSchema, annotations: { title: t.title, ...t.annotations } }));
+  const toolList = () =>
+    tools.map((t) => {
+      const meta: Record<string, unknown> = { ...(t.meta ?? {}), ...(o.securitySchemes ? { securitySchemes: o.securitySchemes } : {}) };
+      return {
+        name: t.name,
+        title: t.title,
+        description: t.description,
+        inputSchema: t.inputSchema,
+        ...(t.outputSchema ? { outputSchema: t.outputSchema } : {}),
+        // Every hint explicit (readOnlyHint, destructiveHint, idempotentHint, openWorldHint): directories require it.
+        annotations: { title: t.title, ...t.annotations },
+        ...(o.securitySchemes ? { securitySchemes: o.securitySchemes } : {}),
+        ...(Object.keys(meta).length ? { _meta: meta } : {}),
+      };
+    });
 
   async function callTool(params: Record<string, unknown>): Promise<Message> {
+    const meta = isObject(params._meta) && isObject(params._meta[META_CLIENT_INFO]) ? (params._meta[META_CLIENT_INFO] as Record<string, unknown>) : null;
     const tool = tools.find((t) => t.name === params.name);
     if (!tool) throw Object.assign(new Error(`Unknown tool: ${String(params.name)}`), { rpc: RPC.INVALID_PARAMS });
     const args = params.arguments === undefined ? {} : params.arguments;
@@ -127,11 +174,22 @@ export function createServer(o: ServerOptions) {
     const invalid = validate(tool.inputSchema, args);
     if (invalid) return { content: [{ type: "text", text: invalid }], isError: true };
     try {
-      const r = await tool.run(args, ctx);
+      // Provenance (recorded with agent actions, never trusted): the client, the transport, and the optional
+      // sessionId / taskRef arguments of the write tools.
+      const api = o.api.withHeaders(provenanceHeaders({ client: meta ?? clientInfo, transport: o.transport, session: args.sessionId, task: args.taskRef }));
+      const raw = await tool.run(args, api === o.api ? ctx : { ...ctx, api });
+      // Every result is bounded (limits.ts): long answers are shortened and say so.
+      const r = capResult(raw.text, raw.data);
       return { content: [{ type: "text", text: r.text }], ...(r.data !== undefined && isObject(r.data) ? { structuredContent: r.data } : {}), isError: false };
     } catch (e) {
       if (!(e instanceof ApiError) && !(e instanceof ToolInputError)) o.log?.(`tool ${tool.name} failed: ${e instanceof Error ? e.message : String(e)}`);
-      return { content: [{ type: "text", text: explainError(e, hints) }], isError: true, ...(e instanceof ApiError ? { structuredContent: { error: { code: e.code, message: e.message, status: e.status } } } : {}) };
+      const challenge = e instanceof ApiError && e.code === "UNAUTHORIZED" && o.authChallenge ? o.authChallenge({ code: "invalid_token", description: "This NanoFlags connection was revoked or has expired. Reconnect NanoFlags." }) : null;
+      return {
+        content: [{ type: "text", text: explainError(e, hints) }],
+        isError: true,
+        ...(e instanceof ApiError ? { structuredContent: { error: { ...e.details, code: e.code, message: e.message, status: e.status } } } : {}),
+        ...(challenge ? { _meta: { [META_WWW_AUTHENTICATE]: challenge } } : {}),
+      };
     }
   }
 
@@ -155,6 +213,7 @@ export function createServer(o: ServerOptions) {
       let result: unknown;
       switch (req.method) {
         case "initialize": {
+          if (isObject(params.clientInfo)) clientInfo = params.clientInfo;
           const asked = typeof params.protocolVersion === "string" ? params.protocolVersion : "";
           result = {
             protocolVersion: PROTOCOL_VERSIONS.includes(asked) ? asked : PROTOCOL_VERSIONS[0],
@@ -210,8 +269,10 @@ export function createServer(o: ServerOptions) {
         case "tools/list":
           // The tool list is the same for every caller and changes only with a release.
           return { jsonrpc: "2.0", id, result: { resultType: "complete", tools: toolList(), ttlMs: 3_600_000, cacheScope: "public", _meta: meta } };
-        case "tools/call":
-          return { jsonrpc: "2.0", id, result: { resultType: "complete", ...(await callTool(params)), _meta: meta } };
+        case "tools/call": {
+          const r = await callTool(params);
+          return { jsonrpc: "2.0", id, result: { resultType: "complete", ...r, _meta: { ...(isObject(r._meta) ? r._meta : {}), ...meta } } };
+        }
         default:
           return rpcError(id, RPC.METHOD_NOT_FOUND, `Method not found: ${req.method}`);
       }

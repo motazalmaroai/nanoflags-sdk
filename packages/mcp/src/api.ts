@@ -11,6 +11,8 @@ export class ApiError extends Error {
     message: string,
     readonly status: number,
     readonly code: string,
+    /** Other fields of the API's error object, e.g. `currentVersion` with DRAFT_CONFLICT. */
+    readonly details: Record<string, unknown> = {},
   ) {
     super(message);
     this.name = "ApiError";
@@ -24,6 +26,8 @@ export interface ApiClientOptions {
   fetch: typeof fetch;
   userAgent: string;
   timeoutMs?: number;
+  /** Sent with every request (e.g. the agent provenance headers). */
+  headers?: Record<string, string>;
 }
 
 export type Query = Record<string, string | number | boolean | undefined>;
@@ -35,20 +39,25 @@ export class ApiClient {
     this.root = `${o.baseUrl.replace(/\/+$/, "")}/api/v1`;
   }
 
+  /** The same client, with these headers added to every request. */
+  withHeaders(headers: Record<string, string>): ApiClient {
+    return Object.keys(headers).length ? new ApiClient({ ...this.o, headers: { ...this.o.headers, ...headers } }) : this;
+  }
+
   get<T = unknown>(path: string, query?: Query): Promise<T> {
     return this.request<T>("GET", path, undefined, query);
   }
   post<T = unknown>(path: string, body: unknown): Promise<T> {
     return this.request<T>("POST", path, body);
   }
-  patch<T = unknown>(path: string, body: unknown): Promise<T> {
-    return this.request<T>("PATCH", path, body);
+  patch<T = unknown>(path: string, body: unknown, extraHeaders?: Record<string, string>): Promise<T> {
+    return this.request<T>("PATCH", path, body, undefined, extraHeaders);
   }
 
-  async request<T>(method: "GET" | "POST" | "PATCH", path: string, body?: unknown, query?: Query): Promise<T> {
+  async request<T>(method: "GET" | "POST" | "PATCH", path: string, body?: unknown, query?: Query, extraHeaders?: Record<string, string>): Promise<T> {
     const url = new URL(this.root + path);
     for (const [k, v] of Object.entries(query ?? {})) if (v !== undefined && v !== "") url.searchParams.set(k, String(v));
-    const headers: Record<string, string> = { Authorization: `Bearer ${this.o.token}`, Accept: "application/json", "User-Agent": this.o.userAgent };
+    const headers: Record<string, string> = { ...this.o.headers, ...extraHeaders, Authorization: `Bearer ${this.o.token}`, Accept: "application/json", "User-Agent": this.o.userAgent };
     if (body !== undefined) headers["Content-Type"] = "application/json";
     // A retried POST (same key) is answered from the server's idempotency store instead of running twice.
     if (method === "POST") headers["Idempotency-Key"] = crypto.randomUUID();
@@ -76,7 +85,9 @@ export class ApiClient {
       const err = isObject(payload) && isObject(payload.error) ? payload.error : null;
       const code = err && typeof err.code === "string" ? err.code : `HTTP_${res.status}`;
       const message = err && typeof err.message === "string" ? err.message : `NanoFlags answered ${res.status}.`;
-      throw new ApiError(message, res.status, code);
+      const details: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(err ?? {})) if (k !== "code" && k !== "message" && (typeof v === "number" || typeof v === "string" || typeof v === "boolean")) details[k] = v;
+      throw new ApiError(message, res.status, code, details);
     }
     return payload as T;
   }

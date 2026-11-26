@@ -20,7 +20,7 @@ const RUN_FAIL = { ...RUN_OK, passed: 1, failed: 1, results: [RUN_OK.results[0]!
 describe("general", () => {
   it("--help, --version, no command, unknown command, unknown option", async () => {
     expect((await cli(["--help"])).out).toContain("Usage: nanoflags <command>");
-    expect((await cli(["--version"])).out).toBe("0.5.0\n");
+    expect((await cli(["--version"])).out).toBe("0.6.0\n");
     expect((await cli([])).code).toBe(2);
     expect(await cli(["frobnicate"])).toMatchObject({ code: 2, out: "" });
     expect((await cli(["export", "--nope"])).code).toBe(2);
@@ -483,10 +483,17 @@ describe("cleanup", () => {
 
   it("never runs git or any other program, and never talks to anything but the NanoFlags API", () => {
     const src = join(FIXTURES, "..", "..", "src");
-    for (const f of readdirSync(src)) {
-      const text = readFileSync(join(src, f), "utf8");
-      expect(text).not.toMatch(/child_process|execSync|spawn\(|github\.com\/repos|api\.github\.com/);
+    const files = readdirSync(src, { recursive: true, withFileTypes: true }).filter((e) => e.isFile()).map((e) => join(e.parentPath, e.name));
+    expect(files.length).toBeGreaterThan(10);
+    for (const f of files) {
+      const text = readFileSync(f, "utf8");
+      expect(text).not.toMatch(/github\.com\/repos|api\.github\.com/);
+      // Only the entry point may start programs, and only for `init` (Io.open: the browser; Io.exec: the package manager).
+      if (!f.endsWith("bin.ts")) expect(text).not.toMatch(/child_process|execSync|spawn\(/);
     }
+    const bin = readFileSync(join(src, "bin.ts"), "utf8");
+    expect(bin.match(/spawn\(/g)).toHaveLength(2);
+    expect(bin).not.toMatch(/execSync|\bgit\b/);
   });
 });
 

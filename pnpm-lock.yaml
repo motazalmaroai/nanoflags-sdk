@@ -41,6 +41,9 @@ importers:
 
   packages/mcp:
     devDependencies:
+      '@nanoflags/engine':
+        specifier: workspace:*
+        version: link:../engine
       '@types/node':
         specifier: ^22.20.5
         version: 22.20.5
@@ -53,6 +56,12 @@ importers:
       vitest:
         specifier: ^4.1.12
         version: 4.1.12(@types/node@22.20.5)(happy-dom@21.0.4)(vite@8.3.8(@types/node@22.20.5)(esbuild@0.28.2)(terser@5.51.2))
+
+  packages/nanoflags:
+    dependencies:
+      '@nanoflags/cli':
+        specifier: workspace:*
+        version: link:../cli
 
   packages/openfeature:
     devDependencies:

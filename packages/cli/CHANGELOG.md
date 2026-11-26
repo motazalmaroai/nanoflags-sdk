@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.6.0 (2026-11-26)
+
+Additive.
+
+- New command `nanoflags init`: sets up a JS/TS app in one command. It detects the framework (Next.js App and Pages
+  Router, React with Vite, Vite, Create React App, Node/Express; other frameworks get a clear fallback message) and the
+  package manager, signs you in through the browser (a one-time code with a paste-back connection string), creates or
+  reuses a Development SDK key (a client key for browser frameworks, a server key otherwise), installs
+  `@nanoflags/sdk`, writes the key to `.env.local` (`.env` for Node, mode 600, never replacing an existing value
+  without asking, and adds the file to `.gitignore` when git would not ignore it), writes a client file in the
+  framework's idiom (never overwriting an existing one), creates the draft flag `welcome-banner`, prints a usage
+  snippet and waits for the app's first report (a report at revision 0 is not success). Publishing the example flag
+  needs your confirmation or `--publish`, and is never done in an environment that requires a reviewed change.
+  Flags for CI and scripts: `--yes --framework --key --token --project --env --app-url --base-url --wait --publish
+  --skip-install`. The sign-in token it creates is project-scoped and expires after one hour.
+- `import`: the help text and messages describe sources by file shape (`auto`, `flagd`, `nanoflags`, `csv`); the
+  `--format` identifiers of earlier versions are still accepted. `auto` detects JSON exports.
+- The bundled evaluation engine is updated (stricter validation of configuration values).
+
 ## 0.5.0 (2026-11-21)
 
 Additive.

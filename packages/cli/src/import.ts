@@ -19,7 +19,18 @@ import { readFileSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { CliError, EXIT, clip, table } from "./util.js";
 
-export const IMPORT_FORMATS = ["auto", "flagd", "nanoflags", "csv", "launchdarkly", "unleash", "flagsmith", "growthbook", "statsig"] as const;
+/** Formats listed in help and error messages. `auto` detects every supported JSON export from its shape. */
+export const PUBLIC_IMPORT_FORMATS = ["auto", "flagd", "nanoflags", "csv"] as const;
+/**
+ * Every value `--format` accepts. The tool-specific identifiers stay accepted for backward compatibility, but are not
+ * listed anywhere public (no third-party product names in CLI output): `auto` already recognises those exports.
+ */
+export const IMPORT_FORMATS = [...PUBLIC_IMPORT_FORMATS, "launchdarkly", "unleash", "flagsmith", "growthbook", "statsig"] as const;
+/** How a detected source is named in human-readable output (tool-specific identifiers are not printed). */
+export function sourceLabel(source: string): string {
+  return (PUBLIC_IMPORT_FORMATS as readonly string[]).includes(source) ? source : "JSON export";
+}
+const methodLabel = (m: string) => (/approximation$/.test(m) && !m.startsWith("flagd") ? "re-implemented evaluation" : m);
 const MAX_BYTES = 4 * 1024 * 1024 - 64 * 1024;
 /** Same limit as the API (`COMPARE_LIMITS.contexts` in the importer). */
 export const MAX_CONTEXTS = 1000;
@@ -79,7 +90,7 @@ export function parseEnvMap(raw: string | undefined): Record<string, string | nu
 function readSource(o: Pick<ImportOptions, "file" | "format" | "project" | "token" | "conflict">, command: string): { content: string; format: string } {
   if (!/^nf_api_[0-9a-f]{48}$/.test(o.token)) throw new CliError(`\`${command}\` needs a Management API token: set NANOFLAGS_API_TOKEN (nf_api_…, scope flags:write; also segments:write when the file has segments).`, EXIT.usage);
   if (!o.project) throw new CliError(`\`${command}\` needs --project <key>.\nRun \`nanoflags --help\` for usage.`, EXIT.usage);
-  if (o.format !== undefined && !(IMPORT_FORMATS as readonly string[]).includes(o.format)) throw new CliError(`--format must be one of ${IMPORT_FORMATS.join(", ")}.`, EXIT.usage);
+  if (o.format !== undefined && !(IMPORT_FORMATS as readonly string[]).includes(o.format)) throw new CliError(`--format must be one of ${PUBLIC_IMPORT_FORMATS.join(", ")} (auto recognises every other supported JSON export).`, EXIT.usage);
   if (o.conflict !== undefined && !["skip", "rename", "overwrite"].includes(o.conflict)) throw new CliError("--conflict must be skip, rename or overwrite.", EXIT.usage);
   let size: number;
   try {
@@ -234,7 +245,7 @@ function verifyFailures(c: Comparison): string[] {
 const short = (v: unknown) => clip(JSON.stringify(v) ?? "null", 40);
 
 function verifyReport(r: Result, c: Comparison, out: (t: string) => void): void {
-  out(`Side-by-side comparison (dry run, nothing written) · source ${r.source} (${c.method}) · environments ${Object.entries(r.envMap).map(([s, t]) => `${s}→${t}`).join(", ") || "none mapped"}\n`);
+  out(`Side-by-side comparison (dry run, nothing written) · source ${sourceLabel(r.source)} (${methodLabel(c.method)}) · environments ${Object.entries(r.envMap).map(([s, t]) => `${s}→${t}`).join(", ") || "none mapped"}\n`);
   const s = c.summary;
   out(`${c.contexts} contexts · ${s.evaluations} evaluations · flag/environment pairs: ${s.same} same, ${s.differs} differ, ${s.splitOnly} differ only by percentage, ${s.notCompared} not compared, ${s.skipped} skipped\n`);
   const rows = c.flags.filter((f) => f.status !== "same");
@@ -252,7 +263,7 @@ function verifyReport(r: Result, c: Comparison, out: (t: string) => void): void 
 }
 
 function report(r: Result, out: (t: string) => void): void {
-  out(`${r.dryRun ? "Dry run (nothing written)" : "Imported into drafts (nothing published)"} · source ${r.source} · environments ${Object.entries(r.envMap).map(([s, t]) => `${s}→${t}`).join(", ") || "none mapped"}\n\n`);
+  out(`${r.dryRun ? "Dry run (nothing written)" : "Imported into drafts (nothing published)"} · source ${sourceLabel(r.source)} · environments ${Object.entries(r.envMap).map(([s, t]) => `${s}→${t}`).join(", ") || "none mapped"}\n\n`);
   const c = r.counts;
   out(`${table(["", "CREATE", "OVERWRITE", "SKIP"], [["flags", String(c.flags.create), String(c.flags.overwrite), String(c.flags.skip)], ["segments", String(c.segments.create), String(c.segments.overwrite), String(c.segments.skip)]])}\n`);
   if (r.conflicts.length) {

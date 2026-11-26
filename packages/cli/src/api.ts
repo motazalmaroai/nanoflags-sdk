@@ -172,6 +172,48 @@ export class ManagementApi {
   restore(project: string, flag: string, body: { environment: string; title?: string; reason?: string }): Promise<KillRestoreResult> {
     return this.call("POST", `/projects/${encodeURIComponent(project)}/flags/${encodeURIComponent(flag)}/restore`, body);
   }
+
+  /* ---- used by `init` ---- */
+  environment(project: string, env: string): Promise<ManagedEnvironment> {
+    return this.call("GET", `/projects/${encodeURIComponent(project)}/environments/${encodeURIComponent(env)}`);
+  }
+  flag(project: string, flag: string): Promise<ManagedFlag> {
+    return this.call("GET", `/projects/${encodeURIComponent(project)}/flags/${encodeURIComponent(flag)}`);
+  }
+  createFlag(project: string, body: { key: string; type: "boolean"; name: string; description: string; initialValue: boolean; clientExposed: boolean; purpose: "release" }, idempotencyKey: string): Promise<ManagedFlag> {
+    return this.call("POST", `/projects/${encodeURIComponent(project)}/flags`, body, { "Idempotency-Key": idempotencyKey });
+  }
+  updateFlag(project: string, flag: string, body: { clientExposed: boolean }): Promise<ManagedFlag> {
+    return this.call("PATCH", `/projects/${encodeURIComponent(project)}/flags/${encodeURIComponent(flag)}`, body);
+  }
+  updateConfig(project: string, flag: string, env: string, body: { enabled?: boolean; default?: unknown }): Promise<unknown> {
+    return this.call("PATCH", `/projects/${encodeURIComponent(project)}/flags/${encodeURIComponent(flag)}/environments/${encodeURIComponent(env)}`, body);
+  }
+  publish(project: string, env: string, body: { expectedRevision: number; note: string }, idempotencyKey: string): Promise<{ revision: number; checksum: string }> {
+    return this.call("POST", `/projects/${encodeURIComponent(project)}/environments/${encodeURIComponent(env)}/publish`, body, { "Idempotency-Key": idempotencyKey });
+  }
+  /** Services that reported in the environment (`service_reports`), with the revision each last reported. */
+  insights(project: string, env: string): Promise<{ services: Array<{ service: string; sdk: string; revision: number; lastSeenAt: string }> }> {
+    return this.call("GET", `/projects/${encodeURIComponent(project)}/insights?environment=${encodeURIComponent(env)}&days=1`);
+  }
+}
+
+export interface ManagedEnvironment {
+  id: string;
+  key: string;
+  name: string;
+  isProtected: boolean;
+  requireApproval: boolean;
+  requireScenarios: boolean;
+  publishedRevision: number;
+}
+
+export interface ManagedFlag {
+  id: string;
+  key: string;
+  type: string;
+  clientExposed: boolean;
+  archivedAt: string | null;
 }
 
 /** Turns transport-level failures into messages a person can act on. */

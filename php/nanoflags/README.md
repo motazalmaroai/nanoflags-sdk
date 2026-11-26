@@ -212,7 +212,7 @@ See [`nanoflags/openfeature-provider`](../openfeature-provider/README.md).
 | `SessionMiddleware`, `Client::SESSION_HEADER`, `Client::isSessionToken($v)` | PSR-15 middleware, header name, token check |
 
 `baseUrl` defaults to the hosted edge `https://edge.nanoflags.io`. Error codes: `network`, `unauthorized`, `http`,
-`invalid_bundle`, `store`, `config`, `signature`, `engine`, `session`. Nothing is ever thrown from a variation call; without a
+`invalid_bundle`, `store`, `config`, `signature`, `rollback`, `engine`, `session`. Nothing is ever thrown from a variation call; without a
 listener or logger, errors are only visible through `lastError()`.
 
 ## Behaviour

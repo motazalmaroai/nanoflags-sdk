@@ -8,7 +8,7 @@ namespace NanoFlags;
  * An error of the client. It is reported through `onError` listeners and {@see Client::lastError()}; an accessor
  * never throws it. A failed update never changes the configuration in use.
  *
- * Codes: "network", "unauthorized", "http", "invalid_bundle", "store", "config", "signature", "engine", "session" (a
+ * Codes: "network", "unauthorized", "http", "invalid_bundle", "store", "config", "signature", "rollback", "engine", "session" (a
  * test session could not be loaded).
  */
 final class NanoFlagsException extends \RuntimeException
@@ -22,6 +22,8 @@ final class NanoFlagsException extends \RuntimeException
     public const SIGNATURE = 'signature';
     public const ENGINE = 'engine';
     public const SESSION = 'session';
+    /** A signed bundle older than a revision this client already verified was refused; the configuration in use stays. */
+    public const ROLLBACK = 'rollback';
 
     public function __construct(
         string $message,

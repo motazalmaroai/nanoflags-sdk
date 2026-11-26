@@ -5,7 +5,8 @@ module NanoFlags
   # raises it. A failed update never changes the configuration in use.
   #
   # Codes (+code+): :network, :unauthorized, :http, :invalid_bundle, :store, :config, :signature, :engine, :session
-  # (a test session could not be loaded), :environment_deleted (the live socket closed with 4004: the last
+  # (a test session could not be loaded), :rollback (a signed bundle older than a revision this client already verified was
+  # refused; the configuration in use stays), :environment_deleted (the live socket closed with 4004: the last
   # configuration stays in use and is no longer updated).
   class Error < StandardError
     attr_reader :code, :http_status

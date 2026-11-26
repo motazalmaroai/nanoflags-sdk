@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Verification hardening, no API change (refuses older signed revisions, reports rejected updates as stale)
+
 ## 0.3.0 (2026-11-21)
 
 Additive, no breaking changes.

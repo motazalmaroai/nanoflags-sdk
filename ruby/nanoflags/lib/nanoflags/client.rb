@@ -35,6 +35,14 @@ module NanoFlags
     MAX_BATCH = 50
     MAX_EVENT_VALUE_CHARS = 1024
     KEYS_REFETCH = 60.0
+    # Right after a revision arrived over the live socket the HTTP path may still answer the previous one for a moment (and
+    # vice versa): within this window an older answer from the other transport is dropped silently.
+    ROLLBACK_GRACE = 120.0
+    # How long a network answer waits for the stored bundle to be read (and verified) before the check against it.
+    RESTORE_WAIT = 2.0
+    # The edge's own answer while the publisher is still signing a new revision.
+    UnsignedLag = Class.new(Error)
+    private_constant :UnsignedLag
     LIVE_CONNECT_TIMEOUT = 10.0
     LIVE_PING = 30.0
     LIVE_PONG_TIMEOUT = 10.0
@@ -83,7 +91,7 @@ module NanoFlags
                    verify: nil, on_change: nil, on_error: nil, logger: nil, start: true, http: nil, request_timeout: 10,
                    stream_read_timeout: 90, random: nil)
       @sdk_key = sdk_key.to_s
-      @base_url = base_url.to_s.sub(%r{/+\z}, "")
+      @base_url = Client.normalize_base_url(base_url.to_s)
       @service = service.to_s.empty? ? "unknown" : service.to_s
       @poll_interval = poll_interval.to_f
       @streaming = streaming
@@ -131,6 +139,15 @@ module NanoFlags
       @live_open = false
       @live_socket = nil
       @live_revision = 0
+      # Verification hardening (with +verify+): the newest revision adopted after its signature verified (from the network,
+      # a push or the store). Any later bundle with a lower revision is refused, signed or not. Only verified revisions
+      # count, so an unverified source (bootstrap, an unsigned answer) never blocks updates. One client serves one SDK key,
+      # i.e. one environment.
+      @newest_verified = nil
+      # Counts adoptions of verified revisions: an answer requested at sequence n is "older news" if a later one was adopted.
+      @verified_seq = 0
+      # Set once the stored bundle was read (nothing to read: at once).
+      @restore_done = @store.nil?
       @environment_deleted = false
       @sessions = {}
       @session_locks = {}
@@ -369,6 +386,7 @@ module NanoFlags
       @rescheduled = false
       @sync_mutex = Mutex.new
       @keys_mutex = Mutex.new
+      @restore_cv = @mutex.new_cond
       @queue_mutex = Mutex.new
       @threads = []
       @sync_requested = false
@@ -401,6 +419,15 @@ module NanoFlags
     end
 
     FORK_LOCK = Mutex.new
+
+    # +https://EDGE.nanoflags.io:443/+, a trailing dot or trailing slashes are the official edge; anything else (another host,
+    # scheme or port, a path, user info, a query) is left as given (minus trailing slashes).
+    # @api private
+    def self.normalize_base_url(raw)
+      trimmed = raw.sub(%r{/+\z}, "")
+      m = trimmed.match(%r{\Ahttps://([A-Za-z0-9.-]+)(?::443)?\z}i)
+      m && m[1].downcase.chomp(".") == OFFICIAL_EDGE_URL.delete_prefix("https://") ? OFFICIAL_EDGE_URL : trimmed
+    end
 
     def spawn(name, &block)
       t = Thread.new do
@@ -437,6 +464,49 @@ module NanoFlags
       @last_error = e
       log { "#{e.code}: #{e.message}" }
       fire(:error, e)
+    end
+
+    # An update was refused (signature, rollback, invalid push): the configuration in use stays, but the client now knows it
+    # is not on the current revision, so a loaded client turns stale until a bundle verifies or the edge confirms the one
+    # in use.
+    def update_rejected(e)
+      set_status(STATUS_STALE) if @bundle
+      emit_error(e)
+    end
+
+    def note_verified(info, source)
+      @mutex.synchronize do
+        @verified_seq += 1
+        n = @newest_verified
+        @newest_verified = { revision: info.revision, seq: @verified_seq, at: monotonic, source: source } if n.nil? || info.revision >= n[:revision]
+      end
+    end
+
+    # +revision+ is older than the newest verified one: returns the +:rollback+ error to report, or nil when the older answer
+    # is explained by ordering (a newer one was adopted after this answer was requested, or arrived a moment ago over the
+    # other transport). Either way the caller does not adopt it.
+    def rollback_error(revision, requested_at_seq, source)
+      n = @mutex.synchronize { @newest_verified }
+      return nil if n.nil? || revision >= n[:revision]
+      return nil if n[:source] != :store && (n[:seq] > requested_at_seq || (n[:source] != source && monotonic - n[:at] < ROLLBACK_GRACE))
+
+      Error.new("Bundle r#{revision} was rejected: it is older than r#{n[:revision]}, which this client already verified for this environment " \
+                "(an older copy; restoring an old revision in NanoFlags publishes a new, higher one). The configuration in use is unchanged.", :rollback)
+    end
+
+    # Waits (briefly) for the stored bundle to be read, so a network answer is checked against it.
+    def wait_for_restore
+      return unless @started
+
+      @mutex.synchronize do
+        deadline = monotonic + RESTORE_WAIT
+        until @restore_done || @closed
+          left = deadline - monotonic
+          break if left <= 0
+
+          @restore_cv.wait(left)
+        end
+      end
     end
 
     def set_status(status)
@@ -622,6 +692,7 @@ module NanoFlags
     def sync_once
       transport = @stream_triggered ? :stream : :poll
       @stream_triggered = false
+      requested_at = @mutex.synchronize { @verified_seq }
       begin
         res = begin
           request("GET", "/v1/bundle", @etag ? { "If-None-Match" => @etag } : nil)
@@ -649,6 +720,21 @@ module NanoFlags
         bundle = body["bundle"]
         sig, raw = check_signature(res, body, bundle)
         return if @closed
+        if @verifier && !served_stale
+          # Never adopt a revision older than one already verified. The stored copy is read first, so a restart cannot be
+          # held back by an answer that beats the store.
+          wait_for_restore
+          return if @closed
+
+          floor = @mutex.synchronize { @newest_verified && @newest_verified[:revision] }
+          if floor && bundle["revision"].to_i < floor
+            rb = rollback_error(bundle["revision"].to_i, requested_at, :http)
+            raise rb if rb
+
+            @failures = 0
+            return
+          end
+        end
         raise engine_error(bundle) unless Engine.supports_engine?(bundle.fetch("engine", Engine::UNDEFINED))
 
         @failures = 0
@@ -662,7 +748,17 @@ module NanoFlags
         # A revision pushed while this request was under way (or that the edge's cache does not point at yet) wins.
         return if cur && bundle["revision"].to_i < @live_revision && cur["revision"].to_i >= @live_revision
 
-        @pinned_env = sig.environment_id if sig
+        proceed = @mutex.synchronize do
+          # Same ordering rule under the lock: a newer verified revision adopted meanwhile (a push) wins silently.
+          nv = @newest_verified
+          next false if @verifier && !served_stale && nv && bundle["revision"].to_i < nv[:revision]
+
+          @pinned_env = sig.environment_id if sig
+          note_verified(sig, :http) if sig
+          true
+        end
+        return unless proceed
+
         adopt(bundle, etag: res.header("ETag"), checksum: checksum, sig: sig, raw: raw,
                       status: served_stale ? STATUS_STALE : STATUS_READY, source: :network, transport: transport)
         persist
@@ -674,8 +770,15 @@ module NanoFlags
           return
         end
         @failures += 1
-        if e.code == :signature
-          emit_error(e) # same bundle, same status; polling retries with backoff
+        if e.is_a?(UnsignedLag)
+          # The edge's own unsigned answer while the publisher signs a new revision: error only, status unchanged.
+          emit_error(e)
+          return
+        end
+        if %i[signature rollback].include?(e.code)
+          # A rejected update keeps the bundle in use, which is now known not to be current: stale until a bundle verifies
+          # or the edge confirms the one in use. Polling retries with backoff.
+          update_rejected(e)
           return
         end
         drop_live if e.code == :unauthorized
@@ -692,7 +795,10 @@ module NanoFlags
       rev = bundle["revision"].to_i
       reject = ->(why) { Error.new("Bundle r#{rev} was rejected: #{why} The configuration in use is unchanged.", :signature) }
       unless res.header("X-NanoFlags-Signed") == "true"
-        raise reject.("it is not signed (the edge is still distributing it) and unsigned bundles are refused; fetching again shortly.") if @verifier[:require]
+        if @verifier[:require]
+          raise UnsignedLag.new("Bundle r#{rev} was rejected: it is not signed (the edge is still distributing it) and unsigned bundles are refused; " \
+                                "fetching again shortly. The configuration in use is unchanged.", :signature)
+        end
 
         return [nil, raw]
       end
@@ -769,6 +875,15 @@ module NanoFlags
     end
 
     def restore
+      restore_inner
+    ensure
+      @mutex.synchronize do
+        @restore_done = true
+        @restore_cv.broadcast
+      end
+    end
+
+    def restore_inner
       return unless @store
 
       text = @store.get
@@ -804,6 +919,8 @@ module NanoFlags
           return
         end
       end
+      # The stored copy is the newest this client verified before the restart: an older answer must not replace it.
+      note_verified(sig, :store) if sig
       # Usable but not known to be current: stale until the edge confirms it.
       adopt(restored, etag: p["etag"], checksum: p["checksum"], sig: sig, raw: raw, status: STATUS_STALE, source: :store, transport: :poll)
     rescue StandardError => e
@@ -984,14 +1101,21 @@ module NanoFlags
       revision = revision.to_i if revision.is_a?(Float) && revision.finite? && revision == revision.floor
       return unless revision.is_a?(Integer) && revision >= 1 && text.is_a?(String) # revision 0 / no bundle: nothing published yet
 
+      received_at = @mutex.synchronize { @verified_seq }
       cur = @bundle
-      return if cur && revision < cur["revision"].to_i # never backwards
+      # Never backwards. An older push than a verified revision is checked first, so that a genuine (signed) older copy is
+      # reported as a rollback; anything else older is dropped silently.
+      older = cur && revision < cur["revision"].to_i
+      if older
+        nv = @mutex.synchronize { @newest_verified }
+        return unless @verifier && nv && revision < nv[:revision]
+      end
 
       checksum = m["checksum"].is_a?(String) ? m["checksum"] : nil
       info = nil
       if @verifier
         reject = lambda do |why|
-          emit_error(Error.new("Pushed bundle r#{revision} was rejected: #{why} The configuration in use is unchanged.", :signature))
+          update_rejected(Error.new("Pushed bundle r#{revision} was rejected: #{why} The configuration in use is unchanged.", :signature))
           request_sync # the regular (verified) request path says what is really current
         end
         signature = m["signature"]
@@ -1009,13 +1133,21 @@ module NanoFlags
         return if @closed
         return reject.("its signature does not verify.") unless ok
       end
+      if older
+        rb = rollback_error(revision, received_at, :live)
+        if rb
+          update_rejected(rb)
+          request_sync # the regular request path says what is really current (and confirms ready again)
+        end
+        return
+      end
       parsed = begin
         Engine::Json.parse(text)
       rescue Engine::InvalidJsonError
         nil
       end
       unless Engine.bundle?(parsed) && parsed["revision"].is_a?(Float) && parsed["revision"] == revision.to_f
-        return emit_error(Error.new("The edge pushed an invalid bundle; it was ignored.", :invalid_bundle))
+        return update_rejected(Error.new("The edge pushed an invalid bundle; it was ignored.", :invalid_bundle))
       end
       return emit_error(engine_error(parsed)) unless Engine.supports_engine?(parsed.fetch("engine", Engine::UNDEFINED))
 
@@ -1031,6 +1163,7 @@ module NanoFlags
           next false
         end
         @pinned_env = info.environment_id if info
+        note_verified(info, :live) if info
         @live_revision = revision
         true
       end

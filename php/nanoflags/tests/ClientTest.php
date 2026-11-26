@@ -25,6 +25,7 @@ final class ClientTest extends TestCase
 
     protected function setUp(): void
     {
+        FakeEdge::resetProcessState();
         $this->edge = new FakeEdge();
         $this->store = new MemoryStore();
         $this->errors = [];
@@ -253,7 +254,7 @@ final class ClientTest extends TestCase
         self::assertSame(1, $this->edge->count('/v1/keys'));
         $keysRequest = array_values(array_filter($this->edge->requests, static fn ($r) => $r['path'] === '/v1/keys'))[0];
         self::assertArrayNotHasKey('Authorization', $keysRequest['headers']);
-        // Shared through the cache: the next request does not ask again.
+        // Remembered by the process (never read back from the shared cache): the next client does not ask again.
         $this->now += 31;
         $this->client(['verify' => true])->stringVariation('accent', 'x');
         self::assertSame(1, $this->edge->count('/v1/keys'));

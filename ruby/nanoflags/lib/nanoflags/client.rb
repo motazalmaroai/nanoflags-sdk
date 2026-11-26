@@ -421,8 +421,7 @@ module NanoFlags
     FORK_LOCK = Mutex.new
 
     # +https://EDGE.nanoflags.io:443/+, a trailing dot or trailing slashes are the official edge; anything else (another host,
-    # scheme or port, a path, user info, a query) is left as given (minus trailing slashes). The official edge turns signature
-    # verification on by default, so a harmless spelling of its address must not switch it off.
+    # scheme or port, a path, user info, a query) is left as given (minus trailing slashes).
     # @api private
     def self.normalize_base_url(raw)
       trimmed = raw.sub(%r{/+\z}, "")

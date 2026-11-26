@@ -293,8 +293,7 @@ final class Client
 
     /**
      * `https://EDGE.nanoflags.io:443/`, a trailing dot or trailing slashes are the official edge; anything else (another
-     * host, scheme or port, a path, user info, a query) is left as given (minus trailing slashes). The official edge turns
-     * signature verification on by default, so a harmless spelling of its address must not switch it off.
+     * host, scheme or port, a path, user info, a query) is left as given (minus trailing slashes).
      */
     private static function normalizeBaseUrl(string $raw): string
     {

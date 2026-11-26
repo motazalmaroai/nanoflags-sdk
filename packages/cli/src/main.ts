@@ -9,7 +9,7 @@ import { CliError, DEFAULT_MAX_FILE_BYTES, EXIT, clip, show, table, unifiedDiff,
 import { checkHistory, isMonitorState, isTreeHead, leafHash, rootOf, verifyConsistency, verifyHead, type MonitorState, type PublicJwk, type TreeHead } from "./log.js";
 import { generateKey, isCosignature, isCosignPreview, privateKeyFrom, publicX, signPreview, signingTexts, verifyCosignature, type Cosignature } from "./cosign.js";
 
-export const VERSION = "0.5.0";
+export const VERSION = "0.6.0";
 
 export interface Io {
   env: Record<string, string | undefined>;
@@ -19,6 +19,14 @@ export interface Io {
   err: (text: string) => void;
   /** Waits between retries (tests pass an instant one). */
   sleep?: (ms: number) => Promise<void>;
+  /** Clock for timeouts (tests pass a fake one). */
+  now?: () => number;
+  /** Interactive prompt; absent when stdin is not a terminal. Used by \`init\`. */
+  prompt?: (question: string, o?: { secret?: boolean }) => Promise<string>;
+  /** Opens a URL in the browser (best effort). Used by \`init\`. */
+  open?: (url: string) => void;
+  /** Runs a command with inherited output. Used by \`init\` to install the SDK. */
+  exec?: (cmd: string, args: string[], cwd: string) => Promise<number>;
 }
 
 export const HELP = `nanoflags ${VERSION} — NanoFlags command line
@@ -26,6 +34,13 @@ export const HELP = `nanoflags ${VERSION} — NanoFlags command line
 Usage: nanoflags <command> [options]
 
 Commands
+  init [--framework next-app|next-pages|vite-react|vite|react|node] [--yes] [--key <sdk key>] [--token <nf_api_…>]
+       [--project <key>] [--env <key>] [--app-url <url>] [--publish] [--skip-install] [--wait <seconds>]
+                                                Set up NanoFlags in this app: sign in through the browser, create or
+                                                reuse a Development SDK key, install @nanoflags/sdk, write the env file
+                                                and a client file, create the welcome-banner flag (draft), and wait
+                                                for the app's first report. --yes: no questions (CI); nothing is
+                                                published unless --publish, nothing in the env file is overwritten
   export [--out <file>]                         Download flags, segments and drafts as JSON
   flags list [--json]                           List the project's flags
   flags create <key> --type boolean|string|number|json [--default <json>] [--description <text>] [--name <text>] [--json]
@@ -60,7 +75,7 @@ Commands
   refs scan [dir] --repo <owner/name> [--commit <sha>] [--dry-run] [--json]
                                                 Find flag references in source files and upload them
   cleanup <flag> --value <json> [dir] [--write] Propose (or apply) the removal of a resolved flag from code
-  import <file> --project <key> [--env-map src=target,…] [--format auto|flagd|nanoflags|csv|launchdarkly|unleash|flagsmith|growthbook|statsig]
+  import <file> --project <key> [--env-map src=target,…] [--format auto|flagd|nanoflags|csv]
          [--conflict skip|rename|overwrite] [--rename-suffix <s>] [--label <text>] [--dry-run] [--json]
                                                 Import flags into drafts (never publishes); needs NANOFLAGS_API_TOKEN
   import verify <file> --contexts <file.jsonl> --project <key> [--env-map …] [--format …] [--flags a,b] [--json]
@@ -129,6 +144,12 @@ const OPTIONS = {
   "expect-checksum": { type: "string" },
   contexts: { type: "string" },
   flags: { type: "string" },
+  yes: { type: "boolean", short: "y" },
+  framework: { type: "string" },
+  "app-url": { type: "string" },
+  publish: { type: "boolean" },
+  "skip-install": { type: "boolean" },
+  wait: { type: "string" },
   help: { type: "boolean", short: "h" },
   version: { type: "boolean", short: "v" },
 } as const;
@@ -981,6 +1002,42 @@ async function cmdImport(r: Run): Promise<number> {
   });
 }
 
+/* ---------------- init ---------------- */
+
+async function cmdInit(r: Run): Promise<number> {
+  if (r.args.length > 0) throw usage("`init` takes no arguments: run it in your application's directory.");
+  const { runInit } = await import("./init/index.js");
+  return runInit(
+    {
+      cwd: r.io.cwd,
+      env: r.io.env,
+      fetch: r.io.fetch,
+      out: r.io.out,
+      err: r.io.err,
+      sleep: r.io.sleep ?? ((ms) => new Promise((res) => setTimeout(res, ms))),
+      now: r.io.now ?? Date.now,
+      prompt: r.io.prompt,
+      open: r.io.open,
+      exec: r.io.exec,
+    },
+    {
+      yes: r.values.yes === true,
+      framework: r.values.framework,
+      // For init, --key is the SDK key the app uses (NANOFLAGS_KEY, the CI/admin key of other commands, is not read).
+      key: r.values.key,
+      token: r.values.token,
+      project: r.values.project,
+      environment: r.values.env ?? r.values.environment,
+      baseUrl: r.values["base-url"],
+      appUrl: r.values["app-url"],
+      wait: r.values.wait,
+      publish: r.values.publish === true,
+      skipInstall: r.values["skip-install"] === true,
+      userAgent: `nanoflags-cli/${VERSION}`,
+    },
+  );
+}
+
 /* ---------------- dispatch ---------------- */
 
 export async function main(argv: string[], io: Io): Promise<number> {
@@ -1005,6 +1062,7 @@ export async function main(argv: string[], io: Io): Promise<number> {
   }
   const run = (skip: number): Run => ({ io, values, args: positionals.slice(skip) });
   try {
+    if (command === "init") return await cmdInit(run(1));
     if (command === "export") return await cmdExport(run(1));
     if (command === "flags" && sub === "list") return await cmdFlagsList(run(2));
     if (command === "flags" && sub === "create") return await cmdFlagsCreate(run(2));

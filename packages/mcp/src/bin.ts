@@ -13,6 +13,6 @@ try {
 }
 
 const api = new ApiClient({ baseUrl: config.baseUrl, token: config.token, fetch: (input, init) => fetch(input, init), userAgent: `nanoflags-mcp/${VERSION}` });
-const server = createServer({ api, defaultProject: config.project, log });
+const server = createServer({ api, defaultProject: config.project, log, transport: "stdio" });
 log(`ready (${config.baseUrl}${config.project ? `, project ${config.project}` : ""})`);
 serveStdio(server, { input: process.stdin, output: process.stdout }).then(() => process.exit(0));

@@ -65,6 +65,12 @@ export interface FlagConfig {
   clientExposed?: boolean;
   /** The experiment running on this flag in this environment, if any (see `exposureOf`). */
   experiment?: ExperimentMeta;
+  /**
+   * Version of this flag configuration's shape (rules, conditions, serve). Absent means 1, and writers omit it while it
+   * is 1, so existing configurations, checksums and signed bundles are unchanged. A configuration with a version this
+   * engine does not know is refused by `strictFlagConfig` / `strictDraftConfig` (see `CONFIG_SCHEMA_VERSION`).
+   */
+  schemaVersion?: number;
 }
 
 /**
@@ -120,6 +126,16 @@ export type Context = { key?: string } & Record<string, JsonValue | undefined>;
 
 export type Reason = "rule_match" | "default" | "off" | "flag_not_found" | "error";
 
+/**
+ * Why an evaluation served the application's fallback, alongside `reason` (which keeps its meaning):
+ * - `CONFIG_NOT_LOADED`: no configuration is loaded at all (reason `flag_not_found`), e.g. an SDK that has not loaded
+ *   a bundle yet or never could (invalid key, edge unreachable, nothing stored);
+ * - `FLAG_NOT_FOUND`: a configuration is loaded but does not contain the flag (reason `flag_not_found`);
+ * - `TYPE_MISMATCH`: the flag's value does not have the requested type (set by SDK accessors; reason `error`);
+ * - `GENERAL`: the evaluation failed (malformed configuration; reason `error`).
+ */
+export type EvaluationErrorCode = "CONFIG_NOT_LOADED" | "FLAG_NOT_FOUND" | "TYPE_MISMATCH" | "GENERAL";
+
 export interface TraceStep {
   kind: "config" | "rule" | "allocation" | "result";
   title: string;
@@ -140,6 +156,8 @@ export interface Evaluation<T = JsonValue> {
   revision: number;
   trace: TraceStep[];
   error?: string;
+  /** Set whenever the fallback was served (reason `flag_not_found` or `error`). See `EvaluationErrorCode`. */
+  errorCode?: EvaluationErrorCode;
 }
 
 /* ---------------- hashing ---------------- */
@@ -489,7 +507,7 @@ export function evaluate<T extends JsonValue = JsonValue>(bundle: Bundle | null 
     const flag = own(bundle?.flags, flagKey);
     if (!bundle || !flag) {
       trace.push({ kind: "result", title: `Returned ${fmt(fallback)}`, detail: bundle ? "Flag is not in this configuration. The application fallback applies." : "No configuration is loaded. The application fallback applies." });
-      return { flagKey, value: fallback, reason: "flag_not_found", revision, trace };
+      return { flagKey, value: fallback, reason: "flag_not_found", revision, trace, errorCode: bundle ? "FLAG_NOT_FOUND" : "CONFIG_NOT_LOADED" };
     }
     trace.push({ kind: "config", title: "Configuration loaded", detail: revision > 0 ? `r${revision}` : "draft" });
     if (!flag.enabled) {
@@ -526,7 +544,7 @@ export function evaluate<T extends JsonValue = JsonValue>(bundle: Bundle | null 
   } catch (e) {
     const error = e instanceof Error ? e.message : String(e);
     trace.push({ kind: "result", title: `Returned ${fmt(fallback)}`, detail: `Evaluation error: ${error}. The application fallback applies.` });
-    return { flagKey, value: fallback, reason: "error", revision, trace, error };
+    return { flagKey, value: fallback, reason: "error", revision, trace, error, errorCode: "GENERAL" };
   }
 }
 
@@ -641,6 +659,339 @@ export function validateFlagConfig(flagKey: string, flag: FlagConfig, segments: 
 
 export function validateBundle(bundle: Bundle): string[] {
   return Object.entries(bundle.flags).flatMap(([k, f]) => validateFlagConfig(k, f, bundle.segments));
+}
+
+/* ---------------- strict validation ---------------- */
+
+/**
+ * Newest flag-configuration schema version this engine reads (`FlagConfig.schemaVersion`).
+ *
+ * The rule: a configuration without `schemaVersion` is version 1 (every configuration written so far). Writers omit the
+ * field while it is 1, so stored drafts, checksums and signed bundles do not change. A future version that changes the
+ * meaning or shape of rules ships together with a new `ENGINE_VERSION`; the publisher then stamps bundles with that
+ * engine version, so SDKs whose engine is older refuse the whole bundle (`supportsEngine`) instead of misreading the
+ * flag. Write paths (dashboard, Management API, MCP, importer) validate with `strictFlagConfig` / `strictDraftConfig`,
+ * which refuse a version they do not know with `code: "unsupported_version"` and stop there (a newer shape may use keys
+ * this engine has never heard of). Evaluation itself does not read the field.
+ */
+export const CONFIG_SCHEMA_VERSION = 1;
+
+/** Machine-readable kind of a strict-validation problem. */
+export type ConfigIssueCode = "unknown_key" | "required" | "invalid_type" | "invalid_value" | "unknown_segment" | "duplicate" | "unsupported_version";
+
+/**
+ * One problem found by strict validation. `path` points at the offending member in JavaScript notation relative to the
+ * validated object (plus the `path` option as prefix), e.g. `rules[0].serve.variants`; `message` is English and
+ * stable enough to show to API clients.
+ */
+export interface ConfigIssue {
+  path: string;
+  code: ConfigIssueCode;
+  message: string;
+}
+
+export interface StrictOptions {
+  /** Prefix for every issue path, e.g. `flags.checkout-v2`. Default: none. */
+  path?: string;
+  /**
+   * Segments that `segment` / `not_segment` conditions may reference (a key → segment record, or a list of keys). When
+   * omitted, segment references are only checked to be non-empty strings.
+   */
+  segments?: Record<string, unknown> | readonly string[];
+}
+
+export interface StrictValueOptions extends StrictOptions {
+  /** Type every served value must have. */
+  type: FlagType;
+}
+
+export interface StrictDraftOptions extends StrictValueOptions {
+  /**
+   * `true` for an update that sends only the fields it changes (Management API `configs.update`, MCP `update_draft`):
+   * every field is optional, but at least one must be present. Default `false`: `enabled`, `rules`, `default` and `off`
+   * are required.
+   */
+  partial?: boolean;
+}
+
+const FLAG_KEYS = ["type", "enabled", "rules", "default", "off", "clientExposed", "experiment", "schemaVersion"] as const;
+const DRAFT_KEYS = ["enabled", "rules", "default", "off", "schemaVersion"] as const;
+const RULE_KEYS = ["id", "description", "match", "conditions", "serve"] as const;
+const CONDITION_KEYS = ["attribute", "op", "value"] as const;
+const FIXED_KEYS = ["type", "value"] as const;
+const ROLLOUT_KEYS = ["type", "percentage", "value", "otherwise", "bucketBy", "seed"] as const;
+const SEGMENT_KEYS = ["match", "conditions"] as const;
+const EXPERIMENT_KEYS = ["id", "key", "ruleId", "unit", "traffic", "seed", "variants"] as const;
+const VARIANT_KEYS = ["key", "value"] as const;
+const FLAG_TYPES: readonly FlagType[] = ["boolean", "string", "number", "json"];
+const MAX_JSON_DEPTH = 64;
+
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+const has = (o: Record<string, unknown>, k: string) => Object.prototype.hasOwnProperty.call(o, k);
+const at = (base: string, key: string) => (base ? `${base}.${key}` : key);
+const item = (base: string, i: number) => `${base}[${i}]`;
+const kindOf = (v: unknown) => (v === null ? "null" : Array.isArray(v) ? "array" : typeof v);
+
+/** True for a value JSON can carry: no undefined, functions, NaN / Infinity, or cycles; at most 64 levels deep. */
+export function isJsonValue(v: unknown, depth = 0): v is JsonValue {
+  if (depth > MAX_JSON_DEPTH) return false;
+  if (v === null || typeof v === "string" || typeof v === "boolean") return true;
+  if (typeof v === "number") return Number.isFinite(v);
+  if (Array.isArray(v)) return v.every((x) => isJsonValue(x, depth + 1));
+  if (isRecord(v)) {
+    const proto = Object.getPrototypeOf(v);
+    if (proto !== Object.prototype && proto !== null) return false;
+    return Object.keys(v).every((k) => isJsonValue(v[k], depth + 1));
+  }
+  return false;
+}
+
+/** Problem with a `schemaVersion` value, or null when it is absent or a version this engine reads. */
+export function configSchemaVersionProblem(v: unknown): string | null {
+  if (v === undefined) return null;
+  if (typeof v !== "number" || !Number.isInteger(v) || v < 1) return `must be a positive integer (got ${JSON.stringify(v) ?? kindOf(v)}); omit it for version 1`;
+  if (v > CONFIG_SCHEMA_VERSION) return `version ${v} is not supported: this engine reads configuration schema version ${CONFIG_SCHEMA_VERSION}${CONFIG_SCHEMA_VERSION > 1 ? " and older" : ""}. Upgrade the engine that validates or evaluates this configuration`;
+  return null;
+}
+
+function unknownKeys(o: Record<string, unknown>, allowed: readonly string[], base: string, what: string, out: ConfigIssue[]) {
+  for (const k of Object.keys(o)) {
+    if (!allowed.includes(k)) out.push({ path: at(base, k), code: "unknown_key", message: `unknown key (${what} allows: ${allowed.join(", ")})` });
+  }
+}
+
+function segmentKnown(segments: StrictOptions["segments"], key: string): boolean | null {
+  if (segments === undefined) return null;
+  if (Array.isArray(segments)) return segments.includes(key);
+  return isRecord(segments) && has(segments, key);
+}
+
+function served(type: FlagType, v: unknown, path: string, label: string, out: ConfigIssue[], present: boolean) {
+  if (!present) return void out.push({ path, code: "required", message: `${label} is required` });
+  if (!isJsonValue(v)) return void out.push({ path, code: "invalid_value", message: `${label} must be a JSON value` });
+  if (!valueMatchesType(type, v)) out.push({ path, code: "invalid_type", message: `${label} must be a ${type} value (got ${kindOf(v)})` });
+}
+
+/** Strict check of one condition: known keys only, a supported operator, and a value the operator can use. */
+export function strictCondition(input: unknown, opts: StrictOptions & { self?: string } = {}): ConfigIssue[] {
+  const base = opts.path ?? "";
+  const out: ConfigIssue[] = [];
+  if (!isRecord(input)) return [{ path: base, code: "invalid_type", message: `a condition must be an object (got ${kindOf(input)})` }];
+  unknownKeys(input, CONDITION_KEYS, base, "a condition", out);
+  const op = input.op;
+  if (!has(input, "op")) return out.concat({ path: at(base, "op"), code: "required", message: "op is required" });
+  if (typeof op !== "string" || !OPERATORS.includes(op as Operator)) {
+    out.push({ path: at(base, "op"), code: "invalid_value", message: `unsupported operator ${JSON.stringify(op)} (supported: ${OPERATORS.join(", ")})` });
+    return out;
+  }
+  const v = input.value;
+  const hasValue = has(input, "value");
+  if (hasValue && !isJsonValue(v)) out.push({ path: at(base, "value"), code: "invalid_value", message: "value must be a JSON value" });
+  if (op === "segment" || op === "not_segment") {
+    if (has(input, "attribute") && typeof input.attribute !== "string") out.push({ path: at(base, "attribute"), code: "invalid_type", message: `attribute must be a string (use "" for ${op})` });
+    if (typeof v !== "string" || v === "") out.push({ path: at(base, "value"), code: hasValue ? "invalid_type" : "required", message: `${op} needs a segment key (a non-empty string)` });
+    else if (v === opts.self) out.push({ path: at(base, "value"), code: "invalid_value", message: "a segment cannot reference itself" });
+    else if (segmentKnown(opts.segments, v) === false) out.push({ path: at(base, "value"), code: "unknown_segment", message: `unknown segment ${JSON.stringify(v)}` });
+    return out;
+  }
+  if (!has(input, "attribute")) out.push({ path: at(base, "attribute"), code: "required", message: "attribute is required" });
+  else if (typeof input.attribute !== "string") out.push({ path: at(base, "attribute"), code: "invalid_type", message: `attribute must be a string (got ${kindOf(input.attribute)})` });
+  else if (input.attribute.trim() === "") out.push({ path: at(base, "attribute"), code: "invalid_value", message: "attribute must not be empty" });
+  if (op === "exists" || op === "not_exists") return out;
+  if (op === "in" || op === "not_in") {
+    if (!Array.isArray(v) || v.length === 0) out.push({ path: at(base, "value"), code: hasValue ? "invalid_type" : "required", message: `${op} needs a non-empty list of values` });
+    return out;
+  }
+  if (!hasValue || v === null || v === "") return out.concat({ path: at(base, "value"), code: "required", message: `${op} needs a value` });
+  if (isNumericOp(op) && (typeof v !== "number" && typeof v !== "string" ? true : !Number.isFinite(Number(v)))) {
+    out.push({ path: at(base, "value"), code: "invalid_value", message: `${op} compares numbers: the value must be a number` });
+  } else {
+    const p = conditionValueProblem({ op: op as Operator, value: v as JsonValue });
+    if (p === "version") out.push({ path: at(base, "value"), code: "invalid_value", message: `${op} needs a version such as "4.10.0"` });
+    if (p === "date") out.push({ path: at(base, "value"), code: "invalid_value", message: `${op} needs a date ("2026-12-31"), an RFC 3339 timestamp with Z or an offset, or a Unix timestamp` });
+  }
+  return out;
+}
+
+/** Strict check of a rule's `serve`: a `fixed` serve has exactly `type` and `value`; a `rollout` serve adds `percentage`, `otherwise` and optional `bucketBy` / `seed`. */
+export function strictServe(input: unknown, opts: StrictValueOptions): ConfigIssue[] {
+  const base = opts.path ?? "";
+  const out: ConfigIssue[] = [];
+  if (!isRecord(input)) return [{ path: base, code: "invalid_type", message: `serve must be an object (got ${kindOf(input)})` }];
+  const type = input.type;
+  if (type === "fixed") {
+    unknownKeys(input, FIXED_KEYS, base, "a fixed serve", out);
+    served(opts.type, input.value, at(base, "value"), "value", out, has(input, "value"));
+    return out;
+  }
+  if (type === "rollout") {
+    unknownKeys(input, ROLLOUT_KEYS, base, "a rollout serve", out);
+    const p = input.percentage;
+    if (!has(input, "percentage")) out.push({ path: at(base, "percentage"), code: "required", message: "percentage is required" });
+    else if (typeof p !== "number" || !Number.isFinite(p)) out.push({ path: at(base, "percentage"), code: "invalid_type", message: `percentage must be a number (got ${kindOf(p)})` });
+    else if (p < 0 || p > 100) out.push({ path: at(base, "percentage"), code: "invalid_value", message: "percentage must be between 0 and 100" });
+    else if (Math.abs(Math.round(p * 100) - p * 100) > 1e-6) out.push({ path: at(base, "percentage"), code: "invalid_value", message: "percentage allows at most two decimals" });
+    served(opts.type, input.value, at(base, "value"), "value", out, has(input, "value"));
+    served(opts.type, input.otherwise, at(base, "otherwise"), "otherwise", out, has(input, "otherwise"));
+    if (has(input, "bucketBy") && (typeof input.bucketBy !== "string" || input.bucketBy.trim() === "")) out.push({ path: at(base, "bucketBy"), code: "invalid_value", message: "bucketBy must be a non-empty attribute name (omit it to bucket by key)" });
+    if (has(input, "seed") && (typeof input.seed !== "string" || input.seed === "")) out.push({ path: at(base, "seed"), code: "invalid_value", message: "seed must be a non-empty string (omit it to use the flag key)" });
+    return out;
+  }
+  if (!has(input, "type")) return [{ path: at(base, "type"), code: "required", message: 'type is required ("fixed" or "rollout")' }];
+  return [{ path: at(base, "type"), code: "invalid_value", message: `unknown serve type ${JSON.stringify(type)} (expected "fixed" or "rollout")` }];
+}
+
+function strictConditions(input: unknown, base: string, opts: StrictOptions & { self?: string }, out: ConfigIssue[]) {
+  if (!Array.isArray(input)) return void out.push({ path: base, code: "invalid_type", message: `conditions must be a list (got ${kindOf(input)})` });
+  input.forEach((c, i) => out.push(...strictCondition(c, { ...opts, path: item(base, i) })));
+}
+
+function strictMatch(o: Record<string, unknown>, base: string, out: ConfigIssue[]) {
+  if (has(o, "match") && o.match !== "all" && o.match !== "any") out.push({ path: at(base, "match"), code: "invalid_value", message: `match must be "all" or "any" (got ${JSON.stringify(o.match) ?? kindOf(o.match)})` });
+}
+
+/** Strict check of one rule. `match` may be omitted (it means "all", as in evaluation). */
+export function strictRule(input: unknown, opts: StrictValueOptions): ConfigIssue[] {
+  const base = opts.path ?? "";
+  const out: ConfigIssue[] = [];
+  if (!isRecord(input)) return [{ path: base, code: "invalid_type", message: `a rule must be an object (got ${kindOf(input)})` }];
+  unknownKeys(input, RULE_KEYS, base, "a rule", out);
+  if (!has(input, "id")) out.push({ path: at(base, "id"), code: "required", message: "id is required" });
+  else if (typeof input.id !== "string" || input.id.trim() === "") out.push({ path: at(base, "id"), code: "invalid_value", message: "id must be a non-empty string" });
+  if (has(input, "description") && typeof input.description !== "string") out.push({ path: at(base, "description"), code: "invalid_type", message: "description must be a string" });
+  strictMatch(input, base, out);
+  if (!has(input, "conditions")) out.push({ path: at(base, "conditions"), code: "required", message: "conditions is required (use [] to match every context)" });
+  else strictConditions(input.conditions, at(base, "conditions"), opts, out);
+  if (!has(input, "serve")) out.push({ path: at(base, "serve"), code: "required", message: "serve is required" });
+  else out.push(...strictServe(input.serve, { ...opts, path: at(base, "serve") }));
+  return out;
+}
+
+/** Strict check of a rules list: every rule, and rule ids unique within the list. */
+export function strictRules(input: unknown, opts: StrictValueOptions): ConfigIssue[] {
+  const base = opts.path ?? "rules";
+  if (!Array.isArray(input)) return [{ path: base, code: "invalid_type", message: `rules must be a list (got ${kindOf(input)})` }];
+  const out: ConfigIssue[] = [];
+  const seen = new Map<string, number>();
+  input.forEach((r, i) => {
+    out.push(...strictRule(r, { ...opts, path: item(base, i) }));
+    if (isRecord(r) && typeof r.id === "string" && r.id.trim() !== "") {
+      const first = seen.get(r.id);
+      if (first !== undefined) out.push({ path: at(item(base, i), "id"), code: "duplicate", message: `duplicate rule id ${JSON.stringify(r.id)} (also ${item(base, first)}.id)` });
+      else seen.set(r.id, i);
+    }
+  });
+  return out;
+}
+
+/** Strict check of a segment definition (`{ match, conditions }`). `self` is the segment's own key (no self-reference). */
+export function strictSegment(input: unknown, opts: StrictOptions & { self?: string } = {}): ConfigIssue[] {
+  const base = opts.path ?? "";
+  const out: ConfigIssue[] = [];
+  if (!isRecord(input)) return [{ path: base, code: "invalid_type", message: `a segment must be an object (got ${kindOf(input)})` }];
+  unknownKeys(input, SEGMENT_KEYS, base, "a segment", out);
+  strictMatch(input, base, out);
+  if (!has(input, "conditions")) out.push({ path: at(base, "conditions"), code: "required", message: "conditions is required" });
+  else strictConditions(input.conditions, at(base, "conditions"), opts, out);
+  return out;
+}
+
+/** Strict check of a flag's experiment metadata (as the database puts it into bundles). */
+export function strictExperiment(input: unknown, opts: StrictOptions = {}): ConfigIssue[] {
+  const base = opts.path ?? "";
+  const out: ConfigIssue[] = [];
+  if (!isRecord(input)) return [{ path: base, code: "invalid_type", message: `experiment must be an object (got ${kindOf(input)})` }];
+  unknownKeys(input, EXPERIMENT_KEYS, base, "an experiment", out);
+  for (const k of ["id", "key", "ruleId", "seed"] as const) {
+    if (typeof input[k] !== "string" || input[k] === "") out.push({ path: at(base, k), code: has(input, k) ? "invalid_type" : "required", message: `${k} must be a non-empty string` });
+  }
+  if (has(input, "unit") && input.unit !== null && (typeof input.unit !== "string" || input.unit === "")) out.push({ path: at(base, "unit"), code: "invalid_type", message: "unit must be a non-empty attribute name" });
+  if (has(input, "traffic") && !(typeof input.traffic === "number" && input.traffic >= 0 && input.traffic <= 100)) out.push({ path: at(base, "traffic"), code: "invalid_value", message: "traffic must be a number between 0 and 100" });
+  const vs = input.variants;
+  if (!Array.isArray(vs)) out.push({ path: at(base, "variants"), code: has(input, "variants") ? "invalid_type" : "required", message: "variants must be a list" });
+  else {
+    vs.forEach((v, i) => {
+      const p = item(at(base, "variants"), i);
+      if (!isRecord(v)) return void out.push({ path: p, code: "invalid_type", message: "a variant must be an object" });
+      unknownKeys(v, VARIANT_KEYS, p, "a variant", out);
+      if (typeof v.key !== "string" || v.key === "") out.push({ path: at(p, "key"), code: has(v, "key") ? "invalid_type" : "required", message: "key must be a non-empty string" });
+      if (!has(v, "value")) out.push({ path: at(p, "value"), code: "required", message: "value is required" });
+      else if (!isJsonValue(v.value)) out.push({ path: at(p, "value"), code: "invalid_value", message: "value must be a JSON value" });
+    });
+  }
+  return out;
+}
+
+function versionIssue(o: Record<string, unknown>, base: string): ConfigIssue | null {
+  const p = configSchemaVersionProblem(o.schemaVersion);
+  if (p === null) return null;
+  const future = typeof o.schemaVersion === "number" && Number.isInteger(o.schemaVersion) && o.schemaVersion > CONFIG_SCHEMA_VERSION;
+  return { path: at(base, "schemaVersion"), code: future ? "unsupported_version" : "invalid_value", message: p };
+}
+
+/**
+ * Strict check of a complete flag configuration as bundles carry it (`FlagConfig`): unknown keys anywhere are refused
+ * with their path, values must match the flag's `type`, rules / conditions / serve must be well-formed, and
+ * `schemaVersion` must be absent or a version this engine reads (an unsupported version is the only issue reported).
+ * Evaluation stays tolerant: this is for paths that write or publish configuration, never for SDKs reading bundles.
+ */
+export function strictFlagConfig(input: unknown, opts: StrictOptions = {}): ConfigIssue[] {
+  const base = opts.path ?? "";
+  if (!isRecord(input)) return [{ path: base, code: "invalid_type", message: `a flag configuration must be an object (got ${kindOf(input)})` }];
+  const v = versionIssue(input, base);
+  if (v && v.code === "unsupported_version") return [v];
+  const out: ConfigIssue[] = v ? [v] : [];
+  unknownKeys(input, FLAG_KEYS, base, "a flag configuration", out);
+  const type = input.type;
+  const typed = typeof type === "string" && FLAG_TYPES.includes(type as FlagType);
+  if (!typed) out.push({ path: at(base, "type"), code: has(input, "type") ? "invalid_value" : "required", message: `type must be one of ${FLAG_TYPES.join(", ")}` });
+  if (has(input, "clientExposed") && typeof input.clientExposed !== "boolean") out.push({ path: at(base, "clientExposed"), code: "invalid_type", message: "clientExposed must be a boolean" });
+  if (has(input, "experiment")) out.push(...strictExperiment(input.experiment, { ...opts, path: at(base, "experiment") }));
+  if (!typed) {
+    // Values cannot be judged without a type; still report the other problems.
+    if (has(input, "enabled") && typeof input.enabled !== "boolean") out.push({ path: at(base, "enabled"), code: "invalid_type", message: `enabled must be a boolean (got ${kindOf(input.enabled)})` });
+    else if (!has(input, "enabled")) out.push({ path: at(base, "enabled"), code: "required", message: "enabled is required" });
+    if (!has(input, "rules")) out.push({ path: at(base, "rules"), code: "required", message: "rules is required (use [] for none)" });
+    else out.push(...strictRules(input.rules, { ...opts, type: "json", path: at(base, "rules") }));
+    return out;
+  }
+  return out.concat(draftFields(input, { ...opts, type: type as FlagType, path: base }, false));
+}
+
+function draftFields(o: Record<string, unknown>, opts: StrictValueOptions, partial: boolean): ConfigIssue[] {
+  const base = opts.path ?? "";
+  const out: ConfigIssue[] = [];
+  if (has(o, "enabled")) {
+    if (typeof o.enabled !== "boolean") out.push({ path: at(base, "enabled"), code: "invalid_type", message: `enabled must be a boolean (got ${kindOf(o.enabled)})` });
+  } else if (!partial) out.push({ path: at(base, "enabled"), code: "required", message: "enabled is required" });
+  if (has(o, "rules")) out.push(...strictRules(o.rules, { ...opts, path: at(base, "rules") }));
+  else if (!partial) out.push({ path: at(base, "rules"), code: "required", message: "rules is required (use [] for none)" });
+  for (const k of ["default", "off"] as const) {
+    if (has(o, k) || !partial) served(opts.type, o[k], at(base, k), k === "default" ? "default value" : "off value", out, has(o, k));
+  }
+  return out;
+}
+
+/**
+ * Strict check of a draft configuration as it is stored per environment and sent to the Management API / MCP:
+ * `{ enabled, rules, default, off }` plus an optional `schemaVersion`. `type` comes from the flag. With `partial`, only
+ * the fields present are checked (at least one of them must be present).
+ */
+export function strictDraftConfig(input: unknown, opts: StrictDraftOptions): ConfigIssue[] {
+  const base = opts.path ?? "";
+  if (!isRecord(input)) return [{ path: base, code: "invalid_type", message: `a configuration must be an object (got ${kindOf(input)})` }];
+  const v = versionIssue(input, base);
+  if (v && v.code === "unsupported_version") return [v];
+  const out: ConfigIssue[] = v ? [v] : [];
+  unknownKeys(input, DRAFT_KEYS, base, "a draft configuration", out);
+  const partial = opts.partial === true;
+  if (partial && !DRAFT_KEYS.some((k) => k !== "schemaVersion" && has(input, k))) out.push({ path: base, code: "required", message: "send at least one of enabled, rules, default, off" });
+  return out.concat(draftFields(input, opts, partial));
+}
+
+/** `path: message` lines for logs and API error messages (`(root)` for an issue about the whole object). */
+export function formatIssues(issues: readonly ConfigIssue[]): string[] {
+  return issues.map((i) => `${i.path || "(root)"}: ${i.message}`);
 }
 
 /* ---------------- diff ---------------- */

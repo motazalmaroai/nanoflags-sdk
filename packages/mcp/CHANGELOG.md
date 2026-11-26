@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+- Five new read-only tools (14 tools; the nine existing ones keep their names and semantics): `preview_change`,
+  `find_stale_flags`, `get_removal_readiness`, `get_effective_policy`, `get_flag_usage`, each with an `outputSchema`.
+- `update_draft` takes an optional `expectedVersion` (`If-Match`, 412 `DRAFT_CONFLICT` explained); `get_flag` shows
+  `draftVersion`. Drafts and initial values are checked with the engine's strict validator before the API call
+  (the engine is now compiled into the package).
+- Bounded output: `limit`/`cursor` on `list_environments`, `limit` on `get_change_status` (approvals) and
+  `explain_flag` (insight lists), and every result held to 64 KB with `truncated: true` and a marker line.
+- Provenance: client name/version, transport and the optional `sessionId` / `taskRef` arguments of the write tools
+  are sent as `X-NanoFlags-Agent-*` headers and recorded in the audit log; they never change what a token may do.
+
+- New read-only tool `get_profile` (9 tools): a stable opaque profile id (per person and organization, from
+  `token.get`), display name, agent label and project. Marked `_meta["openai/profile"]: true` with an `outputSchema`.
+- Tool annotations are explicit and reviewed: `openWorldHint` is `false` for every tool (a private NanoFlags
+  workspace), and `update_draft` is `destructiveHint: true` (it overwrites draft rules and values).
+- `createServer` options `securitySchemes` and `authChallenge` (used by the hosted remote server for ChatGPT's
+  per-tool OAuth declaration and `_meta["mcp/www_authenticate"]`); the stdio server does not set them.
+
 ## 0.3.0 (2026-11-23)
 
 - MCP 2026-07-28: the server is dual-era. Requests that carry their protocol version in `_meta` are served statelessly

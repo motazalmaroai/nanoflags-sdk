@@ -9,4 +9,6 @@ export default defineConfig({
   clean: true,
   // Keep `node:` specifiers as written (Node ≥ 20). The shebang in src/bin.ts is preserved and dist/bin.js is made executable.
   removeNodeProtocol: false,
+  // The engine is a private workspace package: its strict validator is compiled into the server (as in packages/cli).
+  noExternal: ["@nanoflags/engine"],
 });

@@ -40,6 +40,35 @@ Use a CI key in CI. It cannot publish, so a leaked CI key cannot change what you
 
 ## Commands
 
+### `nanoflags init`
+
+```sh
+npx @nanoflags/cli init      # in your app's directory
+```
+
+Sets up NanoFlags in a JavaScript/TypeScript app in one go:
+
+1. **Detects** the framework (Next.js App or Pages Router, React + Vite, Vite, Create React App, Node/Express) and the
+   package manager (npm, pnpm, yarn, bun). `--framework next-app|next-pages|vite-react|vite|react|node` overrides it.
+2. **Signs in through the browser**: it prints a one-time code and opens `app.nanoflags.io/app/cli/connect`. You check
+   that the page shows the same code, confirm (admin role), and paste the connection string the page shows back into the
+   terminal (input is hidden). The page creates a Development SDK key (a client key for browser apps, a server key
+   otherwise; skipped when your env file already has one) and a Management API token scoped to the project that
+   **expires after one hour** and is never written to disk.
+3. **Installs** `@nanoflags/sdk` (skip with `--skip-install`).
+4. **Writes** the key to `.env.local` (Next.js, Vite, CRA) or `.env` (Node). Existing values are never replaced without
+   asking (never with `--yes`). The env file is added to `.gitignore` if git would not ignore it.
+5. **Writes a client file** in the framework's idiom (`lib/nanoflags.ts`, `src/nanoflags.ts`, `nanoflags.js`); an existing
+   file is left alone.
+6. **Creates the flag `welcome-banner`** (boolean, off) if it is missing — in the draft only. It is turned on and
+   published only when you confirm (or pass `--publish`) and the environment publishes without a reviewed change.
+7. Prints a **usage snippet**, then **waits** (default 300 s interactively, `--wait <s>`, `0` skips) for your app's first
+   report (service name = your package name) and prints `revision N is live in Development`, or what to check.
+
+In CI or scripts: `nanoflags init --yes --key nf_srv_… --token nf_api_… [--project <key>] [--env <key>] [--wait 0]`.
+`--app-url` (or `NANOFLAGS_APP_URL`) points at another dashboard, `--base-url` at another edge (e.g. a local stack).
+For `init`, `--key` is the SDK key the app uses; `NANOFLAGS_KEY` is not read.
+
 ### `nanoflags export [--out <file>]`
 
 `GET /v1/admin/export`. Prints the project as JSON: flags (with `permanent`, `archived`, …), segments,

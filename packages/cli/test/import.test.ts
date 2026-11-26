@@ -90,7 +90,7 @@ describe("nanoflags import verify", () => {
     expect(body).toMatchObject({ dryRun: true, format: "auto", compareFlags: ["banner"], conflict: "overwrite" });
     expect(body.contexts).toEqual([{ key: "a", country: "SA" }, { key: "b", country: "sa" }, { userID: "c" }]);
     expect(r.calls[0]!.headers.get("Idempotency-Key")).toBeNull();
-    expect(r.out).toContain("Side-by-side comparison (dry run, nothing written) · source statsig (statsig-approximation)");
+    expect(r.out).toContain("Side-by-side comparison (dry run, nothing written) · source JSON export (re-implemented evaluation)");
     expect(r.out).toContain("#2 banner (production) [rule] source true → NanoFlags false");
     expect(r.out).not.toContain(TOKEN);
   });

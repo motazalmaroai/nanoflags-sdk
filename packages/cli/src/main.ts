@@ -9,7 +9,7 @@ import { CliError, DEFAULT_MAX_FILE_BYTES, EXIT, clip, show, table, unifiedDiff,
 import { checkHistory, isMonitorState, isTreeHead, leafHash, rootOf, verifyConsistency, verifyHead, type MonitorState, type PublicJwk, type TreeHead } from "./log.js";
 import { generateKey, isCosignature, isCosignPreview, privateKeyFrom, publicX, signPreview, signingTexts, verifyCosignature, type Cosignature } from "./cosign.js";
 
-export const VERSION = "0.6.0";
+export const VERSION = "0.6.1";
 
 export interface Io {
   env: Record<string, string | undefined>;

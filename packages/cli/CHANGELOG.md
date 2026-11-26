@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.1 (2026-11-26)
+
+Patch.
+
+- `import --format`: the help lists `auto|flagd|nanoflags|csv`; other JSON export shapes are recognised by `auto`, and
+  any other identifier is passed to the API, which validates it and lists the accepted ones.
+- The README and the docs use the short command `npx nanoflags init`.
+
 ## 0.6.0 (2026-11-26)
 
 Additive.

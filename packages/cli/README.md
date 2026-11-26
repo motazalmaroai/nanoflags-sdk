@@ -43,7 +43,7 @@ Use a CI key in CI. It cannot publish, so a leaked CI key cannot change what you
 ### `nanoflags init`
 
 ```sh
-npx @nanoflags/cli init      # in your app's directory
+npx nanoflags init      # in your app's directory
 ```
 
 Sets up NanoFlags in a JavaScript/TypeScript app in one go:

@@ -82,6 +82,13 @@ final class FakeEdge implements Transport
         $this->signature = $this->sign($this->text, $this->revision, $this->checksum);
     }
 
+    /** Forgets the signing keys the client class remembers for this process (each test has its own edge key). */
+    public static function resetProcessState(): void
+    {
+        $p = new \ReflectionProperty(\NanoFlags\Client::class, 'processKeys');
+        $p->setValue(null, []);
+    }
+
     public function count(string $path): int
     {
         return count(array_filter($this->requests, static fn ($r) => $r['path'] === $path));

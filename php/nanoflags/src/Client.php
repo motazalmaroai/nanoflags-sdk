@@ -94,6 +94,15 @@ final class Client
     /** @var list<array{kid: ?string, key: string}> */
     private array $fetchedKeys = [];
     private float $keysFetchedAt = 0.0;
+    /** @var array<string, array{keys: list<array{kid: ?string, key: string}>, at: float}> keys loaded from /v1/keys by this PHP process, by base URL (process memory only, never the shared cache) */
+    private static array $processKeys = [];
+    /**
+     * Verification hardening: the newest revision this client has verified (signature checked against the embedded,
+     * pinned or freshly fetched keys) and adopted. Anything older is refused, see {@see Client::fetch()}.
+     */
+    private ?int $newestVerified = null;
+    /** The unsigned-answer error of the current load (the edge's own publisher-lag signal): it leaves the status unchanged. */
+    private ?NanoFlagsException $unsignedLag = null;
 
     private bool $eventsEnabled;
     private float $sampleRate = 0.1;
@@ -171,7 +180,7 @@ final class Client
         ?\Closure $random = null,
     ) {
         $this->sdkKey = $sdkKey;
-        $this->baseUrl = rtrim($baseUrl, '/');
+        $this->baseUrl = self::normalizeBaseUrl($baseUrl);
         $this->service = $service !== '' ? $service : 'unknown';
         $this->id = sprintf('%08x', Engine::murmur3($this->baseUrl . '|' . $sdkKey));
         $this->browserKey = str_starts_with($sdkKey, 'nf_pub_');
@@ -280,6 +289,20 @@ final class Client
                 $this->bootstrap = ['bundle' => $doc, 'revision' => self::revisionOf($doc), 'raw' => $raw, 'etag' => null, 'checksum' => null, 'sig' => null, 'source' => 'bootstrap'];
             }
         }
+    }
+
+    /**
+     * `https://EDGE.nanoflags.io:443/`, a trailing dot or trailing slashes are the official edge; anything else (another
+     * host, scheme or port, a path, user info, a query) is left as given (minus trailing slashes). The official edge turns
+     * signature verification on by default, so a harmless spelling of its address must not switch it off.
+     */
+    private static function normalizeBaseUrl(string $raw): string
+    {
+        $trimmed = rtrim($raw, '/');
+        if (preg_match('~^https://([A-Za-z0-9.-]+)(?::443)?$~iD', $trimmed, $m) === 1 && strtolower(rtrim($m[1], '.')) === (string) parse_url(Keys::OFFICIAL_EDGE_URL, PHP_URL_HOST)) {
+            return Keys::OFFICIAL_EDGE_URL;
+        }
+        return $trimmed;
     }
 
     public function __destruct()
@@ -552,6 +575,14 @@ final class Client
         return 'nanoflags.' . $what . '.' . $this->id;
     }
 
+    /**
+     * What the shared cache holds, and what is trusted from it: one entry per client (base URL + SDK key) with the signed
+     * bundle text, its signature and the pinned environment. On every read the bundle is verified again against the
+     * embedded keys, the keys the caller pinned, or keys fetched from /v1/keys in this process; the revision of that
+     * verified copy is the floor for later answers, also in other requests. The cache never supplies key material
+     * (nothing read back from it is used as a signing key), and fields it carries that are not re-derived from the
+     * verified bundle (such as a revision number) are not trusted.
+     */
     /** @return array<string, mixed>|null */
     private function readEntry(): ?array
     {
@@ -727,9 +758,23 @@ final class Client
         if ($candidate === null && $this->snapshot !== null && $this->snapshot['source'] !== 'bootstrap') {
             $candidate = $this->snapshot; // the cache was cleared under us: keep what this process has
         }
+        $cachedStatus = ($entry['stale'] ?? false) === true ? Status::STALE : Status::READY;
+        if ($candidate !== null && $this->verifier !== null) {
+            if ($candidate['source'] === 'cache' && $this->newestVerified !== null && $candidate['revision'] < $this->newestVerified) {
+                // The cached copy is older than a revision this client already verified: keep what is in use. The stale
+                // cache entry is replaced when the edge confirms the copy in use (or a newer bundle arrives).
+                $this->emitError($this->rollbackError($candidate['revision'], $this->newestVerified, 'cached'));
+                $keep = $this->snapshot !== null && $this->snapshot['source'] !== 'bootstrap' && $this->snapshot['revision'] >= $this->newestVerified ? $this->snapshot : null;
+                $entry = $keep !== null ? ['env' => $keep['sig']['environmentId'] ?? null] : null;
+                $candidate = $keep;
+                $cachedStatus = Status::STALE;
+            }
+            if ($candidate !== null && $candidate['sig'] !== null) {
+                $this->noteVerified($candidate['revision']); // a cached signed copy was re-verified above: its revision is the floor
+            }
+        }
         $fetchedAt = is_numeric($entry['fetchedAt'] ?? null) ? (float) $entry['fetchedAt'] : 0.0;
         $fresh = $candidate !== null && $entry !== null && $now - $fetchedAt < $this->cacheTtl;
-        $cachedStatus = ($entry['stale'] ?? false) === true ? Status::STALE : Status::READY;
 
         if ($this->offline || !$this->refresh) {
             $this->adopt($candidate, $candidate === null ? Status::NOT_READY : ($this->offline || $fresh ? $cachedStatus : Status::STALE));
@@ -759,7 +804,11 @@ final class Client
                 unset($base['raw'], $base['sig'], $base['etag'], $base['checksum']);
             }
             $this->writeEntry($base);
-            $this->adopt($candidate, Status::STALE);
+            // A rejected update leaves the configuration in use, now known not to be current: stale until a bundle verifies
+            // or the edge confirms the one in use. Exceptions (status unchanged, error still reported): the edge's own
+            // unsigned answer while the publisher signs a new revision, and a bundle for a newer engine.
+            $keepStatus = $e === $this->unsignedLag || $e->errorCode === NanoFlagsException::ENGINE;
+            $this->adopt($candidate, $keepStatus && $this->snapshot !== null && $this->snapshot['source'] !== 'bootstrap' ? $this->status : Status::STALE);
             $this->emitError($e);
         }
     }
@@ -809,10 +858,14 @@ final class Client
         /** @var JsObject $body */
         $pinned = is_string($entry['env'] ?? null) ? $entry['env'] : null;
         [$sig, $raw] = $this->checkSignature($res, $body, $bundle, $pinned);
+        $revision = self::revisionOf($bundle);
+        if ($this->verifier !== null && !$servedStale && $this->newestVerified !== null && $revision < $this->newestVerified) {
+            // Never adopt a revision older than one already verified (signed or not). Revisions only grow per environment.
+            throw $this->rollbackError($revision, $this->newestVerified, 'served');
+        }
         if (!Engine::supportsEngine($bundle->get('engine'))) {
             throw $this->engineError($bundle);
         }
-        $revision = self::revisionOf($bundle);
         // The edge is serving its last-known-good copy: never go backwards because of it.
         if ($servedStale && $candidate !== null && $candidate['revision'] >= $revision) {
             $entry['fetchedAt'] = $now;
@@ -827,9 +880,39 @@ final class Client
             'bundle' => $bundle, 'revision' => $revision, 'raw' => $raw, 'etag' => $res->header('ETag'),
             'checksum' => is_string($checksum) ? $checksum : null, 'sig' => $sig, 'source' => 'network',
         ];
+        if ($this->verifier !== null && !$servedStale && $this->store !== null) {
+            // Another request may have stored a newer verified revision while this one was under way: it wins, silently.
+            $latest = $this->readEntry();
+            $newer = $latest !== null ? $this->entrySnapshot($latest) : null;
+            if ($newer !== null && $newer['sig'] !== null && $newer['revision'] > $revision) {
+                $this->noteVerified($newer['revision']);
+                $this->adopt($newer, ($latest['stale'] ?? false) === true ? Status::STALE : Status::READY);
+                return;
+            }
+        }
         $this->remember($raw, $sig, $bundle);
         $this->writeEntry($this->entryFor($snap, $now, $servedStale, $sig['environmentId'] ?? $pinned));
+        if ($this->verifier !== null && $sig !== null) {
+            $this->noteVerified($revision);
+        }
         $this->adopt($snap, $servedStale ? Status::STALE : Status::READY);
+    }
+
+    private function noteVerified(int $revision): void
+    {
+        if ($this->newestVerified === null || $revision > $this->newestVerified) {
+            $this->newestVerified = $revision;
+        }
+    }
+
+    private function rollbackError(int $revision, int $newest, string $what): NanoFlagsException
+    {
+        return new NanoFlagsException(sprintf(
+            'Bundle r%d was rejected: it is older than r%d, which this client already verified for this environment (a %s copy; restoring an old revision in NanoFlags publishes a new, higher one). The configuration in use is unchanged.',
+            $revision,
+            $newest,
+            $what,
+        ), NanoFlagsException::ROLLBACK);
     }
 
     /**
@@ -866,7 +949,8 @@ final class Client
         $reject = static fn (string $why) => new NanoFlagsException(sprintf('Bundle r%d was rejected: %s The configuration in use is unchanged.', $rev, $why), NanoFlagsException::SIGNATURE);
         if ($res->header('X-NanoFlags-Signed') !== 'true') {
             if ($this->verifier['require']) {
-                throw $reject('it is not signed (the edge is still distributing it) and unsigned bundles are refused; fetching again shortly.');
+                $this->unsignedLag = $reject('it is not signed (the edge is still distributing it) and unsigned bundles are refused; fetching again shortly.');
+                throw $this->unsignedLag;
             }
             return [null, $raw ?? (string) Js::stringify($bundle)];
         }
@@ -906,7 +990,7 @@ final class Client
 
     /**
      * The keys to verify a signature by $kid with: the pinned or embedded keys plus those of /v1/keys. A key id that
-     * none of them has (a rotation) loads /v1/keys once, again at most once a minute (shared through the cache).
+     * none of them has (a rotation) loads /v1/keys once, again at most once a minute (kept in this process only, never in the shared cache).
      *
      * @return list<array{kid: ?string, key: string}>
      */
@@ -920,16 +1004,11 @@ final class Client
             return $v['base'];
         }
         $now = $this->now();
-        if ($this->keysFetchedAt === 0.0 && $this->store !== null) {
-            try {
-                $c = json_decode((string) $this->store->get($this->cacheKey('keys')), true);
-                if (is_array($c) && is_array($c['keys'] ?? null) && is_numeric($c['at'] ?? null)) {
-                    $this->fetchedKeys = Signature::importKeys($c['keys']);
-                    $this->keysFetchedAt = (float) $c['at'];
-                }
-            } catch (\Throwable) {
-                // refetched below if needed
-            }
+        // Keys fetched earlier by this process (memory only). The shared cache is never a source of signing keys: keys come from the
+        // embedded set, the keys the caller pinned, or /v1/keys.
+        if ($this->keysFetchedAt === 0.0 && isset(self::$processKeys[$this->baseUrl])) {
+            $this->fetchedKeys = self::$processKeys[$this->baseUrl]['keys'];
+            $this->keysFetchedAt = self::$processKeys[$this->baseUrl]['at'];
         }
         $known = [...$v['base'], ...$this->fetchedKeys];
         if ($known !== []) {
@@ -964,26 +1043,13 @@ final class Client
                 throw $e;
             }
             $this->keysFetchedAt = $now;
-            $this->saveKeys([], $now);
+            self::$processKeys[$this->baseUrl] = ['keys' => $this->fetchedKeys, 'at' => $now];
             return $known;
         }
         $this->fetchedKeys = $keys;
         $this->keysFetchedAt = $now;
-        $this->saveKeys($list, $now);
+        self::$processKeys[$this->baseUrl] = ['keys' => $keys, 'at' => $now];
         return [...$v['base'], ...$keys];
-    }
-
-    /** @param list<mixed> $jwks */
-    private function saveKeys(array $jwks, float $now): void
-    {
-        if ($this->store === null) {
-            return;
-        }
-        try {
-            $this->store->set($this->cacheKey('keys'), (string) json_encode(['keys' => array_values(array_filter($jwks, [Signature::class, 'isPublicEd25519'])), 'at' => $now]));
-        } catch (\Throwable) {
-            // not important
-        }
     }
 
     private function engineError(JsObject $b): NanoFlagsException

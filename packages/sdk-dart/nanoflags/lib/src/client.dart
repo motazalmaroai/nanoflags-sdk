@@ -33,6 +33,26 @@ const Duration _liveMaxBackoff = Duration(minutes: 5);
 /// A healthy socket is replaced after about this long, so the edge validates the key again.
 const Duration _liveRotate = Duration(minutes: 50);
 
+/// Rollback check: right after a revision arrived over the live socket, the HTTP path may still answer the previous one
+/// for a moment, and vice versa. Within this window an older answer from the other transport is refused silently; outside
+/// it (or on the same transport) it is refused and reported (`rollback`).
+const Duration _rollbackGrace = Duration(minutes: 2);
+
+/// How long a network answer waits for the stored bundle to be read (and verified) before the rollback check.
+const Duration _restoreWait = Duration(seconds: 2);
+
+enum _VerifiedSource { live, http, store }
+
+/// The newest revision this client adopted after verifying its signature.
+final class _NewestVerified {
+  _NewestVerified(this.revision, this.environmentId, this.seq, this.at, this.source);
+  final int revision;
+  final String environmentId;
+  final int seq;
+  final DateTime at;
+  final _VerifiedSource source;
+}
+
 final class _QueuedEvent {
   _QueuedEvent(this.json);
   final Map<String, Object?> json;
@@ -58,6 +78,27 @@ final class _Checked {
 bool _usable(Object? v) => isBundle(v) && jsIsInteger((v as Map)['revision']) && !v.containsKey('shadow');
 
 int _revisionOf(Map<String, Object?> b) => (b['revision'] as num).toInt();
+
+/// `https://EDGE.nanoflags.io:443/`, a trailing dot or trailing slashes are the official edge; anything else (another host,
+/// another scheme, a path, user info, a query) is left as given (minus trailing slashes).
+String _normalizeBaseUrl(String raw) {
+  final trimmed = raw.replaceFirst(RegExp(r'/+$'), '');
+  try {
+    final u = Uri.parse(trimmed);
+    if (u.scheme == 'https' &&
+        u.userInfo.isEmpty &&
+        !u.hasQuery &&
+        !u.hasFragment &&
+        (u.path.isEmpty || u.path == '/') &&
+        u.port == 443 &&
+        u.host.replaceFirst(RegExp(r'\.$'), '') == Uri.parse(officialEdgeUrl).host) {
+      return officialEdgeUrl;
+    }
+  } on FormatException {
+    // not a URL: left as given
+  }
+  return trimmed;
+}
 
 /// Converts application values to the JSON data the engine evaluates.
 Object? _normalize(Object? v) {
@@ -91,7 +132,7 @@ class NanoFlagsClient {
   /// Throws [ArgumentError] for a server key (`nf_srv_…`) or any key that is not a client key.
   NanoFlagsClient(NanoFlagsOptions options, {http.Client? httpClient, WebSocketConnector? webSocketConnector, math.Random? random})
       : _options = options,
-        _baseUrl = options.baseUrl.replaceFirst(RegExp(r'/+$'), ''),
+        _baseUrl = _normalizeBaseUrl(options.baseUrl),
         _random = random ?? math.Random(),
         _context = _normalizeContext(options.context),
         _dataSaver = options.dataSaver {
@@ -130,6 +171,46 @@ class NanoFlagsClient {
   SignatureInfo? _sig;
   String? _rawText;
   String? _pinnedEnvironment;
+  /// Rollback protection (with verification): the newest revision adopted after its signature was verified, from the
+  /// network, a push or the store. Any later bundle with a lower revision is refused, signed or not. Only verified
+  /// revisions count, so an unverified source (bootstrap, an unsigned answer) never blocks updates. One client serves one
+  /// SDK key, i.e. one environment; verified bundles of another environment are refused already (environment pin).
+  _NewestVerified? _newestVerified;
+
+  /// Counts adoptions of verified revisions: an answer requested at sequence n is "older news" if a later one was adopted.
+  int _verifiedSeq = 0;
+  bool _restoreDone = false;
+  Future<void>? _restoring;
+
+  /// Rejections of an answer the edge marked as unsigned (transient publisher lag): status unchanged.
+  final Expando<bool> _unsignedRejections = Expando<bool>();
+
+  void _noteVerified(SignatureInfo info, _VerifiedSource source) {
+    _verifiedSeq++;
+    final n = _newestVerified;
+    if (n == null || info.revision >= n.revision) _newestVerified = _NewestVerified(info.revision, info.environmentId, _verifiedSeq, DateTime.now(), source);
+  }
+
+  /// [revision] is older than the newest verified one: returns the `rollback` error to report, or null when the older
+  /// answer is explained by ordering (the newer one was accepted after this answer was requested, or arrived a moment ago
+  /// over the other transport). Either way the caller does not adopt it.
+  NanoFlagsException? _rollbackError(int revision, int requestedAtSeq, _VerifiedSource source) {
+    final n = _newestVerified;
+    if (n == null || revision >= n.revision) return null;
+    if (n.source != _VerifiedSource.store && (n.seq > requestedAtSeq || (n.source != source && DateTime.now().difference(n.at) < _rollbackGrace))) return null;
+    return NanoFlagsException(
+        'Bundle r$revision was rejected: it is older than r${n.revision}, which this client already verified for this environment '
+        '(a replayed or stale response; restoring an old revision in NanoFlags publishes a new, higher one). The configuration in use is unchanged.',
+        NanoFlagsErrorCode.rollback);
+  }
+
+  /// An update was refused (verification, rollback, invalid push): the configuration in use stays, but the client now
+  /// knows it is not on the current revision, so a loaded client turns stale until the edge confirms one.
+  void _updateRejected(NanoFlagsException e) {
+    if (_bundle != null) _setStatus(NanoFlagsStatus.stale);
+    _emitError(e);
+  }
+
   /// Shadow fetches waiting for the first verification to pin the environment ([_awaitPinnedEnvironment]).
   final List<Completer<void>> _pinWaiters = [];
 
@@ -503,7 +584,8 @@ class NanoFlagsClient {
         scheduleMicrotask(() => _emitError(const NanoFlagsException('The bootstrap bundle is invalid and was ignored.', NanoFlagsErrorCode.invalidBundle)));
       }
     }
-    Future.wait([_restore(), _sync()]).whenComplete(() {
+    _restoring = _restore().whenComplete(() => _restoreDone = true);
+    Future.wait([_restoring!, _sync()]).whenComplete(() {
       if (!_ready.isCompleted) _ready.complete(); // even without a bundle: callers must not hang
       if (_closed) return;
       if (!_paused) {
@@ -592,6 +674,8 @@ class NanoFlagsClient {
       _sig = sig;
       _rawText = raw;
       if (sig != null && _pinnedEnvironment == null) _pin(sig.environmentId);
+      // The stored copy is the newest this client verified before the restart: an older answer must not replace it.
+      if (sig != null) _noteVerified(sig, _VerifiedSource.store);
       final etag = p['etag'], checksum = p['checksum'];
       // A restored bundle is usable but not known to be current: stale until the edge confirms it.
       _adopt(b, etag: etag is String ? etag : null, checksum: checksum is String ? checksum : null, status: NanoFlagsStatus.stale, source: UpdateSource.store);
@@ -648,7 +732,11 @@ class NanoFlagsClient {
     NanoFlagsException reject(String why) =>
         NanoFlagsException('Bundle r$rev was rejected: $why The configuration in use is unchanged.', NanoFlagsErrorCode.signature);
     if (headers['x-nanoflags-signed'] != 'true') {
-      if (verify.require) throw reject('it is not signed (the edge is still distributing it) and unsigned bundles are refused; fetching again shortly.');
+      if (verify.require) {
+        final e = reject('it is not signed (the edge is still distributing it) and unsigned bundles are refused; fetching again shortly.');
+        _unsignedRejections[e] = true;
+        throw e;
+      }
       return _Checked(bundle, null, raw ?? jsonEncode(bundle));
     }
     final signature = headers['x-nanoflags-signature'];
@@ -679,6 +767,7 @@ class NanoFlagsClient {
 
   Future<void> _syncOnce() async {
     _lastSyncAt = DateTime.now();
+    final requestedAt = _verifiedSeq;
     final transport = _streamTriggered ? NanoFlagsTransport.stream : NanoFlagsTransport.poll;
     _streamTriggered = false;
     try {
@@ -708,6 +797,20 @@ class NanoFlagsClient {
       final checked = await _checkSignature(res.headers, text, body);
       if (_closed) return;
       final next = checked.bundle;
+      if (_verify != null && !servedStale) {
+        // Rollback / replay: never adopt a revision older than one already verified (signed or not, fetched or polled).
+        // The stored copy is read first, so a restart cannot be rolled back by an answer that beats the store.
+        final restoring = _restoring;
+        if (!_restoreDone && restoring != null) await Future.any([restoring, Future<void>.delayed(_restoreWait)]);
+        if (_closed) return;
+        final newest = _newestVerified;
+        if (newest != null && _revisionOf(next) < newest.revision) {
+          final err = _rollbackError(_revisionOf(next), requestedAt, _VerifiedSource.http);
+          if (err != null) throw err;
+          _failures = 0;
+          return;
+        }
+      }
       if (!supportsEngine(next)) throw _engineError(next);
       _failures = 0;
       final rev = _revisionOf(next);
@@ -717,6 +820,7 @@ class NanoFlagsClient {
       if (_bundle != null && rev < _liveRevision && _revisionOf(_bundle!) >= _liveRevision) return;
       _sig = checked.sig;
       _rawText = checked.raw;
+      if (checked.sig != null) _noteVerified(checked.sig!, _VerifiedSource.http);
       final checksum = body['checksum'];
       _adopt(next,
           etag: res.headers['etag'],
@@ -731,8 +835,12 @@ class NanoFlagsClient {
       // A bundle for a newer engine: nothing to retry quickly; the edge answers the same until the app updates.
       if (err.code == NanoFlagsErrorCode.engine) return _emitError(err);
       _failures++;
-      // A rejected update changes nothing: same bundle, same status. Polling retries with backoff.
-      if (err.code == NanoFlagsErrorCode.signature) return _emitError(err);
+      // The edge's own "not signed yet" marker (the publisher is still signing the new revision, typically well under a
+      // minute): an error only, status unchanged. Polling retries with backoff.
+      if (_unsignedRejections[err] == true) return _emitError(err);
+      // A rejected update keeps the bundle in use, which is now known not to be current: stale until the edge confirms a
+      // configuration again. Polling retries with backoff.
+      if (err.code == NanoFlagsErrorCode.signature || err.code == NanoFlagsErrorCode.rollback) return _updateRejected(err);
       // A rejected key must not keep a socket.
       if (err.code == NanoFlagsErrorCode.unauthorized) _dropLive();
       if (_bundle != null) _setStatus(NanoFlagsStatus.stale);
@@ -878,14 +986,18 @@ class NanoFlagsClient {
     final revision = m['revision'];
     // Revision 0 / no bundle: the environment has nothing published yet.
     if (revision is! int || revision < 1 || m['bundle'] is! String) return;
-    if (_bundle != null && revision < _revisionOf(_bundle!)) return; // never backwards
+    final receivedAt = _verifiedSeq;
+    // Never backwards. An older push than a verified revision is checked first, so that a genuine (signed) replay is
+    // reported as a rollback; anything else older is dropped silently.
+    final older = _bundle != null && revision < _revisionOf(_bundle!);
+    if (older && !(_verify != null && _newestVerified != null && revision < _newestVerified!.revision)) return;
     final text = m['bundle'] as String;
     final pushedChecksum = m['checksum'] is String ? m['checksum'] as String : null;
     SignatureInfo? info;
     final verify = _verify;
     if (verify != null) {
       void reject(String why) {
-        _emitError(NanoFlagsException('Pushed bundle r$revision was rejected: $why The configuration in use is unchanged.', NanoFlagsErrorCode.signature));
+        _updateRejected(NanoFlagsException('Pushed bundle r$revision was rejected: $why The configuration in use is unchanged.', NanoFlagsErrorCode.signature));
         // Whatever sent this, the regular (verified) request path says what is really current.
         unawaited(_sync());
       }
@@ -903,6 +1015,14 @@ class NanoFlagsClient {
       if (_closed) return;
       if (!ok) return reject('its signature does not verify.');
     }
+    if (older) {
+      final err = _rollbackError(revision, receivedAt, _VerifiedSource.live);
+      if (err != null) {
+        _updateRejected(err);
+        unawaited(_sync()); // the regular request path says what is really current (and confirms ready again)
+      }
+      return;
+    }
     Object? parsed;
     try {
       parsed = jsonDecode(text);
@@ -910,7 +1030,7 @@ class NanoFlagsClient {
       parsed = null;
     }
     if (!_usable(parsed) || _revisionOf((parsed as Map).cast<String, Object?>()) != revision) {
-      return _emitError(const NanoFlagsException('The edge pushed an invalid bundle; it was ignored.', NanoFlagsErrorCode.invalidBundle));
+      return _updateRejected(const NanoFlagsException('The edge pushed an invalid bundle; it was ignored.', NanoFlagsErrorCode.invalidBundle));
     }
     final next = parsed.cast<String, Object?>();
     if (!supportsEngine(next)) return _emitError(_engineError(next));
@@ -921,7 +1041,10 @@ class NanoFlagsClient {
       if (_checksum == null || _checksum == pushedChecksum) _setStatus(NanoFlagsStatus.ready);
       return;
     }
-    if (info != null) _pin(info.environmentId);
+    if (info != null) {
+      _pin(info.environmentId);
+      _noteVerified(info, _VerifiedSource.live);
+    }
     _sig = info;
     _rawText = text;
     _liveRevision = revision;

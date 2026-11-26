@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.2 (2026-11-27)
+
+- Verification hardening, no API change (refuses older signed revisions, reports rejected updates as stale)
+
 ## 0.3.1 — 2026-11-21
 
 Security fix to the integrity of shadow reports; served flag values are not affected (shadow bundles are

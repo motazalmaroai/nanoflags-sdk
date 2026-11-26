@@ -46,6 +46,12 @@ class FakeEdge:
         self.lock = threading.Lock()
         self.signed = True
         self.tamper = False
+        #: Environment id the bundle is signed for (a foreign one tests environment binding).
+        self.env_id = ENV_ID
+        #: Answer /v1/bundle with X-NanoFlags-Stale: true (the edge serves its last-known-good copy).
+        self.stale = False
+        #: While set (cleared Event), /v1/bundle answers wait for it after the answer was determined.
+        self.bundle_gate: Optional[threading.Event] = None
         self.status_override: Optional[int] = None
         self.requests: List[Dict[str, Any]] = []
         self.events: List[Dict[str, Any]] = []
@@ -71,7 +77,7 @@ class FakeEdge:
     # ---- signing
     def sign(self, text: str, revision: int, checksum: str, key: Optional[Ed25519PrivateKey] = None) -> str:
         digest = hashlib.sha256(text.encode()).hexdigest()
-        canonical = f"nanoflags-bundle-v1\n{ENV_ID}\n{revision}\n{checksum}\n{digest}"
+        canonical = f"nanoflags-bundle-v1\n{self.env_id}\n{revision}\n{checksum}\n{digest}"
         return b64url((key or self.key).sign(canonical.encode()))
 
     def set_shadow(
@@ -132,7 +138,7 @@ class FakeEdge:
             sig = self.sign(text, self.revision, self.checksum, sign_key) if sign_key else self.signature
             if tamper:
                 text = text.replace('"default": "blue"', '"default": "red"')
-            return json.dumps({"t": t, "revision": self.revision, "checksum": self.checksum, "signature": sig, "kid": self.kid, "environmentId": ENV_ID, "bundle": text, "committedAt": committed_at, "sentAt": time.time() * 1000})
+            return json.dumps({"t": t, "revision": self.revision, "checksum": self.checksum, "signature": sig, "kid": self.kid, "environmentId": self.env_id, "bundle": text, "committedAt": committed_at, "sentAt": time.time() * 1000})
 
     def close_sockets(self, code: int, reason: str = "") -> None:
         for ws in list(self.sockets):
@@ -184,15 +190,20 @@ class FakeEdge:
                 if self.path == "/v1/bundle":
                     with edge.lock:
                         etag = f'"{edge.checksum}-server"'
-                        headers = {"ETag": etag, "X-NanoFlags-Environment-Id": ENV_ID, "X-NanoFlags-Signed": "true" if edge.signed else "false"}
+                        headers = {"ETag": etag, "X-NanoFlags-Environment-Id": edge.env_id, "X-NanoFlags-Signed": "true" if edge.signed else "false"}
                         if edge.signed:
                             headers.update({"X-NanoFlags-Signature": edge.signature, "X-NanoFlags-Key-Id": edge.kid})
                         if edge.shadow_header:
                             headers["X-NanoFlags-Shadow"] = edge.shadow_header
+                        if edge.stale:
+                            headers["X-NanoFlags-Stale"] = "true"
                         if self.headers.get("If-None-Match") == etag:
                             return self._send(304, b"", headers)
                         text = edge.text.replace('"default": "blue"', '"default": "red"') if edge.tamper else edge.text
                         body = f'{{"revision":{edge.revision},"checksum":"{edge.checksum}","bundle":{text}}}'.encode()
+                    gate = edge.bundle_gate
+                    if gate is not None:
+                        gate.wait(5)
                     return self._send(200, body, headers)
                 if self.path == "/v1/shadow":
                     with edge.lock:

@@ -127,7 +127,7 @@ describe("defaults", () => {
     expect(ws.url).toBe("wss://edge.test/v1/live");
     expect(ws.protocols).toEqual(["nanoflags.v1", `key.${CLIENT_KEY}`]);
     expect(ws.options).toEqual({ headers: { "User-Agent": DEFAULT_USER_AGENT } });
-    expect(DEFAULT_USER_AGENT).toBe("nanoflags-react-native/0.4.1");
+    expect(DEFAULT_USER_AGENT).toBe("nanoflags-react-native/0.4.2");
   });
 
   it("persists only in memory unless a storage adapter is given", async () => {
@@ -148,7 +148,7 @@ describe("telemetry", () => {
     client.boolean("new-checkout", false);
     await client.flush();
     const body = edge.last("/v1/events")!.body as { sdk: string; service: string; events: Array<{ context: Record<string, unknown>; flagKey: string }> };
-    expect(body.sdk).toBe("react-native/0.4.1");
+    expect(body.sdk).toBe("react-native/0.4.2");
     expect(body.service).toBe("react-native");
     expect(body.events[0]!.flagKey).toBe("new-checkout");
     expect(body.events[0]!.context).toEqual({ email: "string", plan: "string" });

@@ -19,7 +19,7 @@ import { importPublicKeys, isPublicEd25519Jwk, rawMember, verifyBundleText, veri
 import { changedFlags, isShadowMarker, parseShadowHeader, ShadowCounters, SHADOW_FLUSH_MS, SHADOW_PIN_WAIT_MS, SHADOW_RETRY_MS, type ShadowBundle, type ShadowOptions } from "./shadow.js";
 import { checkEvidence, decodeEvidence, isLogEvidence, isTreeHead, onlyTurnsFlagsOff, verifyConsistency, verifyHead, type LogEvidence, type TreeHead } from "./log.js";
 
-export type { Bundle, Context, Evaluation, ExperimentMeta, JsonValue, Reason } from "@nanoflags/engine";
+export type { Bundle, Context, Evaluation, EvaluationErrorCode, ExperimentMeta, JsonValue, Reason } from "@nanoflags/engine";
 export { sha256Hex, unitHash } from "./sha256.js";
 export type { Store } from "./store.js";
 export type { SignatureCrypto, VerifyOptions } from "./verify.js";
@@ -27,7 +27,7 @@ export type { ShadowOptions, ShadowReport } from "./shadow.js";
 export { headText, leafHash, onlyTurnsFlagsOff, parseLeaf, verifyConsistency, verifyInclusion, type LogEvidence, type LogLeaf, type TreeHead } from "./log.js";
 export { OFFICIAL_EDGE_URL, OFFICIAL_SIGNING_KEYS } from "./keys.js";
 
-export const SDK_VERSION = "0.8.1";
+export const SDK_VERSION = "0.8.2";
 
 /** Newest bundle format (`bundle.engine`) this SDK can evaluate. Newer bundles are refused; the previous one stays in use. */
 export const SUPPORTED_ENGINE_VERSION = ENGINE_VERSION;
@@ -39,6 +39,58 @@ export const CLOSE_ENVIRONMENT_DELETED = 4004;
 export const SESSION_HEADER = "x-nanoflags-session";
 
 export type ClientStatus = "not-ready" | "ready" | "stale";
+
+/**
+ * Whether the client has a configuration, from the application's point of view (`client.state`):
+ * - `starting`: no configuration yet, the first load attempt is still running;
+ * - `ready`: a configuration is loaded and the edge confirmed it is current;
+ * - `stale`: a configuration is loaded (restored from the store, or the edge cannot be reached right now) but is not
+ *   known to be current;
+ * - `failed`: the first load attempt finished without any configuration (see `client.lastError`). Evaluations return
+ *   the application's fallbacks with `errorCode: "CONFIG_NOT_LOADED"`; the client keeps retrying and moves to `ready`
+ *   when a configuration arrives.
+ * `status` is unchanged: `not-ready` covers both `starting` and `failed`.
+ */
+export type ClientState = "starting" | "ready" | "stale" | "failed";
+
+/**
+ * Why loading the configuration failed (`client.lastError.code`, `NanoFlagsError.errorCode`):
+ * - `INVALID_KEY`: the edge refused the SDK key (HTTP 401 / 403: unknown, revoked, or the wrong kind of key);
+ * - `EDGE_UNREACHABLE`: no answer from the edge (DNS, connection refused, offline, TLS);
+ * - `TIMEOUT`: the edge did not answer within 10 seconds;
+ * - `HTTP_ERROR`: the edge answered with another HTTP error (`httpStatus`), e.g. 5xx;
+ * - `INVALID_BUNDLE`: the edge's answer is not a configuration;
+ * - `BUNDLE_REJECTED`: a configuration arrived but was refused (signature, transparency log, co-signature, or a
+ *   rollback: an older revision than one this client already verified); `lastError.reason` says which;
+ * - `UNSUPPORTED_ENGINE`: the configuration needs a newer SDK;
+ * - `ENVIRONMENT_DELETED`: the key's environment was deleted;
+ * - `CONFIG`: the client is misconfigured (e.g. no `sdkKey` or `baseUrl`);
+ * - `NO_BUNDLE`: the first load attempt finished without a configuration and without one of the errors above.
+ */
+export type LoadErrorCode = "INVALID_KEY" | "EDGE_UNREACHABLE" | "TIMEOUT" | "HTTP_ERROR" | "INVALID_BUNDLE" | "BUNDLE_REJECTED" | "UNSUPPORTED_ENGINE" | "ENVIRONMENT_DELETED" | "CONFIG" | "NO_BUNDLE";
+
+/** The most recent failure to load or update the configuration (`client.lastError`). */
+export interface LoadError {
+  code: LoadErrorCode;
+  message: string;
+  /** HTTP status of the edge's answer, when there was one. */
+  httpStatus?: number;
+  /**
+   * The detailed `NanoFlagsError.code`, e.g. `"signature"`, `"log"`, `"cosign"` or `"rollback"` for `BUNDLE_REJECTED`.
+   * Absent for failures without one (`NO_BUNDLE`).
+   */
+  reason?: NanoFlagsErrorCode;
+  /** ISO timestamp of the failure. */
+  at: string;
+}
+
+/** Payload of the `state` event: emitted whenever `client.state` changes. */
+export interface StateEvent {
+  state: ClientState;
+  previous: ClientState;
+  /** `client.lastError` at the time of the change (null once a configuration is confirmed current). */
+  error: LoadError | null;
+}
 
 /** How updates currently reach the client: pushed over the live WebSocket, announced over SSE, or polled. */
 export type Transport = "live" | "stream" | "poll";
@@ -252,6 +304,18 @@ export interface NanoFlagsClient {
   /** Resolves once a usable bundle is loaded, or once the first load attempt has finished without one. Never rejects. */
   ready(): Promise<void>;
   readonly status: ClientStatus;
+  /**
+   * `starting`, `ready`, `stale` or `failed`: like `status`, but tells a client that is still loading from one that could
+   * not load anything. Always set on clients from `createClient`; optional in this interface only so that existing
+   * implementations of it (wrappers, test doubles) keep compiling.
+   */
+  readonly state?: ClientState;
+  /**
+   * The most recent failure to load or update the configuration (invalid key, edge unreachable, timeout, …), or null.
+   * Cleared when the edge confirms a configuration as current. Errors of telemetry, test sessions and shadow
+   * evaluation do not count. Always set on clients from `createClient` (optional for the same reason as `state`).
+   */
+  readonly lastError?: LoadError | null;
   /** Revision of the bundle in use, or null when none is loaded. */
   readonly revision: number | null;
   /** How updates reach this client right now: `live` while the WebSocket is open, `stream` while SSE is in use, else `poll`. */
@@ -282,7 +346,10 @@ export interface NanoFlagsClient {
   /** Browser only. `{ "x-nanoflags-session": token }` while a page session is set, otherwise `{}`. */
   sessionHeaders(): Record<string, string>;
   on(event: "update", cb: (e: UpdateEvent) => void): () => void;
+  /** Errors are `NanoFlagsError`s; those about loading the configuration carry `errorCode` (see `LoadErrorCode`). */
   on(event: "error", cb: (e: Error) => void): () => void;
+  /** `client.state` changed (e.g. `starting` → `failed`, `failed` → `ready`). */
+  on(event: "state", cb: (e: StateEvent) => void): () => void;
   /** Force a revalidation now. Resolves when it finished (successfully or not). */
   refresh(): Promise<void>;
   /**
@@ -303,14 +370,52 @@ export interface NanoFlagsClient {
   readonly version: number;
 }
 
+/**
+ * Lower-case classification of an `error` event. `rollback`: a validly signed configuration was refused because its
+ * revision is older than one this client already verified for the environment (a replayed or stale response); the
+ * configuration in use stays. Revisions only grow per environment (restoring an old revision publishes a new one).
+ */
+export type NanoFlagsErrorCode = "network" | "unauthorized" | "http" | "invalid_bundle" | "store" | "config" | "signature" | "session" | "engine" | "environment_deleted" | "log" | "cosign" | "shadow" | "rollback";
+
+/** The `LoadErrorCode` an error code stands for, when it is about loading the configuration. */
+function loadCodeOf(code: NanoFlagsErrorCode): LoadErrorCode | undefined {
+  switch (code) {
+    case "unauthorized":
+      return "INVALID_KEY";
+    case "network":
+      return "EDGE_UNREACHABLE";
+    case "http":
+      return "HTTP_ERROR";
+    case "invalid_bundle":
+      return "INVALID_BUNDLE";
+    case "signature":
+    case "log":
+    case "cosign":
+    case "rollback":
+      return "BUNDLE_REJECTED";
+    case "engine":
+      return "UNSUPPORTED_ENGINE";
+    case "environment_deleted":
+      return "ENVIRONMENT_DELETED";
+    case "config":
+      return "CONFIG";
+    default:
+      return undefined;
+  }
+}
+
 export class NanoFlagsError extends Error {
+  /** Upper-case classification of errors that can keep a configuration from loading (`LoadErrorCode`); undefined for others (`store`, `session`, `shadow`). */
+  readonly errorCode: LoadErrorCode | undefined;
   constructor(
     message: string,
-    readonly code: "network" | "unauthorized" | "http" | "invalid_bundle" | "store" | "config" | "signature" | "session" | "engine" | "environment_deleted" | "log" | "cosign" | "shadow",
+    readonly code: NanoFlagsErrorCode,
     readonly httpStatus?: number,
+    errorCode?: LoadErrorCode,
   ) {
     super(message);
     this.name = "NanoFlagsError";
+    this.errorCode = errorCode ?? loadCodeOf(code);
   }
 }
 
@@ -391,6 +496,14 @@ const LIVE_PONG_TIMEOUT_MS = 10_000;
 const LIVE_MAX_BACKOFF_MS = 5 * 60_000;
 /** A healthy socket is replaced after about this long, so the edge validates the key again (the edge drops sockets older than 2 h). */
 const LIVE_ROTATE_MS = 50 * 60_000;
+/**
+ * Rollback check: right after a revision arrived over the live socket, the HTTP path (KV) may still answer the previous
+ * one for a moment, and vice versa. Within this window an older answer from the other transport is refused silently;
+ * outside it (or on the same transport) it is refused and reported (`rollback`).
+ */
+const ROLLBACK_GRACE_MS = 120_000;
+/** How long a network answer waits for the stored bundle to be read (and verified) before the rollback check. */
+const RESTORE_WAIT_MS = 2_000;
 
 /** A session token is opaque; it only has to be safe to put in a header. */
 export function isSessionToken(v: unknown): v is string {
@@ -440,9 +553,24 @@ function warn(message: string): void {
   }
 }
 
+/**
+ * Spellings of the official edge address (case, `:443`, trailing dot, trailing slashes) are normalised to
+ * `OFFICIAL_EDGE_URL`; any other address is left as given.
+ */
+function normalizeBaseUrl(raw: string): string {
+  const trimmed = raw.replace(/\/+$/, "");
+  try {
+    const u = new URL(trimmed);
+    if (u.protocol === "https:" && u.username === "" && u.password === "" && u.search === "" && u.hash === "" && (u.pathname === "/" || u.pathname === "") && (u.port === "" || u.port === "443") && u.hostname.replace(/\.$/, "") === new URL(OFFICIAL_EDGE_URL).hostname) return OFFICIAL_EDGE_URL;
+  } catch {
+    /* not a URL: left as given */
+  }
+  return trimmed;
+}
+
 export function createClient(options: ClientOptions): NanoFlagsClient {
   const sdkKey = options.sdkKey;
-  const baseUrl = String(options.baseUrl ?? "").replace(/\/+$/, "");
+  const baseUrl = normalizeBaseUrl(String(options.baseUrl ?? ""));
   const pollIntervalMs = options.pollIntervalMs ?? 30_000;
   const doFetch: typeof fetch | undefined = options.fetch ?? (typeof fetch === "function" ? (input, init) => fetch(input, init) : undefined);
   const ev = options.events === false ? { enabled: false } : (options.events ?? {});
@@ -466,6 +594,11 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
   let etag: string | null = null;
   let checksum: string | null = null;
   let status: ClientStatus = "not-ready";
+  /** The first load attempt (store + network) has finished: without a bundle, `state` is then `failed`, not `starting`. */
+  let attempted = false;
+  let restoreDone = false;
+  let lastError: LoadError | null = null;
+  let reportedState: ClientState = "starting";
   let version = 0;
   let closed = false;
   let failures = 0;
@@ -489,6 +622,34 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
   let environmentDeleted = false;
   /** Highest revision adopted from a push: a slower HTTP answer must never replace it with something older. */
   let liveRevision = 0;
+  /**
+   * Rollback protection (with `verify`): the newest revision this client adopted after verifying its signature — from
+   * the network, a push or the store. Any later bundle with a lower revision is refused, signed or not. Only verified
+   * revisions count, so an unverified source (bootstrap, an unsigned answer) can never block updates. One client serves
+   * one SDK key, i.e. one environment, and verified bundles of another environment are already refused (`pin`).
+   */
+  let newestVerified: { revision: number; environmentId: string; seq: number; at: number; source: "live" | "http" | "store" } | null = null;
+  /** Counts adoptions of verified revisions: an answer requested at sequence n is "older news" if a later one was adopted. */
+  let verifiedSeq = 0;
+  const noteVerified = (info: SignatureInfo, source: "live" | "http" | "store") => {
+    verifiedSeq++;
+    if (!newestVerified || info.revision >= newestVerified.revision) newestVerified = { revision: info.revision, environmentId: info.environmentId, seq: verifiedSeq, at: Date.now(), source };
+  };
+  /**
+   * `revision` is older than the newest verified one: returns the `rollback` error to report, or null when the older
+   * answer is explained by ordering (the newer one was accepted after this answer was requested, or arrived a moment
+   * ago over the other transport). Either way the caller does not adopt it.
+   */
+  const rollbackError = (revision: number, requestedAtSeq: number, source: "live" | "http"): NanoFlagsError | null => {
+    const n = newestVerified;
+    if (!n || revision >= n.revision) return null;
+    if (n.source !== "store" && (n.seq > requestedAtSeq || (n.source !== source && Date.now() - n.at < ROLLBACK_GRACE_MS))) return null;
+    return new NanoFlagsError(
+      `Bundle r${revision} was rejected: it is older than r${n.revision}, which this client already verified for this environment (a replayed or stale response; restoring an old revision in NanoFlags publishes a new, higher one). The configuration in use is unchanged.`,
+      "rollback",
+    );
+  };
+  let restoring: Promise<void> | null = null;
   let pushChain: Promise<void> = Promise.resolve();
   let lastReportAt = 0;
   /** `lifecycle` control state: paused = no background network activity; realtime = live socket / SSE allowed. */
@@ -577,7 +738,7 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
   let experimentTimer: Timer | null = null;
   let experimentDue = 0;
   let experimentFlushing: Promise<void> | null = null;
-  const listeners = { update: new Set<(e: UpdateEvent) => void>(), error: new Set<(e: Error) => void>() };
+  const listeners = { update: new Set<(e: UpdateEvent) => void>(), error: new Set<(e: Error) => void>(), state: new Set<(e: StateEvent) => void>() };
   const subscribers = new Set<() => void>();
 
   let resolveReady!: () => void;
@@ -590,9 +751,39 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
       /* a listener must never break the client */
     }
   };
+  const currentState = (): ClientState => (status === "ready" ? "ready" : status === "stale" ? "stale" : attempted ? "failed" : "starting");
   const changed = () => {
     version++;
     for (const s of [...subscribers]) safely(s);
+    const next = currentState();
+    if (next !== reportedState) {
+      const e: StateEvent = { state: next, previous: reportedState, error: lastError };
+      reportedState = next;
+      for (const cb of [...listeners.state]) safely(() => cb(e));
+    }
+  };
+  /** Records a failure to load or update the configuration (`lastError`). Other errors (telemetry, sessions, shadow) never get here. */
+  const noteLoadError = (e: NanoFlagsError) => {
+    // Subscribers are not notified for this alone (they are on bundle and status changes, as before); `state` events carry it.
+    lastError = { code: e.errorCode ?? "NO_BUNDLE", message: e.message, ...(e.httpStatus === undefined ? {} : { httpStatus: e.httpStatus }), reason: e.code, at: new Date().toISOString() };
+  };
+  /**
+   * An update was refused (verification, rollback, unsupported engine, invalid): the configuration in use stays, but the
+   * client now knows it is not on the current revision, so a loaded client turns `stale` until the edge confirms one.
+   */
+  /** Rejections of an answer the edge marked as unsigned (`verify.require`): transient publisher lag, status unchanged. */
+  const unsignedRejections = new WeakSet<Error>();
+  const updateRejected = (e: NanoFlagsError) => {
+    noteLoadError(e);
+    if (bundle) setStatus("stale");
+    emitError(e);
+  };
+  /** The first load attempt has finished. Without a bundle the client is now `failed`. */
+  const markAttempted = () => {
+    if (attempted || closed) return;
+    attempted = true;
+    if (!bundle && lastError === null) lastError = { code: "NO_BUNDLE", message: "No configuration could be loaded: none was bootstrapped or stored, and the edge did not provide one.", at: new Date().toISOString() };
+    if (currentState() !== reportedState) changed();
   };
   /** `transport` is derived from the socket and stream state: subscribers (React hooks) re-render when it changes. */
   let reportedTransport: Transport = "poll";
@@ -603,6 +794,8 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
     changed();
   };
   const setStatus = (next: ClientStatus) => {
+    // The edge confirmed the configuration in use: the last failure is over.
+    if (next === "ready") lastError = null;
     if (status === next) return;
     status = next;
     changed();
@@ -628,6 +821,7 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
     etag = meta.etag;
     checksum = meta.checksum;
     status = meta.status;
+    if (meta.status === "ready") lastError = null;
     changed();
     resolveReady();
     if (isNew) {
@@ -651,7 +845,11 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
       if (!raw || closed) return;
       const p = JSON.parse(raw) as Partial<Persisted>;
       if (p.v !== 1 || p.id !== id || !isBundle(p.bundle)) return;
-      if (!supportsEngine(p.bundle)) return void emitError(engineError(p.bundle));
+      if (!supportsEngine(p.bundle)) {
+        const err = engineError(p.bundle);
+        noteLoadError(err);
+        return void emitError(err);
+      }
       // Never replace something newer (network result or a newer bootstrap) with the stored copy.
       if (bundle && bundle.revision >= p.bundle.revision) return;
       let restored: Bundle = p.bundle;
@@ -697,6 +895,8 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
       sig = restoredSig;
       rawText = restoredRaw;
       if (restoredSig && pinnedEnvironment === null) pin(restoredSig.environmentId);
+      // The stored copy is the newest this client verified before the restart: an older answer must not replace it.
+      if (restoredSig) noteVerified(restoredSig, "store");
       // A restored bundle is usable but not known to be current: stale until the edge confirms it.
       adopt(restored, { etag: p.etag ?? null, checksum: p.checksum ?? null, status: "stale", source: "store" });
     } catch {
@@ -707,9 +907,18 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
   async function request(path: string, init: RequestInit): Promise<Response> {
     if (!doFetch) throw new NanoFlagsError("No fetch implementation available.", "config");
     const ac = new AbortController();
-    const t = unref(setTimeout(() => ac.abort(), REQUEST_TIMEOUT_MS));
+    let timedOut = false;
+    const t = unref(
+      setTimeout(() => {
+        timedOut = true;
+        ac.abort();
+      }, REQUEST_TIMEOUT_MS),
+    );
     try {
       return await doFetch(`${baseUrl}${path}`, { ...init, signal: ac.signal, headers: { Authorization: `Bearer ${sdkKey}`, ...(init.headers as Record<string, string> | undefined) } });
+    } catch (e) {
+      if (timedOut) throw new NanoFlagsError(`Could not reach the NanoFlags edge: no answer within ${REQUEST_TIMEOUT_MS / 1000} seconds.`, "network", undefined, "TIMEOUT");
+      throw e;
     } finally {
       clearTimeout(t);
     }
@@ -777,7 +986,11 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
     if (!verifyOpt) return { bundle: body.bundle, sig: null, raw: null };
     const reject = (why: string) => new NanoFlagsError(`Bundle r${body.bundle.revision} was rejected: ${why} The configuration in use is unchanged.`, "signature");
     if (res.headers.get("X-NanoFlags-Signed") !== "true") {
-      if (verifyOpt.require) throw reject("it is not signed (the edge is still distributing it) and unsigned bundles are refused (`verify.require`); fetching again shortly.");
+      if (verifyOpt.require) {
+        const e = reject("it is not signed (the edge is still distributing it) and unsigned bundles are refused (`verify.require`); fetching again shortly.");
+        unsignedRejections.add(e);
+        throw e;
+      }
       return { bundle: body.bundle, sig: null, raw: null };
     }
     const signature = res.headers.get("X-NanoFlags-Signature");
@@ -905,7 +1118,17 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
   }
 
   async function syncOnce(): Promise<void> {
+    try {
+      await syncAttempt();
+    } finally {
+      // The first attempt counts once the store was read too (a stored bundle may still arrive from it).
+      if (restoreDone) markAttempted();
+    }
+  }
+
+  async function syncAttempt(): Promise<void> {
     lastSyncAt = Date.now();
+    const requestedAt = verifiedSeq;
     const transport: Transport = streamTriggered ? "stream" : "poll";
     streamTriggered = false;
     try {
@@ -934,11 +1157,24 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
       const verified = await checkSignature(res, text, body as { revision?: unknown; checksum?: unknown; bundle: Bundle });
       if (closed) return;
       const next = verified.bundle;
+      if (verifyOpt && !servedStale) {
+        // Rollback / replay: never adopt a revision older than one already verified (signed or not, fetched or polled).
+        // The stored copy is read first, so a restart cannot be rolled back by an answer that beats the store.
+        if (!restoreDone && restoring) await Promise.race([restoring, new Promise<void>((r) => unref(setTimeout(r, RESTORE_WAIT_MS)))]);
+        if (closed) return;
+        if (newestVerified && next.revision < newestVerified.revision) {
+          const err = rollbackError(next.revision, requestedAt, "http");
+          if (err) throw err;
+          failures = 0;
+          return;
+        }
+      }
       if (!supportsEngine(next)) throw engineError(next);
       let trusted: Awaited<ReturnType<typeof checkTrust>> | null = null;
       if (strict && verified.sig) {
-        // Same revision as the one in use: nothing new to trust.
-        if (!(bundle && bundle.revision === next.revision && checksum === (body.checksum ?? null))) {
+        // The same signed message as the one in use (a signature binds environment, revision, checksum and the bundle's
+        // bytes): nothing new to check.
+        if (!(bundle && sig && bundle.revision === next.revision && sig.signature === verified.sig.signature)) {
           const cs = res.headers.get("X-NanoFlags-Cosignature");
           const ck = res.headers.get("X-NanoFlags-Cosigner-Key-Id");
           trusted = await checkTrust({ info: verified.sig, text: verified.raw ?? JSON.stringify(next), next, cosign: cs && ck ? { kid: ck, signature: cs } : null, evidence: decodeEvidence(res.headers.get("X-NanoFlags-Log")) });
@@ -959,20 +1195,31 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
         trusted.commit();
         cosignInUse = trusted.cosign;
       }
+      if (verified.sig) noteVerified(verified.sig, "http");
       adopt(next, { etag: res.headers.get("ETag"), checksum: body.checksum ?? null, status: servedStale ? "stale" : "ready", source: "network", transport });
       persist();
     } catch (e) {
       if (closed) return;
+      const err = e instanceof NanoFlagsError ? e : new NanoFlagsError(`Could not reach the NanoFlags edge: ${e instanceof Error ? e.message : String(e)}`, "network");
       // A bundle for a newer engine: nothing to retry quickly, the edge will answer the same until this SDK is upgraded.
-      if (e instanceof NanoFlagsError && e.code === "engine") return void emitError(e);
+      if (err.code === "engine" || unsignedRejections.has(err)) {
+        // Not a reason for `stale` (status unchanged, `lastError` and `error` say it): an engine refusal lasts until the
+        // SDK is upgraded, and an unsigned answer is the edge's own signal that the publisher is still signing the new
+        // revision (typically well under a minute after every publish). Neither means the configuration was tampered with.
+        if (err.code !== "engine") failures++;
+        noteLoadError(err);
+        return void emitError(err);
+      }
       failures++;
-      // A rejected update changes nothing: same bundle, same status. Polling retries with backoff.
-      if (e instanceof NanoFlagsError && (e.code === "signature" || e.code === "log" || e.code === "cosign" || e.code === "config")) return void emitError(e);
+      // A rejected update keeps the bundle in use, which is now known not to be current: `stale` (with `lastError`)
+      // until the edge confirms a configuration again. Polling retries with backoff.
+      if (err.code === "signature" || err.code === "log" || err.code === "cosign" || err.code === "config" || err.code === "rollback") return void updateRejected(err);
+      noteLoadError(err);
       // A rejected key must not keep a socket: drop it (reconnects are refused by the edge and back off).
-      if (e instanceof NanoFlagsError && e.code === "unauthorized") dropLive();
+      if (err.code === "unauthorized") dropLive();
       // Keep evaluating with what we have; it is just no longer known to be current.
       if (bundle) setStatus("stale");
-      emitError(e instanceof NanoFlagsError ? e : new NanoFlagsError(`Could not reach the NanoFlags edge: ${e instanceof Error ? e.message : String(e)}`, "network"));
+      emitError(err);
     }
   }
 
@@ -1105,20 +1352,33 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
   // ---- live socket: the edge pushes the signed bundle itself; nothing is fetched.
   const liveWanted = options.streaming !== false && options.live !== false && WS !== undefined && liveUrl !== null;
 
+  function pushFailed(e: NanoFlagsError) {
+    // Same as the request path: an unsupported engine leaves `status` unchanged (it lasts until the SDK is upgraded).
+    if (e.code === "engine") {
+      noteLoadError(e);
+      return void emitError(e);
+    }
+    updateRejected(e);
+  }
+
   /** Applies one `rev` / `hello` message. Never throws; a message that cannot be trusted changes nothing. */
   async function applyPush(m: Record<string, unknown>): Promise<void> {
     if (closed || (m.t !== "rev" && m.t !== "hello")) return;
     const revision = m.revision;
     // Revision 0 / no bundle: the environment has nothing published yet.
     if (typeof revision !== "number" || !Number.isInteger(revision) || revision < 1 || typeof m.bundle !== "string") return;
-    if (bundle && revision < bundle.revision) return; // never backwards
+    const receivedAt = verifiedSeq;
+    // Never backwards. An older push than a verified revision is checked first, so that a genuine (signed) replay is
+    // reported as a rollback; anything else older is dropped silently, as before.
+    const older = bundle !== null && revision < bundle.revision;
+    if (older && !(verifyOpt && newestVerified && revision < newestVerified.revision)) return;
     const text = m.bundle;
     const pushedChecksum = typeof m.checksum === "string" ? m.checksum : null;
 
     let info: SignatureInfo | null = null;
     if (verifyOpt) {
       const reject = (why: string) => {
-        emitError(new NanoFlagsError(`Pushed bundle r${revision} was rejected: ${why} The configuration in use is unchanged.`, "signature"));
+        updateRejected(new NanoFlagsError(`Pushed bundle r${revision} was rejected: ${why} The configuration in use is unchanged.`, "signature"));
         // Whatever sent this, the regular (verified) request path says what is really current.
         void sync();
       };
@@ -1134,6 +1394,14 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
       if (closed) return;
       if (!ok) return reject("its signature does not verify.");
     }
+    if (older) {
+      const err = rollbackError(revision, receivedAt, "live");
+      if (err) {
+        pushFailed(err);
+        void sync(); // the regular request path says what is really current (and confirms `ready` again)
+      }
+      return;
+    }
 
     let parsed: unknown;
     try {
@@ -1141,8 +1409,8 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
     } catch {
       parsed = null;
     }
-    if (!isBundle(parsed) || parsed.revision !== revision) return void emitError(new NanoFlagsError("The edge pushed an invalid bundle; it was ignored.", "invalid_bundle"));
-    if (!supportsEngine(parsed)) return void emitError(engineError(parsed));
+    if (!isBundle(parsed) || parsed.revision !== revision) return void pushFailed(new NanoFlagsError("The edge pushed an invalid bundle; it was ignored.", "invalid_bundle"));
+    if (!supportsEngine(parsed)) return void pushFailed(engineError(parsed));
     if (bundle && revision < bundle.revision) return;
     if (bundle && revision === bundle.revision) {
       failures = 0;
@@ -1158,7 +1426,7 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
         trusted = await checkTrust({ info, text, next: parsed, cosign: cs, evidence: isLogEvidence(m.log) ? m.log : null });
       } catch (e) {
         if (closed) return;
-        emitError(e instanceof NanoFlagsError ? e : new NanoFlagsError(`Pushed bundle r${revision} could not be checked.`, "log"));
+        pushFailed(e instanceof NanoFlagsError ? e : new NanoFlagsError(`Pushed bundle r${revision} could not be checked.`, "log"));
         // The regular request path tries again (with backoff) and may find the log entry by then.
         failures++;
         unref(setTimeout(() => void sync(), 3000));
@@ -1169,7 +1437,10 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
       cosignInUse = trusted.cosign;
     }
     failures = 0;
-    if (info) pin(info.environmentId);
+    if (info) {
+      pin(info.environmentId);
+      noteVerified(info, "live");
+    }
     sig = info;
     rawText = info && JSON.stringify(parsed) !== text ? text : null;
     liveRevision = revision;
@@ -1296,7 +1567,7 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
       // (it reports the key as rejected, and recovers if the environment turns out to exist after all).
       stopStream();
       if (bundle) setStatus("stale");
-      emitError(new NanoFlagsError("The environment of this SDK key was deleted. The last configuration stays in use; it will not be updated.", "environment_deleted"));
+      pushFailed(new NanoFlagsError("The environment of this SDK key was deleted. The last configuration stays in use; it will not be updated.", "environment_deleted"));
       schedulePoll();
       return;
     }
@@ -1750,7 +2021,7 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
     let result = engineEvaluate<T>(b, key, context, fallback);
     if (accepts && result.reason !== "flag_not_found" && result.reason !== "error" && !accepts(result.value)) {
       const error = `Flag "${key}" has a ${typeOf(result.value as JsonValue)} value, which does not match the requested type.`;
-      result = { flagKey: key, value: fallback, reason: "error", revision: result.revision, trace: [...result.trace, { kind: "result", title: "Returned the fallback", detail: error }], error };
+      result = { flagKey: key, value: fallback, reason: "error", revision: result.revision, trace: [...result.trace, { kind: "result", title: "Returned the fallback", detail: error }], error, errorCode: "TYPE_MISMATCH" };
     }
     record(result as Evaluation, context, b, s?.id);
     // Test sessions evaluate a pinned bundle for QA: synthetic traffic is never an exposure.
@@ -1793,7 +2064,8 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
       const context = typeof body.context === "object" && body.context !== null && !Array.isArray(body.context) ? (body.context as Context) : {};
       return { state: { id: body.id, bundle: body.bundle, context, expiresAt: new Date(expiresAtMs).toISOString(), expiresAtMs }, failed: false };
     } catch (e) {
-      if (!closed) emitError(e instanceof NanoFlagsError ? e : new NanoFlagsError(`Could not load the test session: ${e instanceof Error ? e.message : String(e)}`, "session"));
+      // A timeout of the session request stays a `session` error, as before (`request` reports it as `network`).
+      if (!closed) emitError(e instanceof NanoFlagsError && e.code !== "network" ? e : new NanoFlagsError(`Could not load the test session: ${e instanceof Error ? e.message : String(e)}`, "session"));
       return { state: null, failed: true };
     }
   }
@@ -1880,6 +2152,12 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
     get status() {
       return status;
     },
+    get state() {
+      return currentState();
+    },
+    get lastError() {
+      return lastError;
+    },
     get revision() {
       return bundle ? bundle.revision : null;
     },
@@ -1913,7 +2191,7 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
       if (pageToken !== null && !(pageResolved && live(pageSession) === null)) headers[SESSION_HEADER] = pageToken;
       return headers;
     },
-    on(event: "update" | "error", cb: ((e: UpdateEvent) => void) | ((e: Error) => void)) {
+    on(event: "update" | "error" | "state", cb: ((e: UpdateEvent) => void) | ((e: Error) => void) | ((e: StateEvent) => void)) {
       const set = listeners[event] as Set<typeof cb>;
       set.add(cb);
       return () => void set.delete(cb);
@@ -1971,7 +2249,11 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
     queueMicrotask(() => emitError(new NanoFlagsError("`coSignerKeys` must contain public Ed25519 JWKs with a `kid`. Other entries were ignored; without a usable key every update is rejected.", "config")));
   }
   if (typeof sdkKey !== "string" || sdkKey === "" || baseUrl === "") {
-    queueMicrotask(() => emitError(new NanoFlagsError("`sdkKey` and `baseUrl` are required.", "config")));
+    const err = new NanoFlagsError("`sdkKey` and `baseUrl` are required.", "config");
+    lastError = { code: "CONFIG", message: err.message, at: new Date().toISOString() };
+    restoreDone = true;
+    markAttempted();
+    queueMicrotask(() => emitError(err));
     resolveReady();
     return client;
   }
@@ -1985,8 +2267,13 @@ export function createClient(options: ClientOptions): NanoFlagsClient {
   }
   // Started in the background (paused before the first load): the store still loads; the network waits for resume().
   const started = !paused;
-  void Promise.all([restore(), started ? sync() : Promise.resolve()]).then(() => {
-    resolveReady(); // even without a bundle: callers must not hang; they check `status`
+  restoring = restore().finally(() => {
+    restoreDone = true;
+  });
+  void Promise.all([restoring, started ? sync() : Promise.resolve()]).then(() => {
+    // Started in the background: the first attempt is the first network request after resume().
+    if (started) markAttempted();
+    resolveReady(); // even without a bundle: callers must not hang; they check `status` / `state`
     if (closed || paused) return;
     // Paused and resumed while the first load ran: resume() already started everything.
     if (!started) return;

@@ -44,6 +44,8 @@ class FakeEdge(@Volatile var environmentId: String = "env-test-1") : AutoCloseab
     @Volatile var checksum = ""
     @Volatile var signed = true
     @Volatile var tamperHttp = false
+    /** Marks `/v1/bundle` answers as an older copy served while the origin is down (`X-NanoFlags-Stale`). */
+    @Volatile var staleMarker = false
     @Volatile var bundleStatus = 200
     @Volatile var liveEnabled = true
     @Volatile var answerPings = true
@@ -121,6 +123,7 @@ class FakeEdge(@Volatile var environmentId: String = "env-test-1") : AutoCloseab
                 val etag = "\"$checksum-client\""
                 val res = MockResponse().addHeader("ETag", etag)
                 shadowHeader?.let { res.addHeader("X-NanoFlags-Shadow", it) }
+                if (staleMarker) res.addHeader("X-NanoFlags-Stale", "true")
                 res.addHeader("X-NanoFlags-Environment-Id", environmentId).addHeader("X-NanoFlags-Signed", signed.toString())
                 if (signed) res.addHeader("X-NanoFlags-Signature", signature()).addHeader("X-NanoFlags-Key-Id", signingKey.kid)
                 if (r.getHeader("If-None-Match") == etag) {

@@ -1,6 +1,8 @@
 package io.nanoflags
 
 import io.nanoflags.engine.JsonValue
+import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import org.bouncycastle.crypto.params.Ed25519PublicKeyParameters
 import org.bouncycastle.crypto.signers.Ed25519Signer
 import java.security.MessageDigest
@@ -264,4 +266,17 @@ class VerifyOptions @JvmOverloads constructor(
     }
 
     internal var disabled = false
+}
+
+/**
+ * `https://EDGE.nanoflags.io:443/`, a trailing dot or trailing slashes are the official edge ([OFFICIAL_EDGE_URL]);
+ * anything else (another host, another scheme, a path, user info, a query) is left as given (trailing slashes removed).
+ */
+internal fun normalizeBaseUrl(raw: String): String {
+    val trimmed = raw.trimEnd('/')
+    val u = trimmed.toHttpUrlOrNull() ?: return trimmed
+    val official = OFFICIAL_EDGE_URL.toHttpUrl()
+    val isOfficial = u.scheme == "https" && u.username.isEmpty() && u.password.isEmpty() && u.encodedQuery.isNullOrEmpty() && u.fragment.isNullOrEmpty() &&
+        u.encodedPath == "/" && u.port == 443 && u.host.trimEnd('.') == official.host
+    return if (isOfficial) OFFICIAL_EDGE_URL else trimmed
 }

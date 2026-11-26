@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.8.2 (2026-11-27)
+
+Additive, no breaking changes: existing statuses, reasons, error codes and events keep their meaning.
+
+- Cold start is visible: `client.state` is `"starting"`, `"ready"`, `"stale"` or `"failed"` — `"failed"` when the first
+  load attempt finished without any configuration (no bootstrap, nothing stored, and the request failed), so it is no
+  longer indistinguishable from "still loading" (`status` stays `"not-ready"` for both, as before).
+- `client.lastError`: `{ code, message, httpStatus?, at }` of the most recent failure to load or update the
+  configuration, with `code` one of `INVALID_KEY` (401 / 403), `EDGE_UNREACHABLE`, `TIMEOUT` (no answer within 10 s;
+  before, a timeout was reported as a generic network error), `HTTP_ERROR`, `INVALID_BUNDLE`, `BUNDLE_REJECTED`,
+  `UNSUPPORTED_ENGINE`, `ENVIRONMENT_DELETED`, `CONFIG`, `NO_BUNDLE`. Cleared when the edge confirms a configuration.
+- `NanoFlagsError.errorCode` carries the same code on `error` events about loading the configuration (`code` is
+  unchanged, e.g. `unauthorized`).
+- New `state` event (`{ state, previous, error }`), e.g. `starting` → `failed`, then `failed` → `ready` on recovery.
+- Verification hardening, no API change.
+  Subscribers (`subscribe`, React) are also notified when `state` changes.
+- Evaluation details carry `errorCode` whenever the fallback was served: `CONFIG_NOT_LOADED` (no configuration loaded)
+  vs `FLAG_NOT_FOUND` (configuration loaded, flag not in it); both keep `reason: "flag_not_found"`. `TYPE_MISMATCH` and
+  `GENERAL` accompany `reason: "error"`.
+- React: `useFlagsStatus()` also returns `state` and `error`.
+
+Security:
+
+- **Rollback protection on every path.** With `verify`, a bundle whose revision is lower than the newest one the client
+  already verified is refused — fetched, polled, SSE-triggered, pushed or restored from the store; before, only the
+  live socket refused older revisions, so a replayed or stale (validly signed) HTTP answer could bring back an older
+  configuration, e.g. a flag that had been killed. The bundle in use stays; `error` fires with the new code
+  `rollback` (`errorCode` `BUNDLE_REJECTED`). Restoring an old revision in NanoFlags publishes a new, higher revision,
+  so it is not affected. An answer explained by ordering (requested before the newer revision arrived, or trailing a
+  live push by up to 2 minutes) is dropped without an error. After a restart the stored verified revision is the
+  floor; a network answer waits up to 2 s for the store before this check. Unverified sources (bootstrap, clients
+  without `verify`) never set the floor.
+- **Rejected updates are visible in `status`.** After an update is rejected (bad signature, transparency log,
+  co-signature, rollback, or an invalid / unverifiable push) a loaded client turns `stale` (and `state` fires) until
+  a bundle verifies or the edge confirms the one in use; before, it stayed `ready` and only the `error` event said so.
+  Not for the edge's unsigned answer during publisher lag (`verify.require`) or an unsupported engine: `status`
+  is unchanged there, as before.
+- `lastError.reason`: the detailed `error` code (`signature`, `log`, `cosign`, `rollback`, …).
+
 ## 0.8.1 (2026-11-21)
 
 Security fix to the integrity of shadow reports; served flag values are not affected (shadow bundles are

@@ -41,6 +41,10 @@ const flags = createClient({
 // Attach the error listener before ready(): load errors are emitted while it waits.
 flags.on("error", (e) => console.warn(e.code, e.message)); // the last good bundle keeps serving
 await flags.ready(); // never rejects — see "Fallbacks and staleness"
+if (flags.state === "failed") {
+  // No configuration at all: every flag returns its fallback until one arrives (the client keeps retrying).
+  console.error("NanoFlags:", flags.lastError?.code, flags.lastError?.message); // e.g. INVALID_KEY, EDGE_UNREACHABLE, TIMEOUT
+}
 
 const enabled = flags.boolean("checkout-v2", false, { key: user.id, signedIn: true, region: "US" });
 ```
@@ -91,13 +95,13 @@ export function App({ user }) {
 function Search() {
   const ranking = useFlag("search-ranking", "relevance-v2");       // string accessor (from the fallback's type)
   const compact = useFlag("compact-results", false, { device: "mobile" }); // context override, shallow-merged
-  const { status, revision } = useFlagsStatus();                    // "not-ready" | "ready" | "stale"
+  const { status, state, error, revision } = useFlagsStatus();      // state: "starting" | "ready" | "stale" | "failed"
   …
 }
 ```
 
 Hooks use `useSyncExternalStore`: components re-render when a new revision arrives or the status
-changes. Until a bundle is loaded they return the fallback. For server rendering, pass the bundle you
+(or `state`) changes. Until a bundle is loaded they return the fallback. For server rendering, pass the bundle you
 evaluated with on the server as `bootstrap` so the first client render matches.
 
 ## API
@@ -130,16 +134,18 @@ createClient({
 
 | Member | |
 | --- | --- |
-| `ready(): Promise<void>` | Resolves when a usable bundle is loaded (network, store or bootstrap) — or when the first load attempt finished without one. **Never rejects.** Check `status`. |
+| `ready(): Promise<void>` | Resolves when a usable bundle is loaded (network, store or bootstrap) — or when the first load attempt finished without one. **Never rejects.** Check `state` (or `status`). |
 | `status` | `"not-ready"` · `"ready"` · `"stale"` |
+| `state` | `"starting"` · `"ready"` · `"stale"` · `"failed"`. Like `status`, but `not-ready` is split into `starting` (first load attempt still running) and `failed` (it finished without any configuration). See [Cold start](#cold-start-no-configuration-loaded). |
+| `lastError` | The most recent failure to load or update the configuration, `{ code, message, httpStatus?, reason?, at }`, or `null` (`reason` is the detailed `error` code, e.g. `"signature"` or `"rollback"`). Cleared when the edge confirms a configuration. |
 | `revision` | Revision of the bundle in use, `null` without one. |
 | `transport` | How updates reach this client right now: `"live"` (WebSocket open) · `"stream"` (SSE) · `"poll"`. |
 | `boolean / string / number / json (key, fallback, ctx?)` | The value, or `fallback`. |
-| `evaluate(key, fallback, ctx?)` | The engine `Evaluation`: `value`, `reason`, `ruleIndex`, `ruleId`, `inRollout`, `bucket`, `revision`, `trace`. No type check. |
+| `evaluate(key, fallback, ctx?)` | The engine `Evaluation`: `value`, `reason`, `ruleIndex`, `ruleId`, `inRollout`, `bucket`, `revision`, `trace`, and `errorCode` when the fallback was served (`CONFIG_NOT_LOADED`, `FLAG_NOT_FOUND`, `GENERAL`). No type check. |
 | `allFlags(ctx?)` | `{ [flagKey]: value }` for every flag in the bundle in use (flags whose evaluation fails are left out; `{}` without a bundle). Not sampled into telemetry. |
 | `session(token, { service? })` | `Promise<SessionEvaluator>` for a test session. Never rejects. See [Test sessions](#test-sessions). |
 | `useSession(token \| null)` / `sessionHeaders()` | Browser only: join or leave a test session for this page session; headers for downstream calls. |
-| `on("update" \| "error", cb)` | Returns an unsubscribe function. `update` receives `{ revision, previousRevision, checksum, source, transport, latencyMs }` (see [Updates](#updates)). `error` receives a `NanoFlagsError` with `code`: `network`, `unauthorized`, `http`, `invalid_bundle`, `store`, `config`, `signature`, `session`, `engine` (bundle for a newer engine, refused), `environment_deleted`. With no `error` listener attached, the SDK logs each error code once with `console.warn`. |
+| `on("update" \| "error" \| "state", cb)` | Returns an unsubscribe function. `update` receives `{ revision, previousRevision, checksum, source, transport, latencyMs }` (see [Updates](#updates)). `error` receives a `NanoFlagsError` with `code`: `network`, `unauthorized`, `http`, `invalid_bundle`, `store`, `config`, `signature`, `session`, `engine` (bundle for a newer engine, refused), `environment_deleted`; errors about loading the configuration also carry `errorCode` (`INVALID_KEY`, `EDGE_UNREACHABLE`, `TIMEOUT`, …, see [Cold start](#cold-start-no-configuration-loaded)). `state` receives `{ state, previous, error }` whenever `state` changes. With no `error` listener attached, the SDK logs each error code once with `console.warn`. |
 | `track(eventName, value?, ctx?)` | Record a metric event for experiments (`track("checkout_completed", 42.5, { key: user.id })`). Sends the event name, the optional number and the hashed unit only. Never throws. See [Experiments](#experiments). |
 | `refresh()` / `flush()` / `close()` | Revalidate now / send queued telemetry, exposures and track events now / stop all background work. |
 
@@ -147,31 +153,63 @@ createClient({
 
 The `fallback` argument is what your application does when NanoFlags cannot answer. It is returned when:
 
-| Situation | `reason` |
-| --- | --- |
-| No bundle loaded yet (`status: "not-ready"`) | `flag_not_found` |
-| The flag is not in the bundle (unknown, archived, or server-only with a browser key) | `flag_not_found` |
-| The flag's value has a different type than the accessor (`boolean()` on a string flag) | `error` |
-| The configuration is malformed | `error` |
+| Situation | `reason` | `errorCode` |
+| --- | --- | --- |
+| No bundle loaded (`state: "starting"` or `"failed"`) | `flag_not_found` | `CONFIG_NOT_LOADED` |
+| The flag is not in the bundle (unknown, archived, or server-only with a browser key) | `flag_not_found` | `FLAG_NOT_FOUND` |
+| The flag's value has a different type than the accessor (`boolean()` on a string flag) | `error` | `TYPE_MISMATCH` |
+| The configuration is malformed | `error` | `GENERAL` |
 
 A **disabled** flag is not a fallback case: it returns the flag's configured `off` value (`reason: "off"`).
 
-`status` describes the bundle, not individual flags:
+`status` (and `state`) describe the bundle, not individual flags:
 
-- `not-ready` — no bundle. Every accessor returns its fallback.
+- `not-ready` — no bundle. Every accessor returns its fallback. `state` tells `starting` from `failed`.
 - `ready` — the bundle was confirmed by the edge on the last attempt (or was supplied as `bootstrap`
   and no attempt has failed yet).
 - `stale` — a bundle is in use but is **not known to be current**: it was restored from the store and
-  not yet revalidated, the last revalidation failed (offline, edge error, rejected key), or the edge
-  itself served its last-known-good copy because its origin was unreachable. Evaluations continue on
+  not yet revalidated, the last revalidation failed (offline, edge error, rejected key), the last update
+  was **rejected** (signature, transparency log, co-signature, or an older revision — see
+  [Rollback protection](#rollback-protection)), or the edge itself served its last-known-good copy because its
+  origin was unreachable. Evaluations continue on
   that bundle; the SDK keeps retrying (after a failure: 1 s, 2 s, 4 s … up to the poll interval).
 
 The SDK never discards a working bundle because of an error, and never replaces a bundle with an older
-one served as last-known-good. If the environment is deleted, the edge closes the live socket with code `4004`: the client reports
+one served as last-known-good (nor, with `verify`, with any older one: see [Rollback protection](#rollback-protection)). If the environment is deleted, the edge closes the live socket with code `4004`: the client reports
 `error` (`code: "environment_deleted"`), turns `stale`, keeps evaluating the last bundle and stops reconnecting
 (only the regular poll continues, which then reports the key as rejected). If a key is revoked, the client reports `error` (`code: "unauthorized"`)
 and keeps evaluating the last bundle as `stale` — revocation stops updates, it does not erase
 configuration that already reached a process.
+
+### Cold start: no configuration loaded
+
+When a client starts without a `bootstrap` bundle and without a stored one, and its first request fails, it has no
+configuration at all. `ready()` still resolves; then `state` is `"failed"`, `lastError` says why, and an `error`
+event with the same `errorCode` has fired. Every evaluation returns its fallback with `errorCode: "CONFIG_NOT_LOADED"`
+(`reason` stays `flag_not_found`). The client keeps retrying; when a configuration arrives, `state` becomes `"ready"`,
+`lastError` is cleared and a `state` event fires.
+
+| `lastError.code` / `errorCode` | Cause |
+| --- | --- |
+| `INVALID_KEY` | The edge refused the SDK key (HTTP 401 / 403): unknown, revoked, or the wrong kind of key. |
+| `EDGE_UNREACHABLE` | No answer from the edge: DNS, connection refused, offline, TLS. |
+| `TIMEOUT` | The edge did not answer within 10 seconds. |
+| `HTTP_ERROR` | Another HTTP error from the edge (`httpStatus`), e.g. 5xx. |
+| `INVALID_BUNDLE` | The answer is not a configuration. |
+| `BUNDLE_REJECTED` | A configuration arrived but was refused: signature, transparency log, co-signature, or an older revision than one already verified (`lastError.reason` / the `error` event's `code`: `signature`, `log`, `cosign`, `rollback`). |
+| `UNSUPPORTED_ENGINE` | The configuration needs a newer SDK. |
+| `ENVIRONMENT_DELETED` | The key's environment was deleted. |
+| `CONFIG` | `sdkKey` or `baseUrl` is missing. |
+| `NO_BUNDLE` | The first attempt finished without a configuration and without one of the causes above. |
+
+```ts
+flags.on("state", ({ state, error }) => {
+  if (state === "failed") metrics.increment("nanoflags.cold_start_failed", { code: error?.code });
+});
+```
+
+A client with a stored or bootstrapped configuration never becomes `failed`: it serves that configuration as `stale`
+while `lastError` shows the failure.
 
 ## Updates
 
@@ -197,7 +235,8 @@ configuration that already reached a process.
 `live: false` keeps the 0.2 behaviour (2 + 3); `streaming: false` leaves polling only.
 
 A new bundle replaces the old one in a single assignment: an evaluation sees either the old or the new
-revision in full, never a mixture. The SDK never moves to an older revision than one it was pushed.
+revision in full, never a mixture. The SDK never moves to an older revision than one it was pushed, and with
+`verify` never to an older revision than one it verified on any path (see [Rollback protection](#rollback-protection)).
 
 The `update` event says how the bundle arrived: `transport` is `"live"` (pushed), `"stream"` (fetched
 after an SSE notification) or `"poll"` (everything else, including the initial load, the store and
@@ -209,8 +248,9 @@ machines. Measured on the hosted edge: typically 140–180 ms with the live sock
 with polling up to one poll interval. This is propagation, not a guarantee.
 
 With `verify`, a pushed bundle is verified exactly like a fetched one before it is used (the message
-carries the signature, key id and environment id). A push that does not verify changes nothing, emits
-`error` (`code: "signature"`), and makes the SDK ask the edge over HTTP what is current.
+carries the signature, key id and environment id). A push that does not verify keeps the bundle in use, emits
+`error` (`code: "signature"`), turns the client `stale`, and makes the SDK ask the edge over HTTP what is current
+(`ready` again once the edge confirms the bundle in use).
 
 ## Signature verification
 
@@ -240,12 +280,15 @@ const flags = createClient({
   `nanoflags-bundle-v1\n<environment id>\n<revision>\n<checksum>\n<sha256 hex of the bundle JSON text>`
   (the bundle text exactly as the edge sent it), using WebCrypto, with the key whose `kid` the edge names
   (`X-NanoFlags-Key-Id`, or `kid` in the push).
-- **Bad signature → the update is rejected.** The previous bundle stays in use, `status` does not
-  change, and `error` fires with `code: "signature"`. The SDK retries on its normal schedule.
+- **Bad signature → the update is rejected.** The previous bundle stays in use, `error` fires with
+  `code: "signature"`, `lastError` is `BUNDLE_REJECTED` and `status` / `state` become `stale` (the client knows it
+  is not on the current revision) until a bundle verifies or the edge confirms the one in use. The SDK retries on its
+  normal schedule. (SDK 0.8.1 and earlier stayed `ready`.)
 - **Unsigned bundles** (the edge sends `X-NanoFlags-Signed: false` while the publisher is catching up,
   typically for well under a minute after a publish) are rejected when `require` is true — the default on the hosted
   edge: the bundle in use stays, `error` (`signature`) fires, and the SDK fetches again with a short backoff (1 s,
-  2 s, 4 s … up to the poll interval) until the signed revision is there. With `require: false` (the default for
+  2 s, 4 s … up to the poll interval) until the signed revision is there; `status` does not change for this
+  (it is the edge's own signal of publisher lag, not tampering). With `require: false` (the default for
   other edges) they are accepted; then someone who can alter responses can also strip the signature.
 - **Keys and rotation.** Keys are selected by `kid` and cached. With the embedded keys, a bundle signed with a key id
   the SDK does not know (the hosted edge rotated its key after this SDK version was built) makes the SDK load
@@ -269,6 +312,29 @@ const flags = createClient({
 
 Not covered: test-session bundles (`GET /v1/session`) are not signed, and verification says nothing
 about *freshness* — it does not stop an attacker from withholding updates.
+
+### Rollback protection
+
+A genuinely signed bundle can still be **old**: a replayed response, a stale cache or a compromised proxy could serve
+a revision from before a flag was killed. With `verify` the SDK remembers the newest revision it verified — from a
+fetch, a poll, an SSE-triggered fetch, a push or the store — and **refuses any bundle with a lower revision**, signed or
+not. The bundle in use stays, `error` fires with `code: "rollback"` (`errorCode` / `lastError.code`
+`BUNDLE_REJECTED`, `lastError.reason` `"rollback"`), the client turns `stale`, and polling continues; it is `ready`
+again as soon as the edge confirms the current revision.
+
+- This never blocks a real rollback: revisions only grow per environment, and restoring an old revision in NanoFlags
+  copies it into the draft and **publishes it as a new, higher revision** (so do the kill switch and rollout steps).
+- Ordering is not mistaken for a replay: an answer that was requested before a newer revision arrived, or an HTTP
+  answer that trails a revision pushed over the live socket a moment earlier (up to 2 minutes, while the edge's
+  cache catches up), is dropped without an error. An older copy the edge marks as its last-known-good
+  (`X-NanoFlags-Stale`) only makes the client `stale`, as before.
+- Across restarts the protection rests on the store: the stored bundle is verified again and its revision is the
+  floor; a network answer waits briefly (up to 2 s) for the store to be read, so it cannot slip in first. Without a
+  store (servers by default) a fresh process starts without a floor.
+- Only verified revisions count, so an unverified source can never block updates: a `bootstrap` bundle does not raise
+  the floor, and without `verify` nothing is checked (an older revision is adopted, as before). The floor belongs to
+  the client's environment (one SDK key = one environment; bundles signed for another environment are refused as
+  `signature` and never count). A new SDK key starts with its own store entry and its own floor.
 
 ## Verifiable history (transparency log) and co-signing
 
@@ -373,6 +439,8 @@ active. Browser keys only ever receive client-exposed flags, in sessions too. On
 - `store` accepts any async string store (`get`/`set`), `false` disables persistence.
 - The stored value contains the bundle (flag rules), never the SDK key. It is bound to the key and
   `baseUrl`, so a copy written for another environment is ignored.
+- With `verify`, the stored (and re-verified) revision is the floor for [rollback protection](#rollback-protection)
+  after a restart.
 
 ## Telemetry: what is sent
 

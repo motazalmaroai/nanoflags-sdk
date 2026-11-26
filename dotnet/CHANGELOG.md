@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.1 (2026-11-27)
 
 - Verification hardening, no API change (refuses older signed revisions, reports rejected updates as stale)
 

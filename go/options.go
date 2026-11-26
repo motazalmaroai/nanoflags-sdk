@@ -27,6 +27,10 @@ const (
 	ErrSignature          ErrorCode = "signature"
 	ErrEngine             ErrorCode = "engine"
 	ErrEnvironmentDeleted ErrorCode = "environment_deleted"
+	// ErrRollback: a validly signed configuration was refused because its revision is older than
+	// one this client already verified for the environment (a replayed or stale response). The
+	// configuration in use stays and the status becomes StatusStale.
+	ErrRollback ErrorCode = "rollback"
 	// ErrSession: a test-session lookup failed (the evaluator falls back to normal evaluation).
 	ErrSession ErrorCode = "session"
 	// ErrShadow: a shadow bundle (the draft of a change waiting for approval) was ignored because
@@ -40,6 +44,9 @@ type Error struct {
 	Message    string
 	HTTPStatus int   // set for unauthorized and http errors
 	Err        error // underlying cause, if any
+
+	// unsigned marks the edge's own "not signed yet" answer (publisher lag, with Require).
+	unsigned bool
 }
 
 func (e *Error) Error() string { return "nanoflags: " + e.Message }

@@ -9,7 +9,7 @@ pushes every published revision over a WebSocket, already signed, typically with
 | `NanoFlags` | The client: engine (a port of `@nanoflags/engine`), Ed25519 signature verification, live WebSocket → SSE → ETag polling, persistence, telemetry. `netstandard2.0` and `net8.0`. Depends only on `Microsoft.Extensions.Logging.Abstractions`. |
 | `NanoFlags.OpenFeature` | [OpenFeature](https://openfeature.dev) provider for the official .NET SDK (`OpenFeature` 2.x). |
 
-Version 0.3.0 on [NuGet](https://www.nuget.org/packages/NanoFlags): `dotnet add package NanoFlags` (OpenFeature: `dotnet add package NanoFlags.OpenFeature`).
+Version 0.3.1 on [NuGet](https://www.nuget.org/packages/NanoFlags): `dotnet add package NanoFlags` (OpenFeature: `dotnet add package NanoFlags.OpenFeature`).
 Apache-2.0.
 
 ## Quickstart

@@ -4,7 +4,7 @@
  * Components re-render when the bundle or the client status changes; evaluation stays local.
  */
 import { createContext, createElement, useContext, useMemo, useSyncExternalStore, type ReactElement, type ReactNode } from "react";
-import type { ClientStatus, Context, JsonValue, NanoFlagsClient } from "./index.js";
+import type { ClientState, ClientStatus, Context, JsonValue, LoadError, NanoFlagsClient } from "./index.js";
 
 interface ProviderValue {
   client: NanoFlagsClient;
@@ -65,6 +65,10 @@ export function useFlag<T extends JsonValue>(key: string, fallback: T, ctxOverri
 
 export interface FlagsStatus {
   status: ClientStatus;
+  /** `starting`, `ready`, `stale` or `failed` (see `client.state`): tells "still loading" from "could not load anything". */
+  state: ClientState;
+  /** `client.lastError` as of the latest bundle, status or state change (e.g. `{ code: "INVALID_KEY", … }`), or null. */
+  error: LoadError | null;
   revision: number | null;
   /** True when a bundle is loaded (status "ready" or "stale"). */
   hasBundle: boolean;
@@ -74,5 +78,8 @@ export function useFlagsStatus(): FlagsStatus {
   const { client } = useProvider();
   const version = useVersion(client);
   // eslint-disable-next-line react-hooks/exhaustive-deps -- `version` changes whenever status/revision do
-  return useMemo(() => ({ status: client.status, revision: client.revision, hasBundle: client.status !== "not-ready" }), [client, version]);
+  return useMemo(
+    () => ({ status: client.status, state: client.state ?? (client.status === "not-ready" ? "starting" : client.status), error: client.lastError ?? null, revision: client.revision, hasBundle: client.status !== "not-ready" }),
+    [client, version],
+  );
 }

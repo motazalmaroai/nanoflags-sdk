@@ -11,6 +11,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from nanoflags import CLOSE_ENVIRONMENT_DELETED, EventsOptions, FileStore, NanoFlags, NanoFlagsError, UpdateEvent, VerifyOptions
 from nanoflags._http import HttpResponse, _Headers
+from nanoflags.keys import OFFICIAL_EDGE_URL
 
 
 def client(edge: FakeEdge, **kw: Any) -> NanoFlags:
@@ -68,6 +69,11 @@ def test_tampered_bundle_is_rejected_and_last_good_kept(edge: FakeEdge) -> None:
         c.refresh()
         assert c.revision == 1 and c.string_variation("accent", "x") == "blue"
         assert errors and errors[-1].code == "signature" and "does not verify" in str(errors[-1])
+        # A rejected update leaves the client knowing it is not on the current revision: stale until a bundle verifies.
+        assert c.status == "stale"
+        edge.tamper = False
+        c.refresh()
+        assert c.revision == 2 and c.status == "ready"
 
 
 def test_unsigned_bundle_refused_with_require_but_accepted_without(edge: FakeEdge) -> None:
@@ -130,6 +136,48 @@ def test_official_edge_verifies_by_default_with_embedded_keys() -> None:
         c.close()
     finally:
         fake.shutdown()
+
+
+@pytest.mark.parametrize("base_url", ["https://edge.nanoflags.io", "https://edge.nanoflags.io/", "https://edge.nanoflags.io///", "https://EDGE.nanoflags.io:443", "https://edge.nanoflags.io./"])
+def test_the_official_edge_address_verifies_like_the_canonical_spelling(base_url: str) -> None:
+    def http(method: str, url: str, headers: dict, body: Any, timeout: float) -> HttpResponse:
+        return HttpResponse(200, _Headers({"X-NanoFlags-Signed": "false"}), f'{{"revision":1,"checksum":"c","bundle":{json.dumps(make_bundle(1))}}}'.encode())
+
+    errors: List[NanoFlagsError] = []
+    c = NanoFlags("nf_srv_x", base_url=base_url, http=http, streaming=False, events=False, on_error=errors.append)
+    try:
+        assert c.base_url == OFFICIAL_EDGE_URL
+        # An unsigned answer is refused on the official edge (verify defaults on, `require`).
+        assert c.wait_until_ready(5) is False
+        assert c.revision is None and errors and errors[-1].code == "signature"
+    finally:
+        c.close()
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "https://edge.nanoflags.io.example.com",
+        "http://edge.nanoflags.io",
+        "https://edge.nanoflags.io:8443",
+        "https://edge.nanoflags.io/v1",
+        "https://user@edge.nanoflags.io",
+        "https://user:pw@edge.nanoflags.io",
+        "https://edge.nanoflags.io?x=1",
+        "https://edge.nanoflags.io/#x",
+        "https://notedge.nanoflags.io",
+    ],
+)
+def test_other_addresses_are_not_the_official_edge(base_url: str) -> None:
+    def http(method: str, url: str, headers: dict, body: Any, timeout: float) -> HttpResponse:
+        return HttpResponse(200, _Headers({"X-NanoFlags-Signed": "false"}), f'{{"revision":1,"checksum":"c","bundle":{json.dumps(make_bundle(1))}}}'.encode())
+
+    c = NanoFlags("nf_srv_x", base_url=base_url, http=http, streaming=False, events=False)
+    try:
+        assert c.base_url != OFFICIAL_EDGE_URL
+        assert c.wait_until_ready(5) is True and c.revision == 1  # the unverified default of any other edge
+    finally:
+        c.close()
 
 
 def test_newer_engine_is_refused(edge: FakeEdge) -> None:
@@ -249,7 +297,7 @@ def test_events_and_service_report(edge: FakeEdge) -> None:
     c.bool_variation("new-checkout", False, {"key": "u1", "plan": "beta", "email": "secret@example.com"})
     assert wait_for(lambda: any(e["events"] for e in edge.events))
     batch = next(e for e in edge.events if e["events"])
-    assert batch["service"] == "py-test" and batch["sdk"] == "python/0.3.1" and batch["revision"] == 1
+    assert batch["service"] == "py-test" and batch["sdk"] == "python/0.3.2" and batch["revision"] == 1
     ev = batch["events"][0]
     assert ev["flagKey"] == "new-checkout" and ev["reason"] == "rule_match" and ev["ruleIndex"] == 0
     # Only names and types of attributes the rules use leave the process — never values.

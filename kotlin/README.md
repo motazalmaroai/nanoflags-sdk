@@ -17,7 +17,7 @@ and only the segments those flags reference). Server keys (`nf_srv_…`) are ref
 ```kotlin
 // build.gradle.kts
 dependencies {
-    implementation("io.nanoflags:nanoflags-android:0.3.1")
+    implementation("io.nanoflags:nanoflags-android:0.3.2")
 }
 ```
 
@@ -72,7 +72,7 @@ lifecycleScope.launch {
 | `changes: SharedFlow<ChangeEvent>` | Every adopted configuration (`revision`, `previousRevision`, `source` network/store/bootstrap, `transport`, `latencyMs` commit → device for pushed revisions). |
 | `status: StateFlow<Status>` | `NOT_READY`, `READY` (known current), `STALE` (in use but not confirmed: offline, restored from storage, environment deleted). |
 | `transport: StateFlow<Transport>` | `LIVE`, `STREAM`, `POLL`, `PAUSED` (background, offline or the network policy). |
-| `errors: SharedFlow<NanoFlagsException>` | Background problems (`code`: network, http, unauthorized, invalid_bundle, signature, engine, store, environment_deleted, shadow). They never change the configuration in use. |
+| `errors: SharedFlow<NanoFlagsException>` | Background problems (`code`: network, http, unauthorized, invalid_bundle, signature, rollback, engine, store, environment_deleted, shadow). A rejected update turns a loaded client `stale`; they never change the configuration in use. |
 | `suspend waitUntilReady(timeoutMs)`, `suspend refresh()`, `suspend flush()`, `close()` | |
 | `addChangeListener`, `addStatusListener`, `addErrorListener` | Callback alternatives for Java (background thread; close the returned handle to unregister). |
 | `setForeground(Boolean)`, `setNetworkState(NetworkState)` | Platform signals (`nanoflags-android` calls them for you). |
@@ -139,7 +139,7 @@ ignored (`ErrorCode.SHADOW`). Client keys receive the client view of the draft (
 ## OpenFeature
 
 ```kotlin
-implementation("io.nanoflags:nanoflags-openfeature:0.3.1")
+implementation("io.nanoflags:nanoflags-openfeature:0.3.2")
 
 OpenFeatureAPI.setProviderAndWait(NanoFlagsProvider(flags), initialContext = ImmutableContext("user-42"))
 val on = OpenFeatureAPI.getClient().getBooleanValue("new-checkout", false)

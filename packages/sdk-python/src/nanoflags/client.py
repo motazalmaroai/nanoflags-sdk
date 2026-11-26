@@ -19,6 +19,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Union
+from urllib.parse import urlsplit
 
 from . import _http
 from ._js import js_stringify
@@ -57,7 +58,7 @@ __all__ = [
     "VerifyOptions",
 ]
 
-SDK_VERSION = "0.3.1"
+SDK_VERSION = "0.3.2"
 SUPPORTED_ENGINE_VERSION = ENGINE_VERSION
 #: WebSocket close code of the edge for a deleted environment: the client stops reconnecting.
 CLOSE_ENVIRONMENT_DELETED = 4004
@@ -68,7 +69,7 @@ SESSION_HEADER = "x-nanoflags-session"
 
 Status = Literal["not-ready", "ready", "stale"]
 Transport = Literal["live", "stream", "poll"]
-ErrorCode = Literal["network", "unauthorized", "http", "invalid_bundle", "store", "config", "signature", "session", "engine", "environment_deleted", "shadow"]
+ErrorCode = Literal["network", "unauthorized", "http", "invalid_bundle", "store", "config", "signature", "session", "engine", "environment_deleted", "shadow", "rollback"]
 
 log = logging.getLogger("nanoflags")
 
@@ -85,6 +86,11 @@ _LIVE_ROTATE = 50 * 60.0
 _SESSION_MISS_TTL = 15.0
 _SESSION_ERROR_TTL = 3.0
 _MAX_SESSIONS = 1000
+#: Rollback check: right after a revision arrived over the live socket the HTTP path may still answer the previous one
+#: for a moment (and vice versa). Within this window an older answer from the other transport is dropped silently.
+_ROLLBACK_GRACE = 120.0
+#: How long a network answer waits for the stored bundle to be read (and verified) before the rollback check.
+_RESTORE_WAIT = 2.0
 
 
 class NanoFlagsError(Exception):
@@ -149,6 +155,29 @@ class _SessionState:
     context: Dict[str, Any]
     expires_at: str
     expires_at_ts: float
+
+
+def _normalize_base_url(raw: str) -> str:
+    """``https://EDGE.nanoflags.io:443/``, a trailing dot or trailing slashes are the official edge; anything else (another
+    host or scheme, a path, user info, a query) is left as given (minus trailing slashes)."""
+    trimmed = raw.rstrip("/")
+    try:
+        u = urlsplit(trimmed)
+        official_host = urlsplit(OFFICIAL_EDGE_URL).hostname
+        if (
+            u.scheme == "https"
+            and "@" not in u.netloc
+            and "?" not in trimmed
+            and "#" not in trimmed
+            and u.path == ""
+            and u.port in (None, 443)
+            and u.hostname is not None
+            and u.hostname.rstrip(".") == official_host
+        ):
+            return OFFICIAL_EDGE_URL
+    except ValueError:
+        pass  # not a URL: left as given
+    return trimmed
 
 
 def _now_ms() -> float:
@@ -313,7 +342,7 @@ class NanoFlags:
             rate 0.1) while ``events`` are enabled; ``False`` or ``ShadowOptions(enabled=False)`` turns it off.
         """
         self.sdk_key = sdk_key
-        self.base_url = str(base_url or "").rstrip("/")
+        self.base_url = _normalize_base_url(str(base_url or ""))
         self.service = service or "unknown"
         self._poll_interval = float(poll_interval)
         self._live_poll_interval = float(live_poll_interval)
@@ -373,6 +402,15 @@ class NanoFlags:
         self._raw: Optional[str] = None
         self._pinned_env: Optional[str] = None
         self._live_revision = 0
+        #: Rollback protection (with ``verify``): the newest revision this client adopted after verifying its signature (from
+        #: the network, a push or the store). Any later bundle with a lower revision is refused, signed or not. Only verified
+        #: revisions count, so an unverified source (bootstrap, an unsigned answer) never blocks updates. One client serves
+        #: one SDK key (the store entry is bound to ``base_url|sdk_key``), i.e. one environment.
+        self._newest_verified: Optional[Dict[str, Any]] = None
+        #: Counts adoptions of verified revisions: an answer requested at sequence n is "older news" if a later one was adopted.
+        self._verified_seq = 0
+        #: Set once the stored bundle was read (nothing to read: at once).
+        self._restore_done = threading.Event()
         self._failures = 0
         self._closed = False
         self._started = False
@@ -435,9 +473,12 @@ class NanoFlags:
             self._emit_error(e)
         self._pending_errors = []
         if not isinstance(self.sdk_key, str) or not self.sdk_key or not self.base_url:
+            self._restore_done.set()
             self._emit_error(NanoFlagsError("`sdk_key` and `base_url` are required.", "config"))
             self._ready.set()
             return
+        if not self._store:
+            self._restore_done.set()
         self._spawn(self._main_loop, "nanoflags-sync")
 
     def _spawn(self, target: Callable[[], None], name: str) -> threading.Thread:
@@ -558,6 +599,36 @@ class NanoFlags:
             self._status = status
         self._fire("status", status)
 
+    def _update_rejected(self, e: NanoFlagsError) -> None:
+        """An update was refused (signature, rollback, invalid push): the configuration in use stays, but the client now
+        knows it is not on the current revision, so a loaded client turns ``stale`` until a bundle verifies or the edge
+        confirms the one in use."""
+        if self._bundle is not None:
+            self._set_status("stale")
+        self._emit_error(e)
+
+    def _note_verified(self, info: SignatureInfo, source: str) -> None:
+        with self._lock:
+            self._verified_seq += 1
+            n = self._newest_verified
+            if n is None or info.revision >= n["revision"]:
+                self._newest_verified = {"revision": info.revision, "env": info.environment_id, "seq": self._verified_seq, "at": time.monotonic(), "source": source}
+
+    def _rollback_error(self, revision: int, requested_at_seq: int, source: str) -> Optional[NanoFlagsError]:
+        """``revision`` is older than the newest verified one: returns the ``rollback`` error to report, or ``None`` when the
+        older answer is explained by ordering (a newer one was adopted after this answer was requested, or arrived a moment
+        ago over the other transport). Either way the caller does not adopt it."""
+        with self._lock:
+            n = self._newest_verified
+        if n is None or revision >= n["revision"]:
+            return None
+        if n["source"] != "store" and (n["seq"] > requested_at_seq or (n["source"] != source and time.monotonic() - n["at"] < _ROLLBACK_GRACE)):
+            return None
+        return NanoFlagsError(
+            f"Bundle r{revision} was rejected: it is older than r{n['revision']}, which this client already verified for this environment (a replayed or stale response; restoring an old revision in NanoFlags publishes a new, higher one). The configuration in use is unchanged.",
+            "rollback",
+        )
+
     # ------------------------------------------------------------------ evaluation
 
     def bool_variation(self, key: str, default: bool, context: Optional[Mapping[str, Any]] = None) -> bool:
@@ -659,6 +730,12 @@ class NanoFlags:
             self._emit_error(NanoFlagsError("Could not persist the bundle.", "store"))
 
     def _restore(self) -> None:
+        try:
+            self._restore_inner()
+        finally:
+            self._restore_done.set()
+
+    def _restore_inner(self) -> None:
         if not self._store:
             return
         try:
@@ -707,6 +784,9 @@ class NanoFlags:
                 self._raw = text if sig else None
                 if sig and self._pinned_env is None:
                     self._pinned_env = sig.environment_id
+            # The stored copy is the newest this client verified before the restart: an older answer must not replace it.
+            if sig:
+                self._note_verified(sig, "store")
             # Usable but not known to be current: stale until the edge confirms it.
             self._adopt(restored, etag=p.get("etag"), checksum=p.get("checksum"), status="stale", source="store", transport="poll")
         except Exception:  # noqa: BLE001
@@ -775,7 +855,9 @@ class NanoFlags:
 
         if res.headers.get("X-NanoFlags-Signed") != "true":
             if self._verify["require"]:
-                raise reject("it is not signed (the edge is still distributing it) and unsigned bundles are refused (`verify.require`); fetching again shortly.")
+                err = reject("it is not signed (the edge is still distributing it) and unsigned bundles are refused (`verify.require`); fetching again shortly.")
+                err.unsigned_lag = True  # type: ignore[attr-defined]  # the edge's own signal of publisher lag, not tampering
+                raise err
             return {"bundle": bundle, "sig": None, "raw": None}
         signature = res.headers.get("X-NanoFlags-Signature")
         environment_id = res.headers.get("X-NanoFlags-Environment-Id")
@@ -817,6 +899,7 @@ class NanoFlags:
     def _sync_once(self) -> None:
         transport = "stream" if self._stream_triggered else "poll"
         self._stream_triggered = False
+        requested_at = self._verified_seq
         try:
             res = self._request("GET", "/v1/bundle", {"If-None-Match": self._etag} if self._etag else None)
             if self._closed:
@@ -845,6 +928,21 @@ class NanoFlags:
             if self._closed:
                 return
             nxt = verified["bundle"]
+            if self._verify and not served_stale:
+                # Rollback / replay: never adopt a revision older than one already verified (signed or not, fetched or polled).
+                # The stored copy is read first, so a restart cannot be rolled back by an answer that beats the store.
+                if self._started and not self._restore_done.is_set():
+                    self._restore_done.wait(_RESTORE_WAIT)
+                if self._closed:
+                    return
+                with self._lock:
+                    floor = self._newest_verified["revision"] if self._newest_verified else None
+                if floor is not None and nxt["revision"] < floor:
+                    rb = self._rollback_error(nxt["revision"], requested_at, "http")
+                    if rb is not None:
+                        raise rb
+                    self._failures = 0
+                    return
             if not supports_engine(nxt):
                 raise self._engine_error(nxt)
             self._failures = 0
@@ -858,8 +956,16 @@ class NanoFlags:
                 # A revision pushed while this request was under way (or that KV does not point at yet) wins.
                 if cur is not None and nxt["revision"] < self._live_revision and cur["revision"] >= self._live_revision:
                     return
+                # Same ordering rule under the lock: a newer verified revision adopted meanwhile (a push) wins silently.
+                nv = self._newest_verified
+                if self._verify and not served_stale and nv is not None and nxt["revision"] < nv["revision"]:
+                    return
                 self._sig = verified["sig"]
                 self._raw = verified["raw"]
+                if verified["sig"] is not None:
+                    self._verified_seq += 1
+                    if nv is None or verified["sig"].revision >= nv["revision"]:
+                        self._newest_verified = {"revision": verified["sig"].revision, "env": verified["sig"].environment_id, "seq": self._verified_seq, "at": time.monotonic(), "source": "http"}
             self._adopt(nxt, etag=res.headers.get("ETag"), checksum=body.get("checksum"), status="stale" if served_stale else "ready", source="network", transport=transport)
             self._persist()
         except Exception as e:  # noqa: BLE001
@@ -870,8 +976,14 @@ class NanoFlags:
                 self._emit_error(err)
                 return
             self._failures += 1
-            if err.code == "signature":
-                self._emit_error(err)  # same bundle, same status; polling retries with backoff
+            if getattr(err, "unsigned_lag", False):
+                # The edge's own unsigned answer while the publisher signs a new revision: error only, status unchanged.
+                self._emit_error(err)
+                return
+            if err.code in ("signature", "rollback"):
+                # A rejected update keeps the bundle in use, which is now known not to be current: `stale` until a bundle
+                # verifies or the edge confirms the one in use. Polling retries with backoff.
+                self._update_rejected(err)
                 return
             if err.code == "unauthorized":
                 self._drop_live()
@@ -1054,14 +1166,21 @@ class NanoFlags:
         text = m.get("bundle")
         if not isinstance(revision, int) or isinstance(revision, bool) or revision < 1 or not isinstance(text, str):
             return  # revision 0 / no bundle: nothing published yet
+        received_at = self._verified_seq
         cur = self._bundle
-        if cur is not None and revision < cur["revision"]:
-            return  # never backwards
+        # Never backwards. An older push than a verified revision is checked first, so that a genuine (signed) replay is
+        # reported as a rollback; anything else older is dropped silently.
+        older = cur is not None and revision < cur["revision"]
+        if older:
+            with self._lock:
+                nv = self._newest_verified
+            if not (self._verify and nv is not None and revision < nv["revision"]):
+                return
         pushed_checksum = m.get("checksum") if isinstance(m.get("checksum"), str) else None
         info: Optional[SignatureInfo] = None
         if self._verify:
             def reject(why: str) -> None:
-                self._emit_error(NanoFlagsError(f"Pushed bundle r{revision} was rejected: {why} The configuration in use is unchanged.", "signature"))
+                self._update_rejected(NanoFlagsError(f"Pushed bundle r{revision} was rejected: {why} The configuration in use is unchanged.", "signature"))
                 self._request_sync()  # the regular (verified) request path says what is really current
 
             signature, env_id = m.get("signature"), m.get("environmentId")
@@ -1079,12 +1198,18 @@ class NanoFlags:
                 return
             if not ok:
                 return reject("its signature does not verify.")
+        if older:
+            rb = self._rollback_error(revision, received_at, "live")
+            if rb is not None:
+                self._update_rejected(rb)
+                self._request_sync()  # the regular request path says what is really current (and confirms `ready` again)
+            return
         try:
             parsed = _loads(text)
         except ValueError:
             parsed = None
         if not _is_config(parsed) or parsed.get("revision") != revision:
-            self._emit_error(NanoFlagsError("The edge pushed an invalid bundle; it was ignored.", "invalid_bundle"))
+            self._update_rejected(NanoFlagsError("The edge pushed an invalid bundle; it was ignored.", "invalid_bundle"))
             return
         if not supports_engine(parsed):
             self._emit_error(self._engine_error(parsed))
@@ -1108,6 +1233,8 @@ class NanoFlags:
             if confirm:
                 self._set_status("ready")  # already in use: the push only confirms that it is current
             return
+        if info:
+            self._note_verified(info, "live")
         committed = m.get("committedAt")
         latency = _now_ms() - committed if isinstance(committed, (int, float)) and not isinstance(committed, bool) and math.isfinite(committed) else None
         self._adopt(

@@ -199,6 +199,20 @@ describe("verifyLog", () => {
     expect(errors.at(-1)?.message).toContain("differ from the ones recorded in the log");
   });
 
+  it("the same revision number with different content is checked against the log like any new bundle", async () => {
+    const log = new TestLog();
+    const good = await publish(log, makeBundle(1));
+    const edge = mockRoutes({ "/v1/bundle": await response(good) });
+    const { c, errors } = client(edge.fetch, { verifyLog: true });
+    await c.ready();
+    const evil = makeBundle(1, { "search-ranking": { type: "string", enabled: true, default: "attacker", off: "off", rules: [] } });
+    // Same revision number, other content; the log records the first one.
+    edge.routes["/v1/bundle"] = await response({ ...good, bundle: evil, text: JSON.stringify(evil) });
+    await c.refresh();
+    expect(c.string("search-ranking", "fb")).toBe("relevance-v1");
+    expect(errors.at(-1)?.code).toBe("log");
+  });
+
   it("no evidence on the bundle: the proof is fetched; a revision missing from the log is not applied", async () => {
     const log = new TestLog();
     const p1 = await publish(log, makeBundle(1));

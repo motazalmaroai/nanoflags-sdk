@@ -350,8 +350,15 @@ final class Live {
         double revF = ((JsonValue.Num) revV).value();
         if (revF != Math.floor(revF) || Double.isInfinite(revF) || revF < 1) return;
         long revision = (long) revF;
+        long receivedAt = c.verifiedSequence();
         NanoFlagsClient.Snapshot cur = c.snap.get();
-        if (cur != null && revision < cur.bundle.revision()) return; // never backwards
+        // Never backwards. An older push than a verified revision is checked first (it is reported when it verifies);
+        // anything else older is dropped silently.
+        boolean older = cur != null && revision < cur.bundle.revision();
+        if (older) {
+            NanoFlagsClient.Verified floor = c.newestVerified();
+            if (c.verifier == null || floor == null || revision >= floor.revision) return;
+        }
         String checksum = str(m.field("checksum"));
         Signatures.Info info = null;
         Verifier v = c.verifier;
@@ -382,9 +389,17 @@ final class Live {
                 return;
             }
         }
+        if (older) {
+            NanoFlagsException err = c.rollbackError(revision, receivedAt, NanoFlagsClient.VerifiedSource.LIVE);
+            if (err != null) {
+                c.updateRejected(err);
+                c.trigger(); // the regular request path says what is really current (and confirms READY again)
+            }
+            return;
+        }
         Bundle bundle = Bundle.parse(text);
         if (bundle == null || bundle.revision() != revision) {
-            c.emitError(new NanoFlagsException(ErrorCode.INVALID_BUNDLE, "The edge pushed an invalid bundle; it was ignored."));
+            c.updateRejected(new NanoFlagsException(ErrorCode.INVALID_BUNDLE, "The edge pushed an invalid bundle; it was ignored."));
             return;
         }
         if (!bundle.supportsEngine()) {
@@ -396,8 +411,11 @@ final class Live {
             cur = c.snap.get();
             if (cur != null && revision < cur.bundle.revision()) return;
             if (cur != null && revision == cur.bundle.revision()) {
-                // Already in use: the push only confirms that it is current.
-                if (cur.checksum.isEmpty() || cur.checksum.equals(checksum)) c.setStatus(Status.READY);
+                // Already in use: the push only confirms that it is current. With verification the signed messages must be
+                // equal (a signature binds environment, revision, checksum and the bundle's bytes); equal revision numbers
+                // and checksum text alone are not enough.
+                boolean same = info != null ? cur.sig != null && cur.sig.signature.equals(info.signature) : cur.checksum.isEmpty() || cur.checksum.equals(checksum);
+                if (same) c.setStatus(Status.READY);
                 return;
             }
             synchronized (c.lock) {
@@ -412,13 +430,14 @@ final class Live {
             if (at instanceof JsonValue.Num && !Double.isNaN(((JsonValue.Num) at).value())) {
                 latency = Duration.ofMillis(System.currentTimeMillis() - (long) ((JsonValue.Num) at).value());
             }
+            if (info != null) c.noteVerified(info, NanoFlagsClient.VerifiedSource.LIVE);
             c.adopt(next, Status.READY, Source.NETWORK, Transport.LIVE, latency);
         }
         c.persist(next);
     }
 
     private void rejectPush(long revision, String why) {
-        c.emitError(new NanoFlagsException(ErrorCode.SIGNATURE, "Pushed bundle r" + revision + " was rejected: " + why + " The configuration in use is unchanged."));
+        c.updateRejected(new NanoFlagsException(ErrorCode.SIGNATURE, "Pushed bundle r" + revision + " was rejected: " + why + " The configuration in use is unchanged."));
         c.trigger(); // the regular (verified) request path says what is really current
     }
 

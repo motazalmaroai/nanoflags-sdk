@@ -173,7 +173,7 @@ namespace NanoFlags.Tests
             var e = await Assert.ThrowsAsync<NanoFlagsException>(() => c.RefreshAsync());
             Assert.Contains("different environment", e.Message);
             Assert.Equal(1, c.Revision);
-            Assert.Equal(Status.Ready, c.Status);
+            Assert.Equal(Status.Stale, c.Status); // the configuration in use is not known to be current after a rejected update
         }
 
         [Fact]

@@ -318,8 +318,16 @@ namespace NanoFlags
             double revF = revN.Value;
             if (revF != Math.Floor(revF) || double.IsInfinity(revF) || revF < 1) return;
             long revision = (long)revF;
+            long receivedAt = _c.VerifiedSequence();
             var cur = _c.Snap;
-            if (cur != null && revision < cur.Bundle.Revision) return; // never backwards
+            // Never backwards. An older push than a verified revision is checked first (it is reported when it verifies);
+            // anything else older is dropped silently.
+            bool older = cur != null && revision < cur.Bundle.Revision;
+            if (older)
+            {
+                var floor = _c.NewestVerified();
+                if (_c.Verifier == null || floor == null || revision >= floor.Revision) return;
+            }
             var checksum = (m.Field("checksum") as JsonValue.Str)?.Value;
             Signatures.Info? info = null;
             var v = _c.Verifier;
@@ -355,10 +363,20 @@ namespace NanoFlags
                     return;
                 }
             }
+            if (older)
+            {
+                var err = _c.RollbackError(revision, receivedAt, NanoFlagsClient.VerifiedSource.Live);
+                if (err != null)
+                {
+                    _c.UpdateRejected(err);
+                    _c.Trigger(); // the regular request path says what is really current (and confirms Ready again)
+                }
+                return;
+            }
             var bundle = Bundle.Parse(text);
             if (bundle == null || bundle.Revision != revision)
             {
-                _c.EmitError(new NanoFlagsException(ErrorCode.InvalidBundle, "The edge pushed an invalid bundle; it was ignored."));
+                _c.UpdateRejected(new NanoFlagsException(ErrorCode.InvalidBundle, "The edge pushed an invalid bundle; it was ignored."));
                 return;
             }
             if (!bundle.SupportsEngine)
@@ -373,8 +391,11 @@ namespace NanoFlags
                 if (cur != null && revision < cur.Bundle.Revision) return;
                 if (cur != null && revision == cur.Bundle.Revision)
                 {
-                    // Already in use: the push only confirms that it is current.
-                    if (cur.Checksum.Length == 0 || cur.Checksum == checksum) _c.SetStatus(Status.Ready);
+                    // Already in use: the push only confirms that it is current. With verification the signed messages must be
+                    // equal (a signature binds environment, revision, checksum and the bundle's bytes); equal revision numbers
+                    // and checksum text alone are not enough.
+                    bool same = info != null ? cur.Sig != null && cur.Sig.Signature == info.Signature : cur.Checksum.Length == 0 || cur.Checksum == checksum;
+                    if (same) _c.SetStatus(Status.Ready);
                     return;
                 }
                 lock (_c.Lock)
@@ -390,6 +411,7 @@ namespace NanoFlags
                 {
                     latency = DateTimeOffset.UtcNow - DateTimeOffset.FromUnixTimeMilliseconds((long)at.Value);
                 }
+                if (info != null) _c.NoteVerified(info, NanoFlagsClient.VerifiedSource.Live);
                 _c.Adopt(next, Status.Ready, Source.Network, Transport.Live, latency);
             }
             await _c.PersistAsync(next).ConfigureAwait(false);
@@ -397,7 +419,7 @@ namespace NanoFlags
 
         private void RejectPush(long revision, string why)
         {
-            _c.EmitError(new NanoFlagsException(ErrorCode.Signature, $"Pushed bundle r{revision} was rejected: {why} The configuration in use is unchanged."));
+            _c.UpdateRejected(new NanoFlagsException(ErrorCode.Signature, $"Pushed bundle r{revision} was rejected: {why} The configuration in use is unchanged."));
             _c.Trigger(); // the regular (verified) request path says what is really current
         }
 

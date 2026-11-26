@@ -87,6 +87,26 @@ public final class NanoFlagsClient implements AutoCloseable {
         }
     }
 
+    /** Where the newest verified revision came from. */
+    enum VerifiedSource { LIVE, HTTP, STORE }
+
+    /** Right after a revision arrived over one transport, the other one may still answer the previous one. */
+    static final long ROLLBACK_GRACE_MS = 120_000L;
+
+    static final class Verified {
+        final long revision;
+        final long seq;
+        final long at;
+        final VerifiedSource source;
+
+        Verified(long revision, long seq, long at, VerifiedSource source) {
+            this.revision = revision;
+            this.seq = seq;
+            this.at = at;
+            this.source = source;
+        }
+    }
+
     final NanoFlagsOptions cfg;
     final String sdkKey;
     final HttpClient http;
@@ -113,6 +133,12 @@ public final class NanoFlagsClient implements AutoCloseable {
     private NanoFlagsException lastError;
     String pinnedEnvironment;
     long liveRevision;
+    /** Rollback floor: the newest revision this client adopted after verifying its signature (null until one was). Guarded by {@link #lock}. */
+    private Verified newestVerified;
+    /** Counts adoptions of verified revisions: an answer requested at sequence n is older news if a later one was adopted. Guarded by {@link #lock}. */
+    private long verifiedSeq;
+    /** Rejections of an answer the edge marked unsigned while signatures are required (publisher lag): the status stays. */
+    private final java.util.Set<NanoFlagsException> unsignedRejections = Collections.synchronizedSet(Collections.newSetFromMap(new java.util.WeakHashMap<>()));
     boolean environmentDeleted;
     private boolean streamTriggered;
 
@@ -310,6 +336,49 @@ public final class NanoFlagsClient implements AutoCloseable {
         listeners.emit(listeners.change, new ChangeEvent(next.bundle.revision(), prev == null ? -1 : prev.bundle.revision(), next.checksum, source, transport, latency));
     }
 
+    /** Counter value to take before asking for an answer (see {@link #rollbackError}). */
+    long verifiedSequence() {
+        synchronized (lock) {
+            return verifiedSeq;
+        }
+    }
+
+    Verified newestVerified() {
+        synchronized (lock) {
+            return newestVerified;
+        }
+    }
+
+    void noteVerified(Signatures.Info info, VerifiedSource source) {
+        synchronized (lock) {
+            verifiedSeq++;
+            Verified n = newestVerified;
+            if (n == null || info.revision >= n.revision) newestVerified = new Verified(info.revision, verifiedSeq, System.currentTimeMillis(), source);
+        }
+    }
+
+    /**
+     * {@code revision} is older than the newest verified one: the error to report, or null when the older answer is
+     * explained by ordering (the newer one was adopted after this answer was requested, or arrived a moment ago over the
+     * other transport). Either way the caller does not adopt it.
+     */
+    NanoFlagsException rollbackError(long revision, long requestedAtSeq, VerifiedSource source) {
+        Verified n = newestVerified();
+        if (n == null || revision >= n.revision) return null;
+        if (n.source != VerifiedSource.STORE && (n.seq > requestedAtSeq || (n.source != source && System.currentTimeMillis() - n.at < ROLLBACK_GRACE_MS))) return null;
+        return new NanoFlagsException(ErrorCode.ROLLBACK, "Bundle r" + revision + " was rejected: it is older than r" + n.revision
+            + ", which this client already verified for this environment. The configuration in use is unchanged.");
+    }
+
+    /** An update was refused: the configuration in use stays, but is now known not to be current, so a loaded client turns stale. */
+    void updateRejected(NanoFlagsException e) {
+        synchronized (lock) {
+            lastError = e;
+        }
+        if (snap.get() != null) setStatus(Status.STALE);
+        emitError(e);
+    }
+
     static NanoFlagsException engineError(Bundle b) {
         String e = b.engine().toJson();
         return new NanoFlagsException(ErrorCode.ENGINE, "Bundle r" + b.revision() + " needs evaluation engine " + (e == null ? "undefined" : e) + "; this SDK supports up to "
@@ -434,8 +503,10 @@ public final class NanoFlagsClient implements AutoCloseable {
                 lastError = ne;
                 if (ne.code() != ErrorCode.ENGINE) failures++;
             }
-            if (ne.code() != ErrorCode.ENGINE && ne.code() != ErrorCode.SIGNATURE) {
-                // A rejected update changes nothing: same configuration, same status. Anything else: stale.
+            // An unsupported engine lasts until the SDK is upgraded; an unsigned answer is the edge's own signal that the
+            // publisher is still signing the new revision. Neither is a reason for `stale` (the error is reported).
+            if (ne.code() != ErrorCode.ENGINE && !unsignedRejections.contains(ne)) {
+                // A rejected update (signature, rollback) keeps the configuration in use, which is now known not to be current.
                 if (ne.code() == ErrorCode.UNAUTHORIZED) live.dropLive();
                 if (snap.get() != null) setStatus(Status.STALE);
             }
@@ -460,6 +531,7 @@ public final class NanoFlagsClient implements AutoCloseable {
     }
 
     private void syncOnce(Transport transport) throws IOException, InterruptedException {
+        long requestedAt = verifiedSequence();
         HttpRequest.Builder req = request("/v1/bundle").GET();
         Snapshot cur = snap.get();
         if (cur != null && !cur.etag.isEmpty()) req.header("If-None-Match", cur.etag);
@@ -494,6 +566,16 @@ public final class NanoFlagsClient implements AutoCloseable {
         String checksum = cs instanceof JsonValue.Str ? ((JsonValue.Str) cs).value() : "";
         String etag = res.headers().firstValue("ETag").orElse("");
         Snapshot next = checkSignature(res, text, body, bundle, etag, checksum);
+        if (verifier != null && !servedStale) {
+            // Never adopt a revision older than one already verified. The stored copy was read before the first request,
+            // so its revision already counts here.
+            Verified floor = newestVerified();
+            if (floor != null && bundle.revision() < floor.revision) {
+                NanoFlagsException err = rollbackError(bundle.revision(), requestedAt, VerifiedSource.HTTP);
+                if (err != null) throw err;
+                return;
+            }
+        }
         if (!bundle.supportsEngine()) throw engineError(bundle);
         synchronized (adoptLock) {
             cur = snap.get();
@@ -508,6 +590,7 @@ public final class NanoFlagsClient implements AutoCloseable {
                 pushed = liveRevision;
             }
             if (cur != null && bundle.revision() < pushed && cur.bundle.revision() >= pushed) return;
+            if (next.sig != null) noteVerified(next.sig, VerifiedSource.HTTP);
             adopt(next, servedStale ? Status.STALE : Status.READY, Source.NETWORK, transport, null);
         }
         persist(next);
@@ -519,7 +602,7 @@ public final class NanoFlagsClient implements AutoCloseable {
         if (v == null) return new Snapshot(bundle, etag, checksum, null, null);
         long rev = bundle.revision();
         if (!"true".equals(res.headers().firstValue("X-NanoFlags-Signed").orElse(null))) {
-            if (v.require) throw reject(rev, "it is not signed (the edge is still distributing it) and unsigned bundles are refused; fetching again shortly.");
+            if (v.require) throw rejectUnsigned(rev, "it is not signed (the edge is still distributing it) and unsigned bundles are refused; fetching again shortly.");
             return new Snapshot(bundle, etag, checksum, null, null);
         }
         String signature = res.headers().firstValue("X-NanoFlags-Signature").orElse("");
@@ -565,6 +648,12 @@ public final class NanoFlagsClient implements AutoCloseable {
 
     private static NanoFlagsException reject(long rev, String why) {
         return new NanoFlagsException(ErrorCode.SIGNATURE, "Bundle r" + rev + " was rejected: " + why + " The configuration in use is unchanged.");
+    }
+
+    private NanoFlagsException rejectUnsigned(long rev, String why) {
+        NanoFlagsException e = reject(rev, why);
+        unsignedRejections.add(e);
+        return e;
     }
 
     /* ---------------- persistence ---------------- */
@@ -645,6 +734,8 @@ public final class NanoFlagsClient implements AutoCloseable {
         synchronized (adoptLock) {
             cur = snap.get();
             if (cur != null && cur.bundle.revision() >= bundle.revision()) return;
+            // The stored copy is the newest this client verified before the restart: an older answer must not replace it.
+            if (next.sig != null) noteVerified(next.sig, VerifiedSource.STORE);
             // A restored bundle is usable but not known to be current: stale until the edge confirms it.
             adopt(next, Status.STALE, Source.STORE, Transport.POLL, null);
         }

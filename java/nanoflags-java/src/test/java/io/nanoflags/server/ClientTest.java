@@ -185,7 +185,7 @@ class ClientTest {
         assertEquals(ErrorCode.SIGNATURE, e.code());
         assertTrue(e.getMessage().contains("different environment"));
         assertEquals(1, c.revision());
-        assertEquals(Status.READY, c.status(), "a rejected update changes nothing");
+        assertEquals(Status.STALE, c.status(), "the configuration in use is not known to be current after a rejected update");
     }
 
     @Test

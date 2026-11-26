@@ -63,6 +63,8 @@ namespace NanoFlags
         EnvironmentDeleted,
         /// <summary>A test-session lookup failed; the session evaluator falls back to normal evaluation ("session").</summary>
         Session,
+        /// <summary>A bundle was refused because its revision is older than one this client already verified ("rollback").</summary>
+        Rollback,
     }
 
     /// <summary>Wire spellings.</summary>
@@ -82,6 +84,7 @@ namespace NanoFlags
                 case ErrorCode.Signature: return "signature";
                 case ErrorCode.Engine: return "engine";
                 case ErrorCode.Session: return "session";
+                case ErrorCode.Rollback: return "rollback";
                 default: return "environment_deleted";
             }
         }
@@ -108,6 +111,9 @@ namespace NanoFlags
 
         /// <summary>The HTTP status for <see cref="ErrorCode.Unauthorized"/> and <see cref="ErrorCode.Http"/>, otherwise 0.</summary>
         public int HttpStatus { get; }
+
+        /// <summary>An answer the edge marked unsigned while signatures are required (publisher lag): the status stays.</summary>
+        internal bool IsUnsignedAnswer { get; set; }
 
         /// <inheritdoc/>
         public override string ToString() => $"NanoFlagsException({Code.ToWire()}): {Message}";

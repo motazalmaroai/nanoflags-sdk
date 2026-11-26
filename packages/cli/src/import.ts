@@ -22,10 +22,12 @@ import { CliError, EXIT, clip, table } from "./util.js";
 /** Formats listed in help and error messages. `auto` detects every supported JSON export from its shape. */
 export const PUBLIC_IMPORT_FORMATS = ["auto", "flagd", "nanoflags", "csv"] as const;
 /**
- * Every value `--format` accepts. The tool-specific identifiers stay accepted for backward compatibility, but are not
- * listed anywhere public (no third-party product names in CLI output): `auto` already recognises those exports.
+ * The values listed in help. Any other identifier of a JSON export shape is passed to the API, which validates it
+ * (no third-party product names in the CLI): `auto` already recognises those exports.
  */
-export const IMPORT_FORMATS = [...PUBLIC_IMPORT_FORMATS, "launchdarkly", "unleash", "flagsmith", "growthbook", "statsig"] as const;
+export const IMPORT_FORMATS = PUBLIC_IMPORT_FORMATS;
+/** Identifiers of the other JSON export shapes (`auto` recognises them too); the API validates the value. */
+const SHAPE_FORMAT = /^[a-z][a-z-]{2,30}$/;
 /** How a detected source is named in human-readable output (tool-specific identifiers are not printed). */
 export function sourceLabel(source: string): string {
   return (PUBLIC_IMPORT_FORMATS as readonly string[]).includes(source) ? source : "JSON export";
@@ -90,7 +92,7 @@ export function parseEnvMap(raw: string | undefined): Record<string, string | nu
 function readSource(o: Pick<ImportOptions, "file" | "format" | "project" | "token" | "conflict">, command: string): { content: string; format: string } {
   if (!/^nf_api_[0-9a-f]{48}$/.test(o.token)) throw new CliError(`\`${command}\` needs a Management API token: set NANOFLAGS_API_TOKEN (nf_api_…, scope flags:write; also segments:write when the file has segments).`, EXIT.usage);
   if (!o.project) throw new CliError(`\`${command}\` needs --project <key>.\nRun \`nanoflags --help\` for usage.`, EXIT.usage);
-  if (o.format !== undefined && !(IMPORT_FORMATS as readonly string[]).includes(o.format)) throw new CliError(`--format must be one of ${PUBLIC_IMPORT_FORMATS.join(", ")} (auto recognises every other supported JSON export).`, EXIT.usage);
+  if (o.format !== undefined && !(IMPORT_FORMATS as readonly string[]).includes(o.format) && !SHAPE_FORMAT.test(o.format)) throw new CliError(`--format must be one of ${PUBLIC_IMPORT_FORMATS.join(", ")} (auto recognises every other supported JSON export).`, EXIT.usage);
   if (o.conflict !== undefined && !["skip", "rename", "overwrite"].includes(o.conflict)) throw new CliError("--conflict must be skip, rename or overwrite.", EXIT.usage);
   let size: number;
   try {

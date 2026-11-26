@@ -20,7 +20,7 @@ const RUN_FAIL = { ...RUN_OK, passed: 1, failed: 1, results: [RUN_OK.results[0]!
 describe("general", () => {
   it("--help, --version, no command, unknown command, unknown option", async () => {
     expect((await cli(["--help"])).out).toContain("Usage: nanoflags <command>");
-    expect((await cli(["--version"])).out).toBe("0.6.0\n");
+    expect((await cli(["--version"])).out).toBe("0.6.1\n");
     expect((await cli([])).code).toBe(2);
     expect(await cli(["frobnicate"])).toMatchObject({ code: 2, out: "" });
     expect((await cli(["export", "--nope"])).code).toBe(2);

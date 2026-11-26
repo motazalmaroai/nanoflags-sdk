@@ -1,6 +1,6 @@
 {
   "name": "nanoflags",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "The NanoFlags command line under its short name: runs @nanoflags/cli (npx nanoflags init).",
   "keywords": [
     "nanoflags",

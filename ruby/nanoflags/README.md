@@ -149,7 +149,7 @@ Use the same process-wide client from every job; evaluations are lock-free reads
 
 `base_url` defaults to the hosted edge `https://edge.nanoflags.io`. Errors are delivered to `on_error` as
 `NanoFlags::Error` with a `code`: `:network`, `:unauthorized`, `:http`, `:invalid_bundle`, `:store`, `:config`,
-`:signature`, `:engine`, `:session`, `:environment_deleted`. Nothing is ever raised from a variation call.
+`:signature`, `:rollback`, `:engine`, `:session`, `:environment_deleted`. Nothing is ever raised from a variation call.
 
 ## Behaviour
 

@@ -63,6 +63,19 @@ describe("react bindings", () => {
     unsubscribe();
   });
 
+  it("useFlagsStatus tells a client that could not load anything (state, error) from one still starting", async () => {
+    function StatusProbe(): ReactElement {
+      const { status, state, error, hasBundle } = useFlagsStatus();
+      return createElement("pre", null, JSON.stringify({ status, state, code: error?.code ?? null, hasBundle }));
+    }
+    const client = make({ fetch: mockEdge({ bundle: new Response("", { status: 401 }) }).fetch });
+    client.on("error", () => undefined);
+    const show = () => JSON.parse(renderToString(createElement(NanoFlagsProvider, { client }, createElement(StatusProbe))).replace(/^<pre>|<\/pre>$/g, "").replace(/&quot;/g, '"'));
+    expect(show()).toEqual({ status: "not-ready", state: "starting", code: null, hasBundle: false });
+    await client.ready();
+    expect(show()).toEqual({ status: "not-ready", state: "failed", code: "INVALID_KEY", hasBundle: false });
+  });
+
   it("hooks throw a clear error outside the provider", () => {
     expect(() => renderToString(createElement(Probe))).toThrow(/NanoFlagsProvider/);
   });

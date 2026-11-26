@@ -47,7 +47,7 @@ describe("signature verification", () => {
     expect(c.string("search-ranking", "fb")).toBe("tampered");
   });
 
-  it("a tampered update is rejected: previous bundle kept, error emitted, status unchanged", async () => {
+  it("a tampered update is rejected: previous bundle kept, error emitted, status stale until a bundle verifies", async () => {
     const edge = mockRoutes({ "/v1/bundle": await signedResponse(signer, makeBundle(3)) });
     const c = client({ fetch: edge.fetch, verify: { publicKeys: [signer.publicJwk] } });
     const errors = errorsOf(c);
@@ -57,10 +57,16 @@ describe("signature verification", () => {
     const versionBefore = c.version;
 
     edge.routes["/v1/bundle"] = await signedResponse(signer, makeBundle(4), { tamper: (b) => b.replace("relevance-v4", "attacker-value") });
+    const states: string[] = [];
+    c.on("state", (e) => states.push(e.state));
     await c.refresh();
     expect(c.revision).toBe(3);
-    expect(c.status).toBe("ready");
-    expect(c.version).toBe(versionBefore);
+    // K2: the client knows a newer revision exists that it cannot use.
+    expect(c.status).toBe("stale");
+    expect(c.state).toBe("stale");
+    expect(states).toEqual(["stale"]);
+    expect(c.lastError).toMatchObject({ code: "BUNDLE_REJECTED", reason: "signature" });
+    expect(c.version).toBeGreaterThan(versionBefore);
     expect(c.string("search-ranking", "fb")).toBe("relevance-v3");
     expect(updates).toEqual([3]);
     expect(errors).toHaveLength(1);
@@ -71,6 +77,8 @@ describe("signature verification", () => {
     await c.refresh();
     expect(c.revision).toBe(5);
     expect(c.status).toBe("ready");
+    expect(c.lastError).toBeNull();
+    expect(states).toEqual(["stale", "ready"]);
   });
 
   it("a bad signature on the very first load leaves the client not-ready", async () => {
@@ -252,5 +260,24 @@ describe("rawMember", () => {
     expect(rawMember("[1,2]", "bundle")).toBeNull();
     expect(rawMember('{"bundle":{"a":1}', "bundle")).toBeNull();
     expect(rawMember("", "bundle")).toBeNull();
+  });
+});
+
+describe("the official edge address", () => {
+  it.each(["https://edge.nanoflags.io", "https://edge.nanoflags.io/", "https://EDGE.nanoflags.io:443", "https://edge.nanoflags.io./"])("%s is normalised to the official edge", async (baseUrl) => {
+    const c = createClient({ sdkKey: SERVER_KEY, baseUrl, streaming: false, pollIntervalMs: 0, events: false, fetch: (async () => new Response(JSON.stringify({ revision: 1, checksum: "c1", bundle: makeBundle(1) }), { status: 200, headers: { "Content-Type": "application/json" } })) as typeof fetch });
+    const errors: unknown[] = [];
+    c.on("error", (e) => errors.push(e));
+    await c.ready().catch(() => undefined);
+    // An unsigned answer is refused on the official edge (verify defaults on, `require`).
+    expect(c.revision).toBeNull();
+    expect((errors.at(-1) as { code?: string } | undefined)?.code).toBe("signature");
+    await c.close();
+  });
+  it("another host keeps the default (no verification)", async () => {
+    const c = createClient({ sdkKey: SERVER_KEY, baseUrl: "https://edge.nanoflags.io.example.com", streaming: false, pollIntervalMs: 0, events: false, fetch: (async () => new Response(JSON.stringify({ revision: 1, checksum: "c1", bundle: makeBundle(1) }), { status: 200, headers: { "Content-Type": "application/json" } })) as typeof fetch });
+    await c.ready();
+    expect(c.revision).toBe(1);
+    await c.close();
   });
 });

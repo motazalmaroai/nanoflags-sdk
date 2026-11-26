@@ -30,7 +30,7 @@ import { attachLifecycle, type AppStateLike, type LifecycleState, type NetInfoLi
 import { memoryStorage, storageKey, toStore, type StorageAdapter } from "./storage.js";
 import { fetchWithHeaders, webSocketWithHeaders, xhrStreamOpener, type ReactNativeWebSocketConstructor, type XhrConstructor } from "./transport.js";
 
-export const SDK_VERSION = "0.4.1";
+export const SDK_VERSION = "0.4.2";
 /** Sent as `User-Agent` on every request and socket (Cloudflare refuses default library agents with 403 / 1010). */
 export const DEFAULT_USER_AGENT = `nanoflags-react-native/${SDK_VERSION}`;
 
@@ -138,6 +138,18 @@ function accepts(fallback: unknown): (v: unknown) => boolean {
   return (v) => v !== undefined;
 }
 
+/**
+ * `https://EDGE.nanoflags.io:443/`, a trailing dot or trailing slashes are the official edge; anything else (another host,
+ * another scheme, a path, user info, a query) is left as given (minus trailing slashes).
+ */
+function normalizeBaseUrl(raw: string): string {
+  const trimmed = raw.replace(/\/+$/, "");
+  // Parsed by hand: the URL class of React Native's JavaScript engine is incomplete (some getters throw).
+  const m = /^https:\/\/([^\s/?#@:\\]+)(?::(\d+))?$/i.exec(trimmed);
+  if (m && (m[2] === undefined || m[2] === "443") && m[1]!.toLowerCase().replace(/\.$/, "") === OFFICIAL_EDGE_URL.replace(/^https:\/\//, "")) return OFFICIAL_EDGE_URL;
+  return trimmed;
+}
+
 function isContext(v: unknown): v is Context {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
@@ -153,7 +165,7 @@ export function createClient(options: ReactNativeClientOptions): ReactNativeClie
       "config",
     );
   }
-  const baseUrl = String(options.baseUrl ?? OFFICIAL_EDGE_URL).replace(/\/+$/, "");
+  const baseUrl = normalizeBaseUrl(String(options.baseUrl ?? OFFICIAL_EDGE_URL));
   const userAgent = options.userAgent ?? DEFAULT_USER_AGENT;
   const headers = { "User-Agent": userAgent };
   const g = globalThis as { fetch?: typeof fetch; WebSocket?: unknown; XMLHttpRequest?: unknown };

@@ -24,6 +24,29 @@ public final class NanoFlagsOptions {
      */
     public static final List<Jwk> OFFICIAL_SIGNING_KEYS = Collections.singletonList(Jwk.ed25519("wQu1EsaE-yTjqpUbibGyBrajy3IiRb7LyaiqeYRxG4U", "k1"));
 
+    /**
+     * {@code https://EDGE.nanoflags.io:443/}, a trailing dot or trailing slashes are the official edge ({@link #OFFICIAL_EDGE_URL});
+     * anything else (another host, another scheme or port, a path, user info, a query) is left as given (trailing slashes removed).
+     */
+    static String normalizeBaseUrl(String raw) {
+        String u = raw;
+        while (u.endsWith("/")) u = u.substring(0, u.length() - 1);
+        try {
+            java.net.URI uri = new java.net.URI(u);
+            String host = uri.getHost();
+            if (host != null && "https".equalsIgnoreCase(uri.getScheme()) && uri.getRawUserInfo() == null && uri.getRawQuery() == null
+                && uri.getRawFragment() == null && (uri.getRawPath() == null || uri.getRawPath().isEmpty())
+                && (uri.getPort() == -1 || uri.getPort() == 443)) {
+                String h = host.toLowerCase(java.util.Locale.ROOT);
+                if (h.endsWith(".")) h = h.substring(0, h.length() - 1);
+                if (h.equals("edge.nanoflags.io")) return OFFICIAL_EDGE_URL;
+            }
+        } catch (java.net.URISyntaxException | RuntimeException e) {
+            // not a URL: left as given
+        }
+        return u;
+    }
+
     final String baseUrl;
     final String service;
     final HttpClient httpClient;
@@ -97,9 +120,7 @@ public final class NanoFlagsOptions {
 
         /** The edge (default {@link #OFFICIAL_EDGE_URL}). Signature verification is on by default only for the official edge. */
         public Builder baseUrl(String url) {
-            String u = Objects.requireNonNull(url, "url");
-            while (u.endsWith("/")) u = u.substring(0, u.length() - 1);
-            this.baseUrl = u;
+            this.baseUrl = normalizeBaseUrl(Objects.requireNonNull(url, "url"));
             return this;
         }
 

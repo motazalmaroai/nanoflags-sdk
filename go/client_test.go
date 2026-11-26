@@ -93,14 +93,14 @@ func TestRejectsBadAndUnsignedBundles(t *testing.T) {
 	if err := waitReady(t, c); err != nil {
 		t.Fatal(err)
 	}
-	// A bad signature changes nothing.
+	// A bad signature keeps the configuration, and the client knows it is no longer current: stale.
 	e.mu.Lock()
 	e.corrupt = true
 	e.mu.Unlock()
 	e.set(2, bundleText(2, boolFlag))
 	err := c.Refresh(context.Background())
 	var ne *Error
-	if !errors.As(err, &ne) || ne.Code != ErrSignature || c.Revision() != 1 || c.Status() != StatusReady {
+	if !errors.As(err, &ne) || ne.Code != ErrSignature || c.Revision() != 1 || c.Status() != StatusStale {
 		t.Fatalf("bad signature: %v, r%d %s", err, c.Revision(), c.Status())
 	}
 	if !errors.Is(err, &Error{Code: ErrSignature}) {

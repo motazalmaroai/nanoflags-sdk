@@ -2,5 +2,5 @@
 
 module NanoFlags
   # The version of this gem, reported to the edge as "ruby/<version>".
-  VERSION = "0.3.0"
+  VERSION = "0.3.1"
 end

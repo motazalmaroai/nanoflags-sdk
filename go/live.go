@@ -220,14 +220,19 @@ func (c *Client) applyPush(data []byte) {
 		return
 	}
 	revision := int64(revF)
-	if cur := c.snap.Load(); cur != nil && revision < cur.bundle.Revision() {
-		return // never backwards
+	receivedAt := c.verifiedSeqNow()
+	// Never backwards. An older push than a verified revision is checked first, so that a genuine
+	// (signed) replay is reported as a rollback; anything else older is dropped silently.
+	cur0 := c.snap.Load()
+	older := cur0 != nil && revision < cur0.bundle.Revision()
+	if older && !c.belowFloor(revision) {
+		return
 	}
 	checksum, hasChecksum := m.Field("checksum").Str()
 	var info *signatureInfo
 	if v := c.verifier; v != nil {
 		reject := func(why string) {
-			c.emitError(newError(ErrSignature, "pushed bundle r%d was rejected: %s The configuration in use is unchanged.", revision, why))
+			c.updateRejected(newError(ErrSignature, "pushed bundle r%d was rejected: %s The configuration in use is unchanged.", revision, why))
 			c.trigger() // the regular (verified) request path says what is really current
 		}
 		sig, _ := m.Field("signature").Str()
@@ -251,9 +256,16 @@ func (c *Client) applyPush(data []byte) {
 			return
 		}
 	}
+	if older {
+		if rerr := c.rollbackError(revision, receivedAt, adoptedLive); rerr != nil {
+			c.updateRejected(rerr)
+			c.trigger() // the regular request path says what is really current (and confirms ready again)
+		}
+		return
+	}
 	bundle, err := engine.ParseBundle([]byte(text))
 	if err != nil || bundle.Revision() != revision || !isConfig(bundle.Value()) {
-		c.emitError(newError(ErrInvalidBundle, "the edge pushed an invalid bundle; it was ignored"))
+		c.updateRejected(newError(ErrInvalidBundle, "the edge pushed an invalid bundle; it was ignored"))
 		return
 	}
 	if !bundle.SupportsEngine() {
@@ -282,6 +294,9 @@ func (c *Client) applyPush(data []byte) {
 	}
 	c.liveRevision = revision
 	c.mu.Unlock()
+	if info != nil {
+		c.noteVerified(info, adoptedLive)
+	}
 	next := &snapshot{bundle: bundle, checksum: checksum, sig: info, raw: []byte(text)}
 	if hasChecksum {
 		// What /v1/bundle would send as ETag for this revision, so the safety poll gets a 304.

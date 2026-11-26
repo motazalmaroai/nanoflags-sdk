@@ -30,7 +30,7 @@ namespace NanoFlags
     public sealed class NanoFlagsClient : IDisposable
     {
         /// <summary>The version of this SDK, reported to the edge as <c>dotnet/&lt;version&gt;</c>.</summary>
-        public const string Version = "0.3.0";
+        public const string Version = "0.3.1";
 
         /// <summary>The newest bundle format (<c>bundle.engine</c>) this SDK evaluates. Newer bundles are refused.</summary>
         public const int SupportedEngineVersion = Evaluator.Version;
@@ -63,6 +63,28 @@ namespace NanoFlags
             internal string? Raw { get; }
         }
 
+        /// <summary>Where the newest verified revision came from.</summary>
+        internal enum VerifiedSource { Live, Http, Store }
+
+        /// <summary>Right after a revision arrived over one transport, the other one may still answer the previous one.</summary>
+        internal static readonly TimeSpan RollbackGrace = TimeSpan.FromMinutes(2);
+
+        internal sealed class Verified
+        {
+            internal Verified(long revision, long seq, DateTime at, VerifiedSource source)
+            {
+                Revision = revision;
+                Seq = seq;
+                At = at;
+                Source = source;
+            }
+
+            internal long Revision { get; }
+            internal long Seq { get; }
+            internal DateTime At { get; }
+            internal VerifiedSource Source { get; }
+        }
+
         internal readonly NanoFlagsOptions Cfg;
         internal readonly string SdkKey;
         internal readonly HttpClient Http;
@@ -89,6 +111,8 @@ namespace NanoFlags
         private NanoFlagsException? _lastError;
         internal string? PinnedEnvironment;
         internal long LiveRevision;
+        private Verified? _newestVerified; // rollback floor: the newest revision adopted after its signature was verified (guarded by Lock)
+        private long _verifiedSeq; // counts adoptions of verified revisions (guarded by Lock)
         internal bool EnvironmentDeleted;
         private bool _streamTriggered;
 
@@ -155,7 +179,7 @@ namespace NanoFlags
         {
             var cfg = (options ?? new NanoFlagsOptions()).Clone();
             if (string.IsNullOrWhiteSpace(sdkKey)) throw new NanoFlagsException(ErrorCode.Config, "An SDK key is required.");
-            cfg.BaseUrl = (cfg.BaseUrl ?? "").TrimEnd('/');
+            cfg.BaseUrl = NanoFlagsOptions.NormalizeBaseUrl(cfg.BaseUrl);
             if (!cfg.BaseUrl.StartsWith("https://", StringComparison.Ordinal) && !cfg.BaseUrl.StartsWith("http://", StringComparison.Ordinal))
             {
                 throw new NanoFlagsException(ErrorCode.Config, "The base URL must be an http(s) URL, got \"" + cfg.BaseUrl + "\".");
@@ -302,6 +326,49 @@ namespace NanoFlags
             if (h != null) Dispatcher.Post(() => h(this, ev));
         }
 
+        /// <summary>Counter value to take before asking for an answer (see <see cref="RollbackError"/>).</summary>
+        internal long VerifiedSequence()
+        {
+            lock (Lock) return _verifiedSeq;
+        }
+
+        internal Verified? NewestVerified()
+        {
+            lock (Lock) return _newestVerified;
+        }
+
+        internal void NoteVerified(Signatures.Info info, VerifiedSource source)
+        {
+            lock (Lock)
+            {
+                _verifiedSeq++;
+                var n = _newestVerified;
+                if (n == null || info.Revision >= n.Revision) _newestVerified = new Verified(info.Revision, _verifiedSeq, DateTime.UtcNow, source);
+            }
+        }
+
+        /// <summary>
+        /// <paramref name="revision"/> is older than the newest verified one: the error to report, or null when the older
+        /// answer is explained by ordering (the newer one was adopted after this answer was requested, or arrived a moment
+        /// ago over the other transport). Either way the caller does not adopt it.
+        /// </summary>
+        internal NanoFlagsException? RollbackError(long revision, long requestedAtSeq, VerifiedSource source)
+        {
+            var n = NewestVerified();
+            if (n == null || revision >= n.Revision) return null;
+            if (n.Source != VerifiedSource.Store && (n.Seq > requestedAtSeq || (n.Source != source && DateTime.UtcNow - n.At < RollbackGrace))) return null;
+            return new NanoFlagsException(ErrorCode.Rollback, $"Bundle r{revision} was rejected: it is older than r{n.Revision}, which this client already verified for this environment. " +
+                "The configuration in use is unchanged.");
+        }
+
+        /// <summary>An update was refused: the configuration in use stays, but is now known not to be current, so a loaded client turns stale.</summary>
+        internal void UpdateRejected(NanoFlagsException e)
+        {
+            lock (Lock) _lastError = e;
+            if (Snap != null) SetStatus(Status.Stale);
+            EmitError(e);
+        }
+
         internal static NanoFlagsException EngineError(Bundle b) =>
             new NanoFlagsException(ErrorCode.Engine, $"Bundle r{b.Revision} needs evaluation engine {b.Engine.ToJson() ?? "undefined"}; this SDK supports up to {Evaluator.Version}. " +
                 "Upgrade the NanoFlags .NET SDK. The configuration in use is unchanged.");
@@ -440,9 +507,11 @@ namespace NanoFlags
                     _lastError = ne;
                     if (ne.Code != ErrorCode.Engine) _failures++;
                 }
-                if (ne.Code != ErrorCode.Engine && ne.Code != ErrorCode.Signature)
+                // An unsupported engine lasts until the SDK is upgraded; an unsigned answer is the edge's own signal that the
+                // publisher is still signing the new revision. Neither is a reason for stale (the error is reported).
+                if (ne.Code != ErrorCode.Engine && !ne.IsUnsignedAnswer)
                 {
-                    // A rejected update changes nothing: same configuration, same status. Anything else: stale.
+                    // A rejected update (signature, rollback) keeps the configuration in use, which is now known not to be current.
                     if (ne.Code == ErrorCode.Unauthorized) _live.DropLive();
                     if (Snap != null) SetStatus(Status.Stale);
                 }
@@ -459,6 +528,7 @@ namespace NanoFlags
         {
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct, Cts.Token);
             cts.CancelAfter(Cfg.RequestTimeout);
+            long requestedAt = VerifiedSequence();
             using var req = Request(HttpMethod.Get, "/v1/bundle");
             var cur = Snap;
             if (cur != null && cur.ETag.Length > 0) req.Headers.TryAddWithoutValidation("If-None-Match", cur.ETag);
@@ -488,6 +558,18 @@ namespace NanoFlags
             var checksum = (body.Field("checksum") as JsonValue.Str)?.Value ?? "";
             var etag = Header(res, "ETag") ?? "";
             var next = await CheckSignatureAsync(res, text, body, bundle, etag, checksum, cts.Token).ConfigureAwait(false);
+            if (Verifier != null && !servedStale)
+            {
+                // Never adopt a revision older than one already verified. The stored copy was read before the first request,
+                // so its revision already counts here.
+                var floor = NewestVerified();
+                if (floor != null && bundle.Revision < floor.Revision)
+                {
+                    var err = RollbackError(bundle.Revision, requestedAt, VerifiedSource.Http);
+                    if (err != null) throw err;
+                    return;
+                }
+            }
             if (!bundle.SupportsEngine) throw EngineError(bundle);
             lock (AdoptLock)
             {
@@ -502,6 +584,7 @@ namespace NanoFlags
                 long pushed;
                 lock (Lock) pushed = LiveRevision;
                 if (cur != null && bundle.Revision < pushed && cur.Bundle.Revision >= pushed) return;
+                if (next.Sig != null) NoteVerified(next.Sig, VerifiedSource.Http);
                 Adopt(next, servedStale ? Status.Stale : Status.Ready, Source.Network, transport, null);
             }
             await PersistAsync(next).ConfigureAwait(false);
@@ -532,7 +615,12 @@ namespace NanoFlags
             long rev = bundle.Revision;
             if (Header(res, "X-NanoFlags-Signed") != "true")
             {
-                if (v.Require) throw Reject(rev, "it is not signed (the edge is still distributing it) and unsigned bundles are refused; fetching again shortly.");
+                if (v.Require)
+                {
+                    var unsigned = Reject(rev, "it is not signed (the edge is still distributing it) and unsigned bundles are refused; fetching again shortly.");
+                    unsigned.IsUnsignedAnswer = true;
+                    throw unsigned;
+                }
                 return new Snapshot(bundle, etag, checksum, null, null);
             }
             var signature = Header(res, "X-NanoFlags-Signature") ?? "";
@@ -673,6 +761,8 @@ namespace NanoFlags
             lock (AdoptLock)
             {
                 if (Snap is Snapshot c1 && c1.Bundle.Revision >= bundle.Revision) return;
+                // The stored copy is the newest this client verified before the restart: an older answer must not replace it.
+                if (next.Sig != null) NoteVerified(next.Sig, VerifiedSource.Store);
                 // A restored bundle is usable but not known to be current: stale until the edge confirms it.
                 Adopt(next, Status.Stale, Source.Store, Transport.Poll, null);
             }

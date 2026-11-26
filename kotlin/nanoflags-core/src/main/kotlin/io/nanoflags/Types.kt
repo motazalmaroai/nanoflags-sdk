@@ -8,7 +8,7 @@ import io.nanoflags.engine.TraceStep
 /** SDK release information. */
 object BuildInfo {
     /** This SDK's version (also in the User-Agent and in telemetry as `kotlin/<version>` / `android/<version>`). */
-    const val VERSION: String = "0.3.1"
+    const val VERSION: String = "0.3.2"
 }
 
 /** What kind of problem a [NanoFlagsException] reports. */
@@ -33,6 +33,8 @@ enum class ErrorCode {
     ENVIRONMENT_DELETED,
     /** A shadow bundle (draft of a change waiting for approval) was ignored. Nothing changes for the app. */
     SHADOW,
+    /** A validly signed bundle was refused because its revision is older than one this client already verified. */
+    ROLLBACK,
 }
 
 /** A background problem. A failed update never changes the configuration in use. */

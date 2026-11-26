@@ -62,7 +62,7 @@ class NanoFlags(sdkKey: String, options: NanoFlagsOptions = NanoFlagsOptions()) 
 
     private val sdkKey: String = sdkKey.trim()
     private val opts: NanoFlagsOptions = options.copy()
-    internal val baseUrl: String = opts.baseUrl.trimEnd('/')
+    internal val baseUrl: String = normalizeBaseUrl(opts.baseUrl)
     private val official = baseUrl == OFFICIAL_EDGE_URL
 
     init {
@@ -102,6 +102,23 @@ class NanoFlags(sdkKey: String, options: NanoFlagsOptions = NanoFlagsOptions()) 
     private var lastError: NanoFlagsException? = null
     internal var pinnedEnvironment: String? = null
     private var liveRevision = 0L
+
+    /** Where the newest verified revision came from (rollback check). */
+    private enum class VerifiedSource { LIVE, HTTP, STORE }
+    private class Verified(val revision: Long, val seq: Long, val at: Long, val source: VerifiedSource)
+
+    /**
+     * Rollback protection: the newest revision this client adopted after verifying its signature (network, push or
+     * store). A later bundle with a lower revision is refused. Only verified revisions count, so unverified sources
+     * (bootstrap, unsigned answers) never block updates. One client serves one SDK key, i.e. one environment.
+     */
+    private var newestVerified: Verified? = null
+
+    /** Counts adoptions of verified revisions: an answer requested at sequence n is older news if a later one was adopted. */
+    private var verifiedSeq = 0L
+
+    /** Rejections of an answer the edge marked unsigned while `require` is on (publisher lag): the status stays. */
+    private val unsignedRejections: MutableSet<NanoFlagsException> = java.util.Collections.newSetFromMap(java.util.Collections.synchronizedMap(java.util.WeakHashMap()))
     @Volatile internal var environmentDeleted = false
     @Volatile private var lastSyncAt = 0L
     private var streamTriggered = false
@@ -300,6 +317,35 @@ class NanoFlags(sdkKey: String, options: NanoFlagsOptions = NanoFlagsOptions()) 
         opts.logger?.invoke("nanoflags: $msg")
     }
 
+    private fun noteVerified(info: SignatureInfo, source: VerifiedSource) = synchronized(lock) {
+        verifiedSeq++
+        val n = newestVerified
+        if (n == null || info.revision >= n.revision) newestVerified = Verified(info.revision, verifiedSeq, System.currentTimeMillis(), source)
+    }
+
+    /**
+     * [revision] is older than the newest verified one: the `ROLLBACK` error to report, or `null` when the older answer
+     * is explained by ordering (the newer one was adopted after this answer was requested, or arrived a moment ago over
+     * the other transport). Either way the caller does not adopt it.
+     */
+    private fun rollbackError(revision: Long, requestedAtSeq: Long, source: VerifiedSource): NanoFlagsException? {
+        val n = synchronized(lock) { newestVerified } ?: return null
+        if (revision >= n.revision) return null
+        if (n.source != VerifiedSource.STORE && (n.seq > requestedAtSeq || (n.source != source && System.currentTimeMillis() - n.at < ROLLBACK_GRACE_MS))) return null
+        return NanoFlagsException(
+            ErrorCode.ROLLBACK,
+            "Bundle r$revision was rejected: it is older than r${n.revision}, which this client already verified for this environment " +
+                "(a replayed or stale response). The configuration in use is unchanged.",
+        )
+    }
+
+    /** An update was refused: the configuration in use stays, but is now known not to be current, so a loaded client turns stale. */
+    private fun updateRejected(e: NanoFlagsException) {
+        synchronized(lock) { lastError = e }
+        if (snap.value != null) setStatus(Status.STALE)
+        emitError(e)
+    }
+
     private fun adopt(next: Snapshot, status: Status, source: Source, transport: Transport, latencyMs: Long?) {
         val prev = snap.value
         snap.value = next
@@ -382,9 +428,12 @@ class NanoFlags(sdkKey: String, options: NanoFlagsOptions = NanoFlagsOptions()) 
             lastError = err
             if (err.code != ErrorCode.ENGINE) failures++
         }
-        when (err.code) {
-            ErrorCode.ENGINE, ErrorCode.SIGNATURE -> {} // a rejected update changes nothing: same configuration, same status
+        when {
+            // An unsupported engine lasts until the SDK is upgraded; an unsigned answer is the edge's own signal that
+            // the publisher is still signing the new revision. Neither is a reason for `stale` (the error is reported).
+            err.code == ErrorCode.ENGINE || err in unsignedRejections -> {}
             else -> {
+                // A rejected update (signature, rollback) keeps the configuration in use, which is now known not to be current.
                 if (err.code == ErrorCode.UNAUTHORIZED) live.drop()
                 if (snap.value != null) setStatus(Status.STALE)
             }
@@ -395,6 +444,7 @@ class NanoFlags(sdkKey: String, options: NanoFlagsOptions = NanoFlagsOptions()) 
 
     private suspend fun syncOnce(transport: Transport) {
         val cur = snap.value
+        val requestedAt = synchronized(lock) { verifiedSeq }
         val req = request("/v1/bundle").apply { cur?.etag?.let { header("If-None-Match", it) } }.get().build()
         val res = http.newCall(req).await()
         val (code, headers, text) = res.use { r ->
@@ -423,6 +473,14 @@ class NanoFlags(sdkKey: String, options: NanoFlagsOptions = NanoFlagsOptions()) 
         // the verified configuration in use tells nothing new: keep what is in use, quietly.
         if (verifier?.require == true && headers["X-NanoFlags-Signed"] != "true" && cur?.sig != null && bundle.revision <= cur.bundle.revision) return
         val signed = checkSignature(headers, bytes, body, bundle)
+        if (verifier != null && !servedStale) {
+            // Rollback / replay: never adopt a revision older than one already verified (signed or not). The stored copy
+            // was read before the first request, so a restart cannot be rolled back by an answer that beats the store.
+            val floor = synchronized(lock) { newestVerified }
+            if (floor != null && bundle.revision < floor.revision) {
+                throw rollbackError(bundle.revision, requestedAt, VerifiedSource.HTTP) ?: return
+            }
+        }
         if (!bundle.supportsEngine) throw engineError(bundle)
         val next = Snapshot(bundle, headers["ETag"], checksum, signed?.first, signed?.second ?: bundle.toJson())
         synchronized(adoptLock) {
@@ -435,6 +493,7 @@ class NanoFlags(sdkKey: String, options: NanoFlagsOptions = NanoFlagsOptions()) 
             // A revision that was pushed while this request was under way wins.
             val pushed = synchronized(lock) { liveRevision }
             if (now != null && bundle.revision < pushed && now.bundle.revision >= pushed) return
+            if (signed != null) noteVerified(signed.first, VerifiedSource.HTTP)
             adopt(next, if (servedStale) Status.STALE else Status.READY, Source.NETWORK, transport, null)
         }
         persist(next)
@@ -446,7 +505,7 @@ class NanoFlags(sdkKey: String, options: NanoFlagsOptions = NanoFlagsOptions()) 
         val rev = bundle.revision
         fun reject(why: String) = NanoFlagsException(ErrorCode.SIGNATURE, "Bundle r$rev was rejected: $why The configuration in use is unchanged.")
         if (h["X-NanoFlags-Signed"] != "true") {
-            if (v.require) throw reject("it is not signed (the edge is still distributing it) and unsigned bundles are refused; fetching again shortly.")
+            if (v.require) throw reject("it is not signed (the edge is still distributing it) and unsigned bundles are refused; fetching again shortly.").also { unsignedRejections.add(it) }
             return null
         }
         val signature = h["X-NanoFlags-Signature"]
@@ -497,13 +556,20 @@ class NanoFlags(sdkKey: String, options: NanoFlagsOptions = NanoFlagsOptions()) 
         // Revision 0 / no bundle: the environment has nothing published yet.
         if (revF != Math.floor(revF) || revF < 1 || bundleText == null) return
         val revision = revF.toLong()
-        snap.value?.let { if (revision < it.bundle.revision) return } // never backwards
+        val receivedAt = synchronized(lock) { verifiedSeq }
+        // Never backwards. An older push than a verified revision is checked first, so that a genuine (signed) replay is
+        // reported as a rollback; anything else older is dropped silently.
+        val older = snap.value?.let { revision < it.bundle.revision } == true
+        if (older) {
+            val floor = synchronized(lock) { newestVerified }
+            if (verifier == null || floor == null || revision >= floor.revision) return
+        }
         val checksum = (m.field("checksum") as? JsonValue.Str)?.value
         var info: SignatureInfo? = null
         val v = verifier
         if (v != null) {
             fun reject(why: String) {
-                emitError(NanoFlagsException(ErrorCode.SIGNATURE, "Pushed bundle r$revision was rejected: $why The configuration in use is unchanged."))
+                updateRejected(NanoFlagsException(ErrorCode.SIGNATURE, "Pushed bundle r$revision was rejected: $why The configuration in use is unchanged."))
                 trigger() // the regular (verified) request path says what is really current
             }
             val sig = (m.field("signature") as? JsonValue.Str)?.value
@@ -522,9 +588,16 @@ class NanoFlags(sdkKey: String, options: NanoFlagsOptions = NanoFlagsOptions()) 
             if (keys == null || !Signatures.verify(keys, candidate, bundleText.toByteArray(Charsets.UTF_8))) return reject("its signature does not verify.")
             info = candidate
         }
+        if (older) {
+            rollbackError(revision, receivedAt, VerifiedSource.LIVE)?.let {
+                updateRejected(it)
+                trigger() // the regular request path says what is really current (and confirms READY again)
+            }
+            return
+        }
         val bundle = Bundle.parse(bundleText)
         if (bundle == null || bundle.revision != revision) {
-            emitError(NanoFlagsException(ErrorCode.INVALID_BUNDLE, "The edge pushed an invalid bundle; it was ignored."))
+            updateRejected(NanoFlagsException(ErrorCode.INVALID_BUNDLE, "The edge pushed an invalid bundle; it was ignored."))
             return
         }
         if (!bundle.supportsEngine) {
@@ -537,14 +610,17 @@ class NanoFlags(sdkKey: String, options: NanoFlagsOptions = NanoFlagsOptions()) 
             if (cur != null && revision < cur.bundle.revision) return
             synchronized(lock) { failures = 0 }
             if (cur != null && revision == cur.bundle.revision) {
-                // Already in use: the push only confirms that it is current.
-                if (cur.checksum == null || cur.checksum == checksum) setStatus(Status.READY)
+                // Already in use: the push only confirms that it is current. With verification the signed messages must be
+                // equal (a signature binds environment, revision, checksum and the bundle's bytes).
+                val same = if (info != null) cur.sig?.signature == info.signature else cur.checksum == null || cur.checksum == checksum
+                if (same) setStatus(Status.READY)
                 return
             }
             synchronized(lock) {
                 if (info != null) pinnedEnvironment = info.environmentId
                 liveRevision = revision
             }
+            if (info != null) noteVerified(info, VerifiedSource.LIVE)
             // What /v1/bundle would send as ETag for this revision, so the safety poll gets a 304.
             next = Snapshot(bundle, checksum?.let { "\"$it-client\"" }, checksum, info, bundleText)
             val committedAt = (m.field("committedAt") as? JsonValue.Num)?.value
@@ -643,6 +719,8 @@ class NanoFlags(sdkKey: String, options: NanoFlagsOptions = NanoFlagsOptions()) 
         synchronized(adoptLock) {
             snap.value?.let { if (it.bundle.revision >= bundle.revision) return }
             synchronized(persistLock) { lastPersistedRevision = bundle.revision }
+            // The stored copy is the newest this client verified before the restart: an older answer must not replace it.
+            if (sig != null) noteVerified(sig, VerifiedSource.STORE)
             // Usable but not known to be current: stale until the edge confirms it.
             adopt(next, Status.STALE, Source.STORE, Transport.POLL, null)
         }
@@ -796,6 +874,9 @@ class NanoFlags(sdkKey: String, options: NanoFlagsOptions = NanoFlagsOptions()) 
 
     internal companion object {
         const val MAX_BUNDLE_BYTES = 16L shl 20
+
+        /** Right after a revision arrived over the live socket, the HTTP path may still answer the previous one (and vice versa). */
+        const val ROLLBACK_GRACE_MS = 120_000L
 
         fun isoNow(): String = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.ROOT).apply { timeZone = TimeZone.getTimeZone("UTC") }.format(Date())
     }

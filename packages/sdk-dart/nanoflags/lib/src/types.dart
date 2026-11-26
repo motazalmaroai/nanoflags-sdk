@@ -3,7 +3,7 @@ import 'store.dart';
 import 'keys.dart';
 
 /// Version of this SDK (sent as `sdk: "dart/<version>"` with telemetry and in the User-Agent).
-const String sdkVersion = '0.3.1';
+const String sdkVersion = '0.3.2';
 
 /// WebSocket close code of the edge for an environment that was deleted: the SDK stops reconnecting.
 const int closeEnvironmentDeleted = 4004;
@@ -50,6 +50,10 @@ enum NanoFlagsErrorCode {
   signature,
   engine,
   environmentDeleted,
+
+  /// A validly signed configuration was refused because its revision is older than one this client already verified
+  /// for the environment (a replayed or stale response). The configuration in use stays.
+  rollback,
 
   /// A shadow bundle (the draft of a change waiting for approval) was ignored. Nothing changes for the app.
   shadow,

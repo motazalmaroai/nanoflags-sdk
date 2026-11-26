@@ -367,9 +367,13 @@ describe("live transport — signature verification", () => {
     ws.message({ ...genuine, signature: undefined });
     await errors.count(4);
     await reconsulted; // the verified path was consulted
+    // Each rejection made the client `stale` (it cannot use what it was sent); the verified HTTP path confirms r3.
+    expect(c.lastError).toMatchObject({ code: "BUNDLE_REJECTED", reason: "signature" });
+    await c.refresh();
 
     expect(c.revision).toBe(3);
     expect(c.status).toBe("ready");
+    expect(c.lastError).toBeNull();
     expect(c.number("max-items", 0)).toBe(20);
     expect(updates.items).toHaveLength(0);
     expect(errors.items).toHaveLength(4);
@@ -625,5 +629,100 @@ describe("idle service report", () => {
     await c.ready();
     await vi.advanceTimersByTimeAsync(60_000);
     expect(edge.count("/v1/events")).toBe(3); // 10 s, 30 s, 50 s
+  });
+});
+
+describe("live transport — rollback protection (K1)", () => {
+  async function setup() {
+    const signer = await makeSigner();
+    let served = await signedResponse(signer, makeBundle(5));
+    let release: (() => void) | null = null;
+    let hold = false;
+    const routes = mockRoutes({
+      "/v1/bundle": async () => {
+        if (hold) await new Promise<void>((r) => (release = r));
+        return served;
+      },
+    });
+    const c = client({ fetch: routes.fetch, verify: { publicKeys: [signer.publicJwk], require: true } });
+    const errors = record<NanoFlagsError>(c, "error");
+    const updates = record<UpdateEvent>(c, "update");
+    await c.ready();
+    await tick();
+    FakeSocket.last.open();
+    return {
+      signer,
+      c,
+      errors,
+      updates,
+      routes,
+      serve: async (b: Bundle) => void (served = await signedResponse(signer, b)),
+      holdNext: () => void (hold = true),
+      release: () => {
+        hold = false;
+        release?.();
+      },
+    };
+  }
+
+  it("a validly signed older push than a pushed revision is refused and reported; the HTTP path then confirms the current one", async () => {
+    const t = await setup();
+    FakeSocket.last.message(await pushMessage(makeBundle(6), { signer: t.signer }));
+    await t.updates.count(2);
+    await t.serve(makeBundle(6));
+    // e.g. a replayed `hello` for r5 on the same socket.
+    FakeSocket.last.message(await pushMessage(makeBundle(5), { t: "hello", signer: t.signer }));
+    await t.errors.count(1);
+    expect(t.errors.items[0]!.code).toBe("rollback");
+    expect(t.errors.items[0]!.errorCode).toBe("BUNDLE_REJECTED");
+    expect(t.c.revision).toBe(6);
+    await t.c.refresh();
+    expect(t.c.status).toBe("ready");
+    expect(t.updates.items.map((u) => u.revision)).toEqual([5, 6]);
+  });
+
+  it("a forged older push (bad signature) is reported as `signature`, not adopted", async () => {
+    const t = await setup();
+    const other = await makeSigner();
+    FakeSocket.last.message(await pushMessage(makeBundle(4), { signer: other }));
+    await t.errors.count(1);
+    expect(t.errors.items[0]!.code).toBe("signature");
+    expect(t.c.revision).toBe(5);
+  });
+
+  it("an HTTP answer older than a revision pushed a moment ago (KV not updated yet) is dropped silently: no error, still ready", async () => {
+    const t = await setup();
+    FakeSocket.last.message(await pushMessage(makeBundle(6), { signer: t.signer }));
+    await t.updates.count(2);
+    await t.c.refresh(); // still serves the signed r5
+    expect(t.c.revision).toBe(6);
+    expect(t.c.status).toBe("ready");
+    expect(t.errors.items).toEqual([]);
+  });
+
+  it("… but once the grace window (2 min) has passed, the same older HTTP answer is reported as a rollback", async () => {
+    const t = await setup();
+    FakeSocket.last.message(await pushMessage(makeBundle(6), { signer: t.signer }));
+    await t.updates.count(2);
+    const later = Date.now() + 121_000;
+    vi.spyOn(Date, "now").mockReturnValue(later);
+    await t.c.refresh();
+    expect(t.c.revision).toBe(6);
+    expect(t.errors.items.map((e) => e.code)).toEqual(["rollback"]);
+    expect(t.c.status).toBe("stale");
+  });
+
+  it("an HTTP answer requested before a push was adopted is dropped silently", async () => {
+    const t = await setup();
+    t.holdNext();
+    const slow = t.c.refresh();
+    await settle();
+    FakeSocket.last.message(await pushMessage(makeBundle(6), { signer: t.signer }));
+    await t.updates.count(2);
+    t.release();
+    await slow;
+    expect(t.c.revision).toBe(6);
+    expect(t.c.status).toBe("ready");
+    expect(t.errors.items).toEqual([]);
   });
 });

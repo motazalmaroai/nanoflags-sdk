@@ -108,7 +108,7 @@ describe("shadow evaluation", () => {
     client.boolean("new-checkout", false); // unchanged by the draft: not shadowed
     await client.flush();
     const body = edge.last("/v1/events")!.body as { sdk: string };
-    expect(body.sdk).toBe("react-native/0.4.1");
+    expect(body.sdk).toBe("react-native/0.4.2");
     expect(shadowOf(body)).toEqual({
       sessionId: SESSION,
       checksum: DRAFT,

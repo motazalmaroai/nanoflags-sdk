@@ -160,7 +160,11 @@ void main() {
       expect(c.revision, 1);
       expect(c.boolVariation('checkout', false), isTrue);
       expect(errors.single.code, NanoFlagsErrorCode.signature);
-      expect(c.status, NanoFlagsStatus.ready); // a rejected update changes nothing
+      expect(c.status, NanoFlagsStatus.stale); // the client knows a newer revision exists that it cannot use
+      edge.bundleMode = 'signed';
+      await c.refresh();
+      expect(c.revision, 2);
+      expect(c.status, NanoFlagsStatus.ready);
     });
 
     test('a bundle signed with a key that is not trusted is refused', () async {

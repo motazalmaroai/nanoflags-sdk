@@ -108,7 +108,7 @@ createClient({
   coSignerKeys?: JsonWebKey[],     // customer co-signing public keys; updates without a valid co-signature are refused
   allowEmergencyWithoutCosign?: boolean, // true: kill-switch revisions that only turn flags off need no co-signature
   crypto?: SignatureCrypto,        // default: bundled pure-JS SHA-256 / Ed25519
-  userAgent?: string,              // default "nanoflags-react-native/0.4.1"
+  userAgent?: string,              // default "nanoflags-react-native/0.4.2"
   fetch?, webSocket?, xmlHttpRequest?, // default: the React Native globals
 })
 ```
@@ -204,7 +204,7 @@ createClient({ sdkKey, storage: { getItem: (k) => mmkv.getString(k) ?? null, set
 
 ## Telemetry
 
-As in every NanoFlags SDK: a service report (`sdk: "react-native/0.4.1"`, the revision in use) and a sample (default
+As in every NanoFlags SDK: a service report (`sdk: "react-native/0.4.2"`, the revision in use) and a sample (default
 10 %) of evaluations with the flag, value, reason and revision. **Context values are never sent** — only the names
 of the attributes the flag's rules use and their types (e.g. `{ "plan": "string" }`). `events: { sampleRate }` tunes
 it, `events: false` turns it off. Telemetry is flushed when the app goes to the background.

@@ -13,6 +13,8 @@ public enum ErrorCode {
     ENVIRONMENT_DELETED("environment_deleted"),
     /** A test-session lookup failed; the session evaluator falls back to normal evaluation. */
     SESSION("session"),
+    /** A bundle was refused because its revision is older than one this client already verified. */
+    ROLLBACK("rollback"),
     NOT_READY("not_ready");
 
     private final String wire;

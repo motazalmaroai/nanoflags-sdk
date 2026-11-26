@@ -21,7 +21,7 @@ import (
 )
 
 // SDKVersion is the version of this SDK, reported to the edge as "go/<version>".
-const SDKVersion = "0.4.1"
+const SDKVersion = "0.4.2"
 
 // SupportedEngineVersion is the newest bundle format (`bundle.engine`) this SDK evaluates.
 // Newer bundles are refused; the configuration in use stays.
@@ -182,6 +182,10 @@ type Client struct {
 	liveConn           *websocket.Conn
 	streamTriggered    bool
 	lastSyncAt         time.Time
+	// floor is the newest revision adopted after its signature verified (rollback protection);
+	// verifiedSeq counts such adoptions. Only verified revisions count.
+	floor       *verifiedFloor
+	verifiedSeq int64
 
 	kick    chan struct{}
 	resched chan struct{}
@@ -220,6 +224,7 @@ func New(sdkKey string, opts ...Option) (*Client, error) {
 	for _, o := range opts {
 		o(&cfg)
 	}
+	cfg.baseURL = normalizeBaseURL(cfg.baseURL)
 	if strings.TrimSpace(sdkKey) == "" {
 		return nil, newError(ErrConfig, "an SDK key is required")
 	}
@@ -407,6 +412,16 @@ func engineError(b *engine.Bundle) *Error {
 	return newError(ErrEngine, "bundle r%d needs evaluation engine %s; this SDK supports up to %d. Upgrade the NanoFlags Go SDK. The configuration in use is unchanged.", b.Revision(), e, engine.Version)
 }
 
+// updateRejected reports an update that was refused (verification, rollback, invalid push): the
+// configuration in use stays, but the client now knows it is not on the current revision, so a
+// loaded client turns stale until a bundle verifies or the edge confirms the one in use.
+func (c *Client) updateRejected(err error) {
+	if c.snap.Load() != nil {
+		c.setStatus(StatusStale)
+	}
+	c.emitError(err)
+}
+
 func (c *Client) emitError(err error) {
 	c.log.Debug("nanoflags", "error", err)
 	c.listeners.emitError(err)
@@ -541,10 +556,14 @@ func (c *Client) syncNow(ctx context.Context, fromStream bool) error {
 		c.failures++
 	}
 	c.mu.Unlock()
-	switch ne.Code {
-	case ErrEngine, ErrSignature:
-		// A rejected update changes nothing: same configuration, same status.
+	switch {
+	case ne.Code == ErrEngine || ne.unsigned:
+		// Status unchanged (the error is still reported): an unsupported engine lasts until the SDK
+		// is upgraded, and the edge's own unsigned answer means the publisher is still signing the
+		// new revision.
 	default:
+		// A rejected update (signature, rollback, ...) keeps the configuration in use, which is now
+		// known not to be current: stale until a bundle verifies or the edge confirms it.
 		if ne.Code == ErrUnauthorized {
 			c.dropLive()
 		}
@@ -557,6 +576,7 @@ func (c *Client) syncNow(ctx context.Context, fromStream bool) error {
 }
 
 func (c *Client) syncOnce(ctx context.Context, transport Transport) error {
+	requestedAt := c.verifiedSeqNow()
 	ctx, cancel := context.WithTimeout(ctx, c.cfg.requestTimeout)
 	defer cancel()
 	req, err := c.newRequest(ctx, http.MethodGet, "/v1/bundle", nil)
@@ -606,11 +626,19 @@ func (c *Client) syncOnce(ctx context.Context, transport Transport) error {
 	if err := c.checkSignature(ctx, res.Header, text, body, next); err != nil {
 		return err
 	}
+	c.adoptMu.Lock()
+	defer c.adoptMu.Unlock()
+	// Rollback / replay: never adopt a revision older than one already verified (signed or not).
+	// A copy the edge marks as stale keeps its own handling below.
+	if c.verifier != nil && !servedStale && c.belowFloor(bundle.Revision()) {
+		if err := c.rollbackError(bundle.Revision(), requestedAt, adoptedHTTP); err != nil {
+			return err
+		}
+		return nil // ordering race: dropped silently
+	}
 	if !bundle.SupportsEngine() {
 		return engineError(bundle)
 	}
-	c.adoptMu.Lock()
-	defer c.adoptMu.Unlock()
 	cur = c.snap.Load()
 	// The edge is serving its last-known-good copy: never go backwards because of it.
 	if servedStale && cur != nil && cur.bundle.Revision() >= bundle.Revision() {
@@ -623,6 +651,9 @@ func (c *Client) syncOnce(ctx context.Context, transport Transport) error {
 	c.mu.Unlock()
 	if cur != nil && bundle.Revision() < liveRevision && cur.bundle.Revision() >= liveRevision {
 		return nil
+	}
+	if next.sig != nil {
+		c.noteVerified(next.sig, adoptedHTTP)
 	}
 	c.adopt(next, statusFor(servedStale), SourceNetwork, transport, nil)
 	c.persist(next)
@@ -648,7 +679,9 @@ func (c *Client) checkSignature(ctx context.Context, h http.Header, text []byte,
 	}
 	if h.Get("X-NanoFlags-Signed") != "true" {
 		if v.require {
-			return reject("it is not signed (the edge is still distributing it) and unsigned bundles are refused; fetching again shortly.")
+			e := reject("it is not signed (the edge is still distributing it) and unsigned bundles are refused; fetching again shortly.").(*Error)
+			e.unsigned = true
+			return e
 		}
 		return nil
 	}
@@ -779,6 +812,10 @@ func (c *Client) restore() {
 	defer c.adoptMu.Unlock()
 	if cur := c.snap.Load(); cur != nil && cur.bundle.Revision() >= bundle.Revision() {
 		return
+	}
+	// The stored copy is the newest this client verified before the restart: an older answer must not replace it.
+	if next.sig != nil {
+		c.noteVerified(next.sig, adoptedStore)
 	}
 	// A restored bundle is usable but not known to be current: stale until the edge confirms it.
 	c.adopt(next, StatusStale, SourceStore, TransportPoll, nil)

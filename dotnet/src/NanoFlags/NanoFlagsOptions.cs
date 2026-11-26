@@ -19,6 +19,20 @@ namespace NanoFlags
         /// </summary>
         public static IReadOnlyList<Jwk> OfficialSigningKeys { get; } = new[] { Jwk.Ed25519("wQu1EsaE-yTjqpUbibGyBrajy3IiRb7LyaiqeYRxG4U", "k1") };
 
+        /// <summary>
+        /// <c>https://EDGE.nanoflags.io:443/</c>, a trailing dot or trailing slashes are the official edge (<see cref="OfficialEdgeUrl"/>);
+        /// anything else (another host, another scheme or port, a path, user info, a query) is left as given (trailing slashes removed).
+        /// </summary>
+        internal static string NormalizeBaseUrl(string? raw)
+        {
+            var trimmed = (raw ?? "").TrimEnd('/');
+            if (trimmed.IndexOfAny(new[] { '@', '?', '#' }) >= 0) return trimmed;
+            if (!Uri.TryCreate(trimmed, UriKind.Absolute, out var u)) return trimmed;
+            bool official = u.Scheme == Uri.UriSchemeHttps && u.Port == 443 && (u.AbsolutePath == "/" || u.AbsolutePath.Length == 0)
+                && string.Equals(u.Host.TrimEnd('.'), "edge.nanoflags.io", StringComparison.OrdinalIgnoreCase);
+            return official ? OfficialEdgeUrl : trimmed;
+        }
+
         /// <summary>The edge (default <see cref="OfficialEdgeUrl"/>). Signature verification is on by default only for the official edge.</summary>
         public string BaseUrl { get; set; } = OfficialEdgeUrl;
 

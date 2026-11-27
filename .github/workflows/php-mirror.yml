@@ -32,7 +32,7 @@ jobs:
           - prefix: php/openfeature-provider
             repo: motazalmaroai/nanoflags-php-openfeature
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
           # The push must use PHP_MIRROR_TOKEN; a persisted GITHUB_TOKEN header would override it (403 on the mirror).

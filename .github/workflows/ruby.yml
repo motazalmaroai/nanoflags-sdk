@@ -32,8 +32,8 @@ jobs:
       run:
         working-directory: ruby/nanoflags
     steps:
-      - uses: actions/checkout@v4
-      - uses: ruby/setup-ruby@v1
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ruby/setup-ruby@145243922b4465b78e04dd66294782c7de45901f # v1
         with:
           ruby-version: ${{ matrix.ruby }}
           bundler-cache: true
@@ -56,8 +56,8 @@ jobs:
       run:
         working-directory: ruby/nanoflags-openfeature
     steps:
-      - uses: actions/checkout@v4
-      - uses: ruby/setup-ruby@v1
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ruby/setup-ruby@145243922b4465b78e04dd66294782c7de45901f # v1
         with:
           ruby-version: ${{ matrix.ruby }}
           bundler-cache: true
@@ -79,8 +79,8 @@ jobs:
     env:
       NANOFLAGS_LIVE: "1"
     steps:
-      - uses: actions/checkout@v4
-      - uses: ruby/setup-ruby@v1
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ruby/setup-ruby@145243922b4465b78e04dd66294782c7de45901f # v1
         with:
           ruby-version: "3.3"
           bundler-cache: true

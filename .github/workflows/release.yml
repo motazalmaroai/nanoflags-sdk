@@ -61,7 +61,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Verify the release commit is on main
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        run: |
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$GITHUB_SHA is not reachable from main; releases are built from commits on main only."
+            exit 1
+          fi
 
       - name: Resolve package
         id: pkg
@@ -111,7 +121,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "Releasing $name@$version from $dir (dist-tag $dist_tag)"
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
@@ -139,7 +149,7 @@ jobs:
             exit 1
           fi
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         if: steps.npm.outputs.published == 'false'
 
       - name: Install

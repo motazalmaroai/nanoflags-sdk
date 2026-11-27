@@ -1,0 +1,28 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      npm-minor-and-patch:
+        update-types: [minor, patch]
+    ignore:
+      - dependency-name: typescript
+        update-types: ["version-update:semver-major"]
+  - package-ecosystem: npm
+    directory: /vscode
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      vscode-minor-and-patch:
+        update-types: [minor, patch]
+    ignore:
+      - dependency-name: typescript
+        update-types: ["version-update:semver-major"]

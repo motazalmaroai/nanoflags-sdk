@@ -12,3 +12,7 @@ coverage/
 .idea/
 npm-debug.log*
 pnpm-debug.log*
+
+# Local tool settings
+.claude/settings.local.json
+.mcp.json

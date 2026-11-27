@@ -40,12 +40,12 @@ jobs:
       run:
         working-directory: terraform
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: terraform/go.mod
           cache-dependency-path: terraform/go.sum
-      - uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
         with:
           terraform_version: ${{ matrix.terraform }}
           terraform_wrapper: false
@@ -68,18 +68,18 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: terraform/go.mod
           cache-dependency-path: terraform/go.sum
       - name: GoReleaser check and snapshot build (unsigned, not published)
-        uses: goreleaser/goreleaser-action@v6
+        uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6
         with:
           version: "~> v2"
           workdir: terraform
           args: release --snapshot --clean --skip=sign,publish
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: terraform-provider-nanoflags-snapshot
           path: terraform/dist/*.zip
@@ -94,11 +94,19 @@ jobs:
     env:
       MIRROR: ${{ vars.TERRAFORM_PROVIDER_REPO || 'nanoflags/terraform-provider-nanoflags' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
           # Pushes to the mirror use TERRAFORM_MIRROR_TOKEN; a persisted GITHUB_TOKEN header would override it.
           persist-credentials: false
+      - name: Verify the release commit is on main
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        run: |
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$GITHUB_SHA is not reachable from main; releases are built from commits on main only."
+            exit 1
+          fi
       - id: plan
         env:
           HAS_SECRETS: ${{ secrets.TERRAFORM_MIRROR_TOKEN != '' && secrets.GPG_PRIVATE_KEY != '' && secrets.GPG_PASSPHRASE != '' }}
@@ -131,7 +139,7 @@ jobs:
             echo "::error::$MIRROR already has v$VERSION"; exit 1
           fi
           git push "$remote" "$sha:refs/tags/v$VERSION"
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         if: steps.plan.outputs.ready == 'true'
         with:
           repository: ${{ env.MIRROR }}
@@ -139,20 +147,20 @@ jobs:
           token: ${{ secrets.TERRAFORM_MIRROR_TOKEN }}
           path: mirror
           fetch-depth: 0
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         if: steps.plan.outputs.ready == 'true'
         with:
           go-version-file: mirror/go.mod
           cache-dependency-path: mirror/go.sum
       - id: gpg
         if: steps.plan.outputs.ready == 'true'
-        uses: crazy-max/ghaction-import-gpg@v6
+        uses: crazy-max/ghaction-import-gpg@e89d40939c28e39f97cf32126055eeae86ba74ec # v6
         with:
           gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
           passphrase: ${{ secrets.GPG_PASSPHRASE }}
       - name: Release to the mirror with GoReleaser
         if: steps.plan.outputs.ready == 'true'
-        uses: goreleaser/goreleaser-action@v6
+        uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6
         with:
           version: "~> v2"
           workdir: mirror

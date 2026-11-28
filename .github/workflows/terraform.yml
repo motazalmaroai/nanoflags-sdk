@@ -40,7 +40,7 @@ jobs:
       run:
         working-directory: terraform
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: terraform/go.mod
@@ -68,7 +68,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: terraform/go.mod
@@ -94,7 +94,7 @@ jobs:
     env:
       MIRROR: ${{ vars.TERRAFORM_PROVIDER_REPO || 'nanoflags/terraform-provider-nanoflags' }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           # Pushes to the mirror use TERRAFORM_MIRROR_TOKEN; a persisted GITHUB_TOKEN header would override it.
@@ -139,7 +139,7 @@ jobs:
             echo "::error::$MIRROR already has v$VERSION"; exit 1
           fi
           git push "$remote" "$sha:refs/tags/v$VERSION"
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: steps.plan.outputs.ready == 'true'
         with:
           repository: ${{ env.MIRROR }}

@@ -5,17 +5,18 @@ name: Auto release
 # first; nothing is published if a test fails. Versions already published are skipped, so re-runs are harmless.
 #
 #   npm      @nanoflags/sdk, @nanoflags/openfeature-provider, @nanoflags/cli, @nanoflags/react-native, @nanoflags/mcp, nanoflags (after the CLI)
-#            -> release.yml (workflow_call), secret NPM_TOKEN, npm provenance. Tagged <short>-v<version> afterwards.
+#            -> release.yml (workflow_call, environment `npm`: secret NPM_TOKEN), npm provenance. Tagged <short>-v<version> afterwards.
 #   Maven    io.nanoflags:nanoflags-{core,android,openfeature} (kotlin/gradle.properties nanoflags.version)
-#            -> signed bundle to the Central Portal (AUTOMATIC). Secrets CENTRAL_TOKEN_USERNAME,
-#            CENTRAL_TOKEN_PASSWORD, GPG_SIGNING_KEY, GPG_SIGNING_PASSWORD. Skipped with a notice until they exist.
+#            -> signed bundle to the Central Portal (AUTOMATIC). Secrets of the environment `maven-central`:
+#            CENTRAL_TOKEN_USERNAME, CENTRAL_TOKEN_PASSWORD, GPG_SIGNING_KEY, GPG_SIGNING_PASSWORD (switch off with the
+#            repository variable MAVEN_RELEASES=false).
 #            Tagged kotlin-v<version> afterwards.
 #   pub.dev  nanoflags, nanoflags_openfeature, nanoflags_flutter
-#            -> pushes the tag dart-<package>-v<version> with the secret RELEASE_TAG_TOKEN (a fine-grained token
+#            -> pushes the tag dart-<package>-v<version> with the secret RELEASE_TAG_TOKEN of the environment `release-tags` (a fine-grained token
 #            limited to this repository, Contents: read and write), which starts release-dart.yml: pub.dev only
 #            accepts OIDC publishing from a tag push, and tags pushed with the workflow token start no workflow.
 #            Skipped with a notice while the package is not on pub.dev yet (the first upload of each package is
-#            manual, a pub.dev rule) or the secret is missing.
+#            manual, a pub.dev rule) or tag releases are switched off (repository variable TAG_RELEASES=false).
 #   Maven    io.nanoflags:nanoflags-java{,-openfeature} (java/gradle.properties nanoflags.version), same secrets and
 #            environment as Kotlin. Tagged java-v<version> afterwards.
 #   NuGet    NanoFlags, NanoFlags.OpenFeature (dotnet/Directory.Build.props VersionPrefix)
@@ -61,8 +62,10 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - id: plan
         env:
-          HAS_MAVEN_SECRETS: ${{ secrets.CENTRAL_TOKEN_USERNAME != '' && secrets.GPG_SIGNING_KEY != '' }}
-          HAS_TAG_TOKEN: ${{ secrets.RELEASE_TAG_TOKEN != '' }}
+          # The Maven and tag-token secrets live in protected environments, which this job cannot see: a repository
+          # variable set to 'false' switches the releases off, otherwise the release jobs run and fail loudly without their secrets.
+          HAS_MAVEN_SECRETS: ${{ vars.MAVEN_RELEASES != 'false' }}
+          HAS_TAG_TOKEN: ${{ vars.TAG_RELEASES != 'false' }}
           NUGET_USER: ${{ vars.NUGET_USER }}
         run: |
           set -euo pipefail
@@ -82,7 +85,7 @@ jobs:
           code=$(curl -s -o /dev/null -w '%{http_code}' "https://repo1.maven.org/maven2/io/nanoflags/nanoflags-core/$mv/nanoflags-core-$mv.pom")
           if [ "$code" = 200 ] || git ls-remote --tags origin "refs/tags/kotlin-v$mv" | grep -q .; then echo "maven $mv: published or released"; echo "maven=false" >> "$GITHUB_OUTPUT"
           elif [ "$HAS_MAVEN_SECRETS" != true ]; then
-            echo "::notice title=Maven Central not set up::io.nanoflags $mv is not on Maven Central; add the Central and GPG secrets to release it (kotlin/PUBLISHING.md)."
+            echo "::notice title=Maven releases switched off::io.nanoflags $mv is not on Maven Central; the repository variable MAVEN_RELEASES is false (kotlin/PUBLISHING.md)."
             echo "maven=false" >> "$GITHUB_OUTPUT"
           else echo "maven $mv: to release"; echo "maven=true" >> "$GITHUB_OUTPUT"; fi
 
@@ -93,7 +96,7 @@ jobs:
             ver_code=$(curl -s -o /dev/null -w '%{http_code}' "https://pub.dev/api/packages/$pkg/versions/$v")
             if [ "$ver_code" = 200 ]; then echo "pub.dev $pkg $v: published"
             elif [ "$pkg_code" != 200 ]; then echo "::notice title=pub.dev first upload needed::$pkg is not on pub.dev yet; its first version is uploaded by hand once (packages/sdk-dart/PUBLISHING.md)."
-            elif [ "$HAS_TAG_TOKEN" != true ]; then echo "::notice title=RELEASE_TAG_TOKEN missing::$pkg $v needs the RELEASE_TAG_TOKEN secret to start release-dart.yml."
+            elif [ "$HAS_TAG_TOKEN" != true ]; then echo "::notice title=Tag releases switched off::$pkg $v needs tag releases (repository variable TAG_RELEASES is false) to start release-dart.yml."
             else echo "pub.dev $pkg $v: to release"; dart_list+=("\"dart-$pkg-v$v\""); fi
           done
           echo "dart=[$(IFS=,; echo "${dart_list[*]}")]" >> "$GITHUB_OUTPUT"
@@ -104,7 +107,7 @@ jobs:
           java_tag=$(git ls-remote --tags origin "refs/tags/java-v$jv" | wc -l)
           if [ "$code" = 200 ]; then echo "maven java $jv: published"; echo "java=false" >> "$GITHUB_OUTPUT"
           elif [ "$java_tag" != 0 ]; then echo "maven java $jv: released (java-v$jv exists; Central can take ~30 min to sync)"; echo "java=false" >> "$GITHUB_OUTPUT"
-          elif [ "$HAS_MAVEN_SECRETS" != true ]; then echo "::notice title=Maven Central not set up::io.nanoflags:nanoflags-java $jv is not on Maven Central."; echo "java=false" >> "$GITHUB_OUTPUT"
+          elif [ "$HAS_MAVEN_SECRETS" != true ]; then echo "::notice title=Maven releases switched off::io.nanoflags:nanoflags-java $jv is not on Maven Central; MAVEN_RELEASES is false."; echo "java=false" >> "$GITHUB_OUTPUT"
           else echo "maven java $jv: to release"; echo "java=true" >> "$GITHUB_OUTPUT"; fi
 
           gv=$(sed -n 's/^const SDKVersion = "\(.*\)"$/\1/p' go/client.go)
@@ -117,7 +120,7 @@ jobs:
           if [ "$code" = 200 ]; then echo "nuget NanoFlags $dv: published"
           elif [ "$tag_exists" != 0 ]; then echo "nuget NanoFlags $dv: tag dotnet-v$dv exists (release-dotnet.yml handles it)"
           elif [ -z "$NUGET_USER" ]; then echo "::notice title=NUGET_USER missing::NanoFlags $dv needs the repository variable NUGET_USER (nuget.org profile name) for Trusted Publishing."
-          elif [ "$HAS_TAG_TOKEN" != true ]; then echo "::notice title=RELEASE_TAG_TOKEN missing::NanoFlags $dv needs RELEASE_TAG_TOKEN to start release-dotnet.yml."
+          elif [ "$HAS_TAG_TOKEN" != true ]; then echo "::notice title=Tag releases switched off::NanoFlags $dv needs tag releases (TAG_RELEASES is false) to start release-dotnet.yml."
           else echo "nuget NanoFlags $dv: to release"; echo "dotnet_tag=dotnet-v$dv" >> "$GITHUB_OUTPUT"; fi
 
           ruby_list=()
@@ -132,7 +135,7 @@ jobs:
             elif [ "$code" = 404 ]; then echo "::notice title=RubyGems first push needed::$gem is not on rubygems.org yet; push its first version by hand and add the trusted publisher (ruby/PUBLISHING.md)."
             elif [ "$code" != 200 ]; then echo "::warning::rubygems.org answered $code for $gem; not released this time"
             elif [ "$tag_exists" != 0 ]; then echo "rubygems $gem $v: tag $tag exists (release-ruby.yml handles it)"
-            elif [ "$HAS_TAG_TOKEN" != true ]; then echo "::notice title=RELEASE_TAG_TOKEN missing::$gem $v needs RELEASE_TAG_TOKEN to start release-ruby.yml."
+            elif [ "$HAS_TAG_TOKEN" != true ]; then echo "::notice title=Tag releases switched off::$gem $v needs tag releases (TAG_RELEASES is false) to start release-ruby.yml."
             else echo "rubygems $gem $v: to release"; ruby_list+=("\"$tag\""); fi
           done
           echo "ruby=[$(IFS=,; echo "${ruby_list[*]}")]" >> "$GITHUB_OUTPUT"
@@ -151,8 +154,6 @@ jobs:
     uses: ./.github/workflows/release.yml
     with:
       package: ${{ matrix.package }}
-    secrets:
-      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   npm-tags:
     needs: [plan, npm]
@@ -230,6 +231,7 @@ jobs:
     if: needs.plan.outputs.dart != '[]'
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    environment: release-tags
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -299,6 +301,7 @@ jobs:
     if: needs.plan.outputs.dotnet_tag != ''
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    environment: release-tags
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -312,6 +315,7 @@ jobs:
     if: needs.plan.outputs.ruby != '[]'
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    environment: release-tags
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:

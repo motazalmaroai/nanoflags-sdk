@@ -5,7 +5,8 @@ name: PHP mirrors
 # push to main that touches php/. A version is released by dating its CHANGELOG heading ("## 0.1.0 (2026-11-18)"):
 # when that tag (v0.1.0) is missing on the mirror it is created there, and Packagist picks it up through its hook.
 # The SDK mirror is synced and tagged before the provider, whose constraint needs the SDK on Packagist.
-# Secret PHP_MIRROR_TOKEN: a fine-grained token limited to the two mirrors, Contents: read and write.
+# Secret PHP_MIRROR_TOKEN (environment `php-mirror`, deployment branch main): a fine-grained token limited to the two
+# mirrors, Contents: read and write.
 
 on:
   push:
@@ -23,6 +24,7 @@ jobs:
   mirror:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    environment: php-mirror
     strategy:
       max-parallel: 1
       matrix:

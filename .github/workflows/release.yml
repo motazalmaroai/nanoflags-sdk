@@ -15,7 +15,7 @@ name: Release
 # provider release that widens it.
 # Publish the CLI before the `nanoflags` launcher: it depends on that exact CLI version.
 # @nanoflags/engine is private: it is bundled into the SDK and the CLI and never published.
-# Requires the repository secret NPM_TOKEN.
+# Requires the secret NPM_TOKEN of the environment `npm` (deployment branches: main and the tags *-v*).
 
 on:
   push:
@@ -44,9 +44,6 @@ on:
       package:
         required: true
         type: string
-    secrets:
-      NPM_TOKEN:
-        required: false
 
 permissions:
   contents: read
@@ -60,6 +57,7 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    environment: npm
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
